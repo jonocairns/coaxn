@@ -84,6 +84,12 @@ float scaled(float pixels) {
     return pixels * ui_scale();
 }
 
+ImU32 with_alpha(ImU32 color, float multiplier) {
+    ImVec4 value = ImGui::ColorConvertU32ToFloat4(color);
+    value.w *= std::clamp(multiplier, 0.0f, 1.0f);
+    return ImGui::ColorConvertFloat4ToU32(value);
+}
+
 void configure_style() {
     ImGuiStyle& style = ImGui::GetStyle();
 
@@ -200,11 +206,99 @@ void draw_backdrop() {
     }
 }
 
+void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade) {
+    const ImU32 top    = with_alpha(kOverlayScrimTop, fade);
+    const ImU32 bottom = with_alpha(kOverlayScrimBottom, fade);
+    draw_list->AddRectFilledMultiColor(top_left, bottom_right, top, top, bottom, bottom);
+}
+
 void draw_logo(ImDrawList* draw_list, ImVec2 centre, float radius) {
     draw_list->AddCircleFilled(centre, radius, kBackdropMiddle, 48);
     draw_list->AddCircle(centre, radius, kAccent, 48, radius * 0.16f);
     draw_list->AddCircle(centre, radius * 0.58f, fade(kAccent, 0.55f), 40, radius * 0.10f);
     draw_list->AddCircleFilled(centre, radius * 0.20f, kAccentHover, 24);
+}
+
+void draw_play_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color) {
+    // Wider to the right than the base is to the left, which puts the mass of
+    // the triangle over the centre it was handed rather than behind it.
+    const float half = size * 0.5f;
+    draw_list->AddTriangleFilled(ImVec2(centre.x - half * 0.50f, centre.y - half * 0.85f),
+                                 ImVec2(centre.x - half * 0.50f, centre.y + half * 0.85f),
+                                 ImVec2(centre.x + half * 0.90f, centre.y), color);
+}
+
+void draw_pause_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color) {
+    const float half = size * 0.5f;
+    // Wider than a pause glyph usually is. Beside a line of text at the same
+    // height, thin bars read as a stutter in the row rather than as a control.
+    const float bar  = size * 0.26f;
+    const float gap  = size * 0.20f;
+    draw_list->AddRectFilled(ImVec2(centre.x - gap * 0.5f - bar, centre.y - half * 0.85f),
+                             ImVec2(centre.x - gap * 0.5f, centre.y + half * 0.85f),
+                             color, 0.0f);
+    draw_list->AddRectFilled(ImVec2(centre.x + gap * 0.5f, centre.y - half * 0.85f),
+                             ImVec2(centre.x + gap * 0.5f + bar, centre.y + half * 0.85f),
+                             color, 0.0f);
+}
+
+void draw_volume_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color, int waves) {
+    const float half      = size * 0.5f;
+    const float thickness = std::max(size * 0.09f, 1.0f);
+
+    // One polygon rather than a rectangle behind a triangle: the overlay fades
+    // as a whole, and two fills at part opacity show the seam where they meet.
+    const ImVec2 speaker[] = {
+        ImVec2(centre.x - half * 0.95f, centre.y - half * 0.30f),
+        ImVec2(centre.x - half * 0.45f, centre.y - half * 0.30f),
+        ImVec2(centre.x + half * 0.05f, centre.y - half * 0.82f),
+        ImVec2(centre.x + half * 0.05f, centre.y + half * 0.82f),
+        ImVec2(centre.x - half * 0.45f, centre.y + half * 0.30f),
+        ImVec2(centre.x - half * 0.95f, centre.y + half * 0.30f),
+    };
+    draw_list->AddConcavePolyFilled(speaker, IM_ARRAYSIZE(speaker), color);
+
+    if (waves <= 0) {
+        // The cross takes the room the waves would have had, so muted reads at
+        // a glance rather than as a speaker with something small next to it.
+        const float reach = half * 0.42f;
+        const ImVec2 cross(centre.x + half * 0.62f, centre.y);
+        draw_list->AddLine(ImVec2(cross.x - reach, cross.y - reach),
+                           ImVec2(cross.x + reach, cross.y + reach), color, thickness);
+        draw_list->AddLine(ImVec2(cross.x - reach, cross.y + reach),
+                           ImVec2(cross.x + reach, cross.y - reach), color, thickness);
+        return;
+    }
+
+    // Radians, measured from the cone's mouth: a little under a quarter turn
+    // either side of horizontal.
+    for (int wave = 0; wave < waves; ++wave) {
+        draw_list->PathArcTo(ImVec2(centre.x + half * 0.05f, centre.y),
+                             half * (0.45f + 0.33f * static_cast<float>(wave)), -0.85f, 0.85f);
+        draw_list->PathStroke(color, thickness);
+    }
+}
+
+void draw_settings_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color) {
+    const float half      = size * 0.5f;
+    const float thickness = std::max(size * 0.085f, 1.0f);
+    const float knob      = size * 0.15f;
+
+    // Two sliders with their handles at different points along them. A gear at
+    // this size is a smudge, and this reads as adjustment rather than as a
+    // machine part. The rule stops either side of each handle instead of
+    // running under it, for the same reason the speaker is one polygon.
+    const float rows[2][2] = {{-half * 0.44f, -half * 0.24f}, {half * 0.44f, half * 0.34f}};
+    for (const auto& row : rows) {
+        const float y = centre.y + row[0];
+        const float x = centre.x + row[1];
+        draw_list->AddLine(ImVec2(centre.x - half * 0.92f, y), ImVec2(x - knob, y),
+                           color, thickness);
+        draw_list->AddLine(ImVec2(x + knob, y), ImVec2(centre.x + half * 0.92f, y),
+                           color, thickness);
+        draw_list->AddRectFilled(ImVec2(x - knob, y - knob), ImVec2(x + knob, y + knob),
+                                 color, 0.0f);
+    }
 }
 
 }  // namespace coax::app::theme

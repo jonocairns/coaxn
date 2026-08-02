@@ -125,6 +125,7 @@ if(COAX_BUILD_APP)
         src/main.cpp
         src/app/app.cpp
         src/app/theme.cpp
+        src/app/widgets.cpp
         src/app/update_check.cpp
         src/core/channel_index.cpp
         src/xtream/xtream_client.cpp

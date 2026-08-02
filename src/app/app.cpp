@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include "app/theme.hpp"
+#include "app/widgets.hpp"
 #include "util/log.hpp"
 #include "player/recovery_effect_executor.hpp"
 #include "win/credential_store.hpp"
@@ -749,10 +750,26 @@ void App::draw_status_bar() {
     // cross. Long enough that reaching for the volume does not race it.
     constexpr double kIdleSeconds = 2.5;
     constexpr float  kFadeSeconds = 0.22f;
+    // mpv takes volume past unity. The ceiling keeps that headroom and the
+    // track marks where 100 is, rather than pretending the loudest sane
+    // setting is the right-hand end.
+    constexpr int kMaxVolume   = 130;
+    constexpr int kUnityVolume = 100;
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float          height   = ImGui::GetFrameHeightWithSpacing() * 1.4f;
-    const float          top      = viewport->WorkPos.y + viewport->WorkSize.y - height;
+
+    // The row of controls, and the margin around it. Everything in the bar is
+    // placed against these three rather than against the style's spacing: it
+    // is one hand-laid row, not a stack of framed widgets.
+    const float pad = theme::scaled(18.0f);
+    const float row = theme::scaled(30.0f);
+    const float gap = theme::scaled(10.0f);
+
+    // Taller than the row it carries, because the scrim has to reach nothing
+    // at its top edge. A short ramp reads as a band drawn across the picture,
+    // which is the boxed-in look this replaced.
+    const float height = row + pad + theme::scaled(46.0f);
+    const float top    = viewport->WorkPos.y + viewport->WorkSize.y - height;
 
     // The channel list owns its column for its whole height, so the playback
     // overlay begins where that ends. Drawn full width the two overlapped, and
@@ -760,12 +777,14 @@ void App::draw_status_bar() {
     const float left  = viewport->WorkPos.x + (show_browser_ ? browser_width() : 0.0f);
     const float width = viewport->WorkPos.x + viewport->WorkSize.x - left;
 
-    // Held open while the pointer is over the bar or a control is being
-    // dragged, so the volume slider cannot fade out from under the hand
-    // holding it. Held open too when there is no video: over the backdrop it
-    // hides nothing, and a channel has yet to be chosen.
+    // Held open while the pointer is over the bar, a control is being dragged
+    // or the settings menu is up, so nothing can fade out from under the hand
+    // using it. The menu's own state is a frame behind: it belongs to a popup
+    // owned by a window that has not been submitted yet. Held open too when
+    // there is no video — over the backdrop it hides nothing, and a channel
+    // has yet to be chosen.
     const ImGuiIO& io   = ImGui::GetIO();
-    const bool     hold = !video_attached_ || ImGui::IsAnyItemActive() ||
+    const bool     hold = !video_attached_ || overlay_menu_open_ || ImGui::IsAnyItemActive() ||
                           (io.MousePos.y >= top && io.MousePos.x >= left);
     const bool     want = hold || (ImGui::GetTime() - last_pointer_activity_) < kIdleSeconds;
 
@@ -774,62 +793,138 @@ void App::draw_status_bar() {
     if (status_bar_fade_ <= 0.0f) {
         return;
     }
+    const float fade = status_bar_fade_;
 
     ImGui::SetNextWindowPos(ImVec2(left, top));
     ImGui::SetNextWindowSize(ImVec2(width, height));
-    // The background alpha is set rather than multiplied by the style, so the
-    // fade has to be folded in here as well as into the contents.
-    ImGui::SetNextWindowBgAlpha(0.65f * status_bar_fade_);
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, status_bar_fade_);
+    // Kept from before the padding is flattened below, for the settings menu:
+    // that is an ordinary panel and wants the application's ordinary inset.
+    const ImVec2 panel_padding = ImGui::GetStyle().WindowPadding;
+    // No window background and no padding: the surface is the scrim below, and
+    // every item in the bar is positioned by hand. The border has to go to
+    // zero as well as undrawn — NoBackground stops it being painted, but the
+    // window's clip rectangle is still inset by its width, which clipped the
+    // scrim a pixel short and left a bright rule of unscrimmed video down
+    // three of its edges.
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, fade);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 
     ImGui::Begin("##status", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse);
 
-    if (!playing_channel_name_.empty()) {
-        ImGui::Text("%s", playing_channel_name_.c_str());
-        ImGui::SameLine();
-    }
+    ImDrawList*  draw   = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetWindowPos();
+    const ImVec2 corner(origin.x + width, origin.y + height);
+    theme::draw_overlay_scrim(draw, origin, corner, fade);
 
-    const auto& diagnostics = player_.diagnostics();
-    if (diagnostics.paused_for_cache) {
-        ImGui::TextDisabled("| buffering");
-        ImGui::SameLine();
-    }
+    // One row along the bottom edge. Items are centred on this line rather
+    // than sharing a baseline, because a glyph, a rule and a line of text have
+    // nothing in common except their middle.
+    const float middle = corner.y - pad - row * 0.5f;
+    const auto  place  = [middle](float x, float item_height) {
+        ImGui::SetCursorScreenPos(ImVec2(x, middle - item_height * 0.5f));
+    };
 
-    ImGui::TextDisabled("| %s", status_.c_str());
+    // The right-hand group is measured before anything is drawn, so the
+    // channel name can be clipped where the controls begin rather than run
+    // underneath them.
+    const float volume_width = theme::scaled(124.0f);
+    const float group_width  = row + gap * 0.5f + volume_width + gap + row;
+    const float group_left   = corner.x - pad - group_width;
 
-    // The controls are right-aligned by measuring them rather than by a
-    // hand-tuned offset, which is what previously pinned this row to one font
-    // at one scale. The toggle is sized to the wider of its two labels so
-    // pausing does not shuffle everything beside it.
-    const ImGuiStyle& style        = ImGui::GetStyle();
-    const float       slider_width = theme::scaled(96.0f);
-    const float       toggle_width = std::max(ImGui::CalcTextSize("Play").x,
-                                              ImGui::CalcTextSize("Pause").x) +
-                                     style.FramePadding.x * 2.0f;
-    const float       controls =
-        ImGui::GetFrameHeight() + style.ItemInnerSpacing.x +
-        ImGui::CalcTextSize("Super resolution").x + style.ItemSpacing.x +
-        toggle_width + style.ItemSpacing.x + slider_width;
+    float cursor = origin.x + pad;
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - style.WindowPadding.x - controls);
-    if (ImGui::Checkbox("Super resolution", &vsr_enabled_)) {
-        apply_vsr();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(paused_ ? "Play" : "Pause", ImVec2(toggle_width, 0.0f))) {
+    place(cursor, row);
+    if (widgets::icon_button("##playpause",
+                             paused_ ? widgets::Icon::Play : widgets::Icon::Pause, row, fade)) {
         paused_ = !paused_;
         player_.set_paused(paused_);
     }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(slider_width);
-    if (ImGui::SliderInt("##volume", &volume_, 0, 130, "vol %d")) {
-        player_.set_volume(volume_);
+    cursor += row + gap;
+
+    // Clipped rather than wrapped or shortened: a long channel name should run
+    // out where the controls start, not push them along or fold the row in two.
+    const float text_height = ImGui::GetTextLineHeight();
+    ImGui::PushClipRect(ImVec2(cursor, origin.y),
+                        ImVec2(std::max(group_left - gap, cursor + 1.0f), corner.y), true);
+
+    if (!playing_channel_name_.empty()) {
+        place(cursor, text_height);
+        ImGui::TextUnformatted(playing_channel_name_.c_str());
+        cursor += ImGui::GetItemRectSize().x + gap;
     }
 
+    // Beside the name, only what the name does not already say. The old row
+    // printed "| Playing <channel>" next to the channel it was repeating.
+    const auto& diagnostics = player_.diagnostics();
+    place(cursor, text_height);
+    if (status_error_) {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::kError);
+        ImGui::TextUnformatted(status_.c_str());
+        ImGui::PopStyleColor();
+    } else if (diagnostics.paused_for_cache) {
+        ImGui::TextDisabled("Buffering");
+    } else if (paused_) {
+        ImGui::TextDisabled("Paused");
+    }
+
+    ImGui::PopClipRect();
+
+    cursor = group_left;
+
+    place(cursor, row);
+    const widgets::Icon speaker = volume_ == 0            ? widgets::Icon::VolumeMuted
+                                  : volume_ <= kMaxVolume / 2 ? widgets::Icon::VolumeLow
+                                                              : widgets::Icon::VolumeHigh;
+    if (widgets::icon_button("##mute", speaker, row, fade)) {
+        // Mute remembers where the volume was rather than dropping it to zero
+        // and making the way back a drag.
+        if (volume_ > 0) {
+            pre_mute_volume_ = volume_;
+            volume_          = 0;
+        } else {
+            volume_ = pre_mute_volume_;
+        }
+        player_.set_volume(volume_);
+    }
+    cursor += row + gap * 0.5f;
+
+    place(cursor, row);
+    if (widgets::volume_slider("##volume", volume_, kMaxVolume, kUnityVolume,
+                               volume_width, row, fade)) {
+        player_.set_volume(volume_);
+    }
+    cursor += volume_width + gap;
+
+    place(cursor, row);
+    if (widgets::icon_button("##settings", widgets::Icon::Settings, row, fade)) {
+        ImGui::OpenPopup("##overlay-settings");
+    }
+
+    // Super resolution and the diagnostics panel live here rather than in the
+    // row: both are set once and then left alone, and a permanent checkbox
+    // over the picture costs more attention than it is worth. The menu is a
+    // surface of its own, so it opens at full opacity whatever the overlay is
+    // fading towards.
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, panel_padding);
+    if (ImGui::BeginPopup("##overlay-settings")) {
+        if (ImGui::Checkbox("Super resolution", &vsr_enabled_)) {
+            apply_vsr();
+        }
+        ImGui::TextDisabled("Upscales sources smaller than the window");
+        ImGui::Separator();
+        ImGui::MenuItem("Diagnostics", "F1", &show_diagnostics_);
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(2);
+    overlay_menu_open_ = ImGui::IsPopupOpen("##overlay-settings");
+
     ImGui::End();
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(3);
 }
 
 void App::draw_update_banner() {

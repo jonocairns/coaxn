@@ -130,11 +130,18 @@ private:
     bool        vsr_enabled_      = true;
     bool        paused_           = false;
     int         volume_           = 100;
+    // Where the volume was before the speaker was clicked, so unmuting puts it
+    // back instead of leaving the way up to a drag.
+    int         pre_mute_volume_  = 100;
 
     // The playback overlay hides itself once the pointer settles. Held as a
     // fraction rather than a boolean so it crosses rather than blinks.
     double      last_pointer_activity_ = 0.0;
     float       status_bar_fade_       = 1.0f;
+    // Whether the overlay's settings menu was open last frame. The fade is
+    // decided before the window owning that popup is submitted, so the answer
+    // has to be carried over rather than asked for.
+    bool        overlay_menu_open_     = false;
 
     // mpv reports video dimensions asynchronously after a load, so the scale
     // factor has to be recomputed when they arrive rather than at play() time.

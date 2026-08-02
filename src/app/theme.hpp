@@ -66,6 +66,27 @@ inline constexpr ImU32 kAccentHover  = IM_COL32(0x4C, 0x8A, 0xFF, 0xFF);
 inline constexpr ImU32 kAccentActive = IM_COL32(0x27, 0x5F, 0xD0, 0xFF);
 inline constexpr ImU32 kOnAccent     = IM_COL32(0xFF, 0xFF, 0xFF, 0xFF);
 
+// The playback overlay. It sits over the picture rather than over a surface of
+// its own, so it is a ramp into darkness at the bottom of the frame rather
+// than a panel: legible over a bright shot without drawing an edge across it.
+inline constexpr ImU32 kOverlayScrimTop    = IM_COL32(0x02, 0x04, 0x08, 0x00);
+inline constexpr ImU32 kOverlayScrimBottom = IM_COL32(0x02, 0x04, 0x08, 0xDE);
+
+// Frameless controls. An icon carries its own state — brighter under the
+// pointer, over a wash while it is held — because a filled button behind every
+// glyph is more chrome than the row it controls.
+inline constexpr ImU32 kIcon           = IM_COL32(0xC6, 0xCF, 0xDE, 0xFF);
+inline constexpr ImU32 kIconHover      = IM_COL32(0xFF, 0xFF, 0xFF, 0xFF);
+inline constexpr ImU32 kIconWash       = IM_COL32(0xFF, 0xFF, 0xFF, 0x14);
+inline constexpr ImU32 kIconWashActive = IM_COL32(0xFF, 0xFF, 0xFF, 0x26);
+inline constexpr ImU32 kTrack          = IM_COL32(0xFF, 0xFF, 0xFF, 0x33);
+inline constexpr ImU32 kTrackMark      = IM_COL32(0xFF, 0xFF, 0xFF, 0x59);
+
+// The same colour at a fraction of its own opacity. Anything drawn straight
+// into a draw list has to fade itself: the Alpha style variable only reaches
+// widgets, and the overlay is half hand-drawn.
+[[nodiscard]] ImU32 with_alpha(ImU32 color, float multiplier);
+
 // Installs the palette, the spacing and the UI font. Call once, after the
 // ImGui context exists and before the backends are initialised.
 void configure_style();
@@ -80,8 +101,26 @@ void set_dpi_scale(float scale);
 // fill would hide it.
 void draw_backdrop();
 
+// The ramp the playback overlay sits on: nothing at the top edge, near-black
+// at the bottom. Transparent, unlike the backdrop, because there is video
+// behind it — it buys legibility for the row without hiding the picture.
+void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade);
+
 // The coax mark: a connector seen end on. Drawn rather than loaded so it
 // inherits the accent colour and costs no texture.
 void draw_logo(ImDrawList* draw_list, ImVec2 centre, float radius);
+
+// ---------------------------------------------------------------------------
+// The overlay's iconography, drawn for the same reasons as the mark. The UI
+// font is whatever the system happens to provide and cannot be relied on for
+// symbols, and a drawn glyph takes the colour and the fade it is handed.
+// `size` is the box each one fills, `centre` its middle.
+// ---------------------------------------------------------------------------
+
+void draw_play_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
+void draw_pause_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
+// `waves` is how many arcs stand beside the cone; zero draws the muted cross.
+void draw_volume_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color, int waves);
+void draw_settings_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
 
 }  // namespace coax::app::theme
