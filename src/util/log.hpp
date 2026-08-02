@@ -5,6 +5,9 @@
 #include <string_view>
 #include <vector>
 
+// Callers redact through these before logging; see the note on write().
+#include "util/redact.hpp"
+
 namespace coax::log {
 
 enum class Level { Debug, Info, Warn, Error };
@@ -36,9 +39,5 @@ template <typename... Args>
 void debug(std::format_string<Args...> fmt, Args&&... args) {
     write(Level::Debug, std::format(fmt, std::forward<Args>(args)...));
 }
-
-// Replaces the credential segments of an Xtream URL so it is safe to log.
-// http://host:port/live/user/pass/123.ts -> http://host:port/live/***/***/123.ts
-std::string redact_stream_url(std::string_view url);
 
 }  // namespace coax::log
