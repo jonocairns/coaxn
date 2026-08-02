@@ -5,9 +5,13 @@
 #include <imgui_impl_win32.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <chrono>
+#include <cmath>
 #include <format>
+#include <string_view>
 
+#include "app/theme.hpp"
 #include "util/log.hpp"
 #include "player/recovery_effect_executor.hpp"
 #include "win/credential_store.hpp"
@@ -61,6 +65,10 @@ bool App::initialize(std::string& error) {
         return false;
     }
 
+    // Before anything is measured or drawn: every size in the style, and every
+    // hand-written one through theme::scaled, depends on it.
+    theme::set_dpi_scale(window_.dpi_scale());
+
     if (!ImGui_ImplWin32_Init(window_.handle())) {
         error = "ImGui Win32 backend failed to initialize";
         return false;
@@ -87,14 +95,19 @@ bool App::initialize(std::string& error) {
     // swap chain later.
     player_.on_swapchain([this](void* swapchain) {
         composition_.set_video_content(static_cast<IUnknown*>(swapchain));
+        video_attached_ = swapchain != nullptr;
     });
 
     window_.on_resize([this](int width, int height) { handle_resize(width, height); });
+    // Registered only now that everything they touch exists: both fire from
+    // the window procedure, which runs as soon as the window is created.
+    window_.on_paint([this] { draw_frame(); });
+    window_.on_dpi_changed([this](float scale) { theme::set_dpi_scale(scale); });
 
     if (!direct_media_.empty()) {
         stage_                = Stage::Browsing;
         playing_channel_name_ = "Direct media";
-        status_               = "Direct media";
+        set_status("Direct media");
         generation_ = core::Generation{generation_.value() + 1};
         supervisor_.dispatch(core::ChannelRequested{generation_});
         begin_health_load();
@@ -151,7 +164,7 @@ void App::load_saved_portal() {
     portal_url_ = stored.substr(0, first);
     username_   = stored.substr(first + 1, second - first - 1);
     password_   = stored.substr(second + 1);
-    status_     = "Saved portal loaded";
+    set_status("Saved portal loaded");
     log::info("Restored saved portal for {}", portal_url_);
 }
 
@@ -181,13 +194,13 @@ void App::begin_connect() {
 
     if (credentials.base_url.empty() || credentials.username.empty() ||
         credentials.password.empty()) {
-        status_ = "Portal URL, username and password are all required";
+        set_status("Portal URL, username and password are all required", true);
         return;
     }
 
     credentials_ = credentials;
     stage_       = Stage::Connecting;
-    status_      = "Connecting...";
+    set_status("Connecting...");
     connect_done_.store(false, std::memory_order_release);
 
     if (connect_thread_.joinable()) {
@@ -227,7 +240,7 @@ void App::finish_connect() {
 
     if (!error.empty()) {
         stage_  = Stage::Login;
-        status_ = error;
+        set_status(error, true);
         log::error("Connect failed: {}", error);
         return;
     }
@@ -235,7 +248,7 @@ void App::finish_connect() {
     client_ = std::make_unique<xtream::Client>(credentials_);
     channels_.reset(std::move(catalog.categories), std::move(catalog.channels));
     stage_  = Stage::Browsing;
-    status_ = std::format("{} channels", channels_.channel_count());
+    set_status(std::format("{} channels", channels_.channel_count()));
     save_portal();
 }
 
@@ -260,7 +273,7 @@ void App::play(const core::Channel& channel) {
     // therefore resolved with the load rather than guessed from HTTP(S).
     player_.play(client_->stream_url(channel), generation_, core::RecoveryTransport::MpegTs);
     apply_vsr();
-    status_ = std::format("Playing {}", channel.name);
+    set_status(std::format("Playing {}", channel.name));
 }
 
 void App::begin_health_load() {
@@ -461,9 +474,10 @@ void App::on_supervisor_state_changed(const core::SupervisorState& state) {
     if (state.name == core::SupervisorStateName::Steady) {
         player_.apply_buffer_phase(state.generation, core::BufferPhase::Steady);
     } else if (state.name == core::SupervisorStateName::Failed) {
-        status_ = state.failure
-            ? std::format("Playback failed: {}", core::to_string(*state.failure))
-            : "Playback failed";
+        set_status(state.failure
+                       ? std::format("Playback failed: {}", core::to_string(*state.failure))
+                       : "Playback failed",
+                   true);
     }
 }
 
@@ -515,59 +529,139 @@ void App::apply_vsr() {
 
 void App::draw_login() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float card_width = std::min(viewport->WorkSize.x - theme::scaled(48.0f),
+                                      theme::scaled(430.0f));
+    const float padding    = theme::scaled(26.0f);
+
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(720.0f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(card_width, 0.0f), ImGuiCond_Always);
 
-    ImGui::Begin("Connect to provider", nullptr,
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(padding, padding));
+    ImGui::Begin("##login", nullptr,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoCollapse);
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
+                     ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar();
 
+    // Mark and wordmark share a line: the mark is sized from the title's own
+    // height, so the two stay aligned whatever the scale is.
+    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.9f);
+    const float  mark   = ImGui::GetFontSize();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    theme::draw_logo(ImGui::GetWindowDrawList(),
+                     ImVec2(origin.x + mark * 0.5f, origin.y + mark * 0.5f), mark * 0.46f);
+    ImGui::Dummy(ImVec2(mark, mark));
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Coax");
+    ImGui::PopFont();
+
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
     ImGui::TextWrapped(
-        "Paste a full Xtream portal link (player_api.php or get.php) and the "
-        "username and password are filled in automatically, or enter the "
-        "server URL and credentials separately.");
-    ImGui::Separator();
+        "Paste a full Xtream portal link (player_api.php or get.php) to fill the "
+        "username and password in automatically, or enter them separately.");
+    ImGui::PopStyleColor();
 
-    TextField url(portal_url_);
-    if (ImGui::InputText("Portal URL", url.buffer, sizeof(url.buffer))) {
-        portal_url_ = url.buffer;
-    }
+    ImGui::Dummy(ImVec2(0.0f, theme::scaled(6.0f)));
 
-    TextField user(username_);
-    if (ImGui::InputText("Username", user.buffer, sizeof(user.buffer))) {
-        username_ = user.buffer;
-    }
+    // Labels sit above their fields rather than beside them: full-width inputs
+    // leave room for the long URLs providers hand out, and the three rows read
+    // as one column instead of two ragged ones.
+    bool submit = false;
+    auto field  = [&](const char* label, const char* hint, std::string& value,
+                     ImGuiInputTextFlags flags) {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
+        ImGui::TextUnformatted(label);
+        ImGui::PopStyleColor();
 
-    TextField pass(password_);
-    if (ImGui::InputText("Password", pass.buffer, sizeof(pass.buffer),
-                         ImGuiInputTextFlags_Password)) {
-        password_ = pass.buffer;
-    }
+        TextField buffer(value);
+        ImGui::PushID(label);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        // Enter submits, so the return value cannot double as the edited flag;
+        // the copy back is unconditional and is a no-op when nothing changed.
+        submit |= ImGui::InputTextWithHint("##field", hint, buffer.buffer, sizeof(buffer.buffer),
+                                           flags | ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::PopID();
+        value = buffer.buffer;
+    };
 
-    ImGui::Spacing();
+    field("Portal URL", "https://provider.example.com:8080", portal_url_, 0);
+    field("Username", "", username_, 0);
+    field("Password", "", password_, ImGuiInputTextFlags_Password);
+
+    ImGui::Dummy(ImVec2(0.0f, theme::scaled(6.0f)));
 
     const bool connecting = stage_ == Stage::Connecting;
     ImGui::BeginDisabled(connecting);
-    if (ImGui::Button(connecting ? "Connecting..." : "Connect", ImVec2(160.0f, 0.0f))) {
-        begin_connect();
+    ImGui::PushStyleColor(ImGuiCol_Button, theme::kAccent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme::kAccentHover);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme::kAccentActive);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kOnAccent);
+    if (ImGui::Button(connecting ? "Connecting..." : "Connect",
+                      ImVec2(-FLT_MIN, theme::scaled(38.0f)))) {
+        submit = true;
     }
+    ImGui::PopStyleColor(4);
     ImGui::EndDisabled();
 
-    ImGui::SameLine();
+    if (submit && !connecting) {
+        begin_connect();
+    }
+
+    // An indeterminate sweep under the button. The catalog fetch has no
+    // progress to report, so this says "still working" and claims nothing else.
+    const ImVec2 bar_min = ImGui::GetItemRectMin();
+    const ImVec2 bar_max = ImGui::GetItemRectMax();
+    if (connecting) {
+        const float width = bar_max.x - bar_min.x;
+        const float span  = width * 0.3f;
+        const float phase = static_cast<float>(std::fmod(ImGui::GetTime(), 1.4) / 1.4);
+        const float left  = bar_min.x + (width + span) * phase - span;
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            ImVec2(std::max(left, bar_min.x), bar_max.y - theme::scaled(3.0f)),
+            ImVec2(std::min(left + span, bar_max.x), bar_max.y),
+            theme::kOnAccent);
+    }
+
+    if (!status_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, status_error_ ? theme::kError : theme::kTextDim);
+        ImGui::TextWrapped("%s", status_.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    // Secondary and destructive, so it is a ghost button rather than a peer of
+    // Connect: same weight for both would make forgetting the portal as easy
+    // to hit as using it.
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    // No horizontal frame padding, so the label starts on the same column as
+    // the labels and the status line above it rather than a few pixels in.
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                        ImVec2(0.0f, ImGui::GetStyle().FramePadding.y));
     if (ImGui::Button("Forget saved portal")) {
         win::CredentialStore::clear();
         portal_url_.clear();
         username_.clear();
         password_.clear();
-        status_ = "Saved portal cleared";
+        set_status("Saved portal cleared");
     }
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
 
-    if (!status_.empty()) {
-        ImGui::Spacing();
-        ImGui::TextWrapped("%s", status_.c_str());
-    }
+    ImGui::SameLine();
+    const char* version = "v" COAX_VERSION;
+    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - padding - ImGui::CalcTextSize(version).x);
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
+    ImGui::TextUnformatted(version);
+    ImGui::PopStyleColor();
 
     ImGui::End();
+}
+
+float App::browser_width() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    return std::min(viewport->WorkSize.x * 0.34f, theme::scaled(430.0f));
 }
 
 void App::draw_browser() {
@@ -576,7 +670,7 @@ void App::draw_browser() {
     }
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float          width    = std::min(viewport->WorkSize.x * 0.34f, 620.0f);
+    const float          width    = browser_width();
 
     ImGui::SetNextWindowPos(viewport->WorkPos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(width, viewport->WorkSize.y), ImGuiCond_Always);
@@ -609,12 +703,21 @@ void App::draw_browser() {
 
     ImGui::BeginChild("channel-scroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
 
+    // Every group holding a match is opened while a search is running, and the
+    // frame the search clears closes them again. Outside those two cases the
+    // open state is left alone. Forcing it unconditionally — which is what
+    // this did — re-closed a header on the frame after the click that opened
+    // it, so the unfiltered list could not be expanded at all.
+    const bool searching   = !search_.empty();
+    const bool force_state = searching || search_was_active_;
+    search_was_active_     = searching;
+
     for (const auto& group : groups) {
         const char* label = group.category ? group.category->name.c_str() : "Uncategorised";
 
-        // With an active search the matches are few, so opening the groups
-        // saves a click; unfiltered the list stays collapsed and navigable.
-        ImGui::SetNextItemOpen(!search_.empty(), ImGuiCond_Always);
+        if (force_state) {
+            ImGui::SetNextItemOpen(searching, ImGuiCond_Always);
+        }
         if (!ImGui::CollapsingHeader(label)) {
             continue;
         }
@@ -642,13 +745,42 @@ void App::draw_browser() {
 }
 
 void App::draw_status_bar() {
+    // Idle time before the overlay starts to go, and how long it takes to
+    // cross. Long enough that reaching for the volume does not race it.
+    constexpr double kIdleSeconds = 2.5;
+    constexpr float  kFadeSeconds = 0.22f;
+
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float          height   = ImGui::GetFrameHeightWithSpacing() * 1.4f;
+    const float          top      = viewport->WorkPos.y + viewport->WorkSize.y - height;
 
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x,
-                                   viewport->WorkPos.y + viewport->WorkSize.y - height));
-    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, height));
-    ImGui::SetNextWindowBgAlpha(0.65f);
+    // The channel list owns its column for its whole height, so the playback
+    // overlay begins where that ends. Drawn full width the two overlapped, and
+    // the status text was printed across the bottom of the list.
+    const float left  = viewport->WorkPos.x + (show_browser_ ? browser_width() : 0.0f);
+    const float width = viewport->WorkPos.x + viewport->WorkSize.x - left;
+
+    // Held open while the pointer is over the bar or a control is being
+    // dragged, so the volume slider cannot fade out from under the hand
+    // holding it. Held open too when there is no video: over the backdrop it
+    // hides nothing, and a channel has yet to be chosen.
+    const ImGuiIO& io   = ImGui::GetIO();
+    const bool     hold = !video_attached_ || ImGui::IsAnyItemActive() ||
+                          (io.MousePos.y >= top && io.MousePos.x >= left);
+    const bool     want = hold || (ImGui::GetTime() - last_pointer_activity_) < kIdleSeconds;
+
+    const float step = io.DeltaTime / kFadeSeconds;
+    status_bar_fade_ = std::clamp(status_bar_fade_ + (want ? step : -step), 0.0f, 1.0f);
+    if (status_bar_fade_ <= 0.0f) {
+        return;
+    }
+
+    ImGui::SetNextWindowPos(ImVec2(left, top));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+    // The background alpha is set rather than multiplied by the style, so the
+    // fade has to be folded in here as well as into the contents.
+    ImGui::SetNextWindowBgAlpha(0.65f * status_bar_fade_);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, status_bar_fade_);
 
     ImGui::Begin("##status", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
@@ -667,22 +799,37 @@ void App::draw_status_bar() {
 
     ImGui::TextDisabled("| %s", status_.c_str());
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - 420.0f);
+    // The controls are right-aligned by measuring them rather than by a
+    // hand-tuned offset, which is what previously pinned this row to one font
+    // at one scale. The toggle is sized to the wider of its two labels so
+    // pausing does not shuffle everything beside it.
+    const ImGuiStyle& style        = ImGui::GetStyle();
+    const float       slider_width = theme::scaled(96.0f);
+    const float       toggle_width = std::max(ImGui::CalcTextSize("Play").x,
+                                              ImGui::CalcTextSize("Pause").x) +
+                                     style.FramePadding.x * 2.0f;
+    const float       controls =
+        ImGui::GetFrameHeight() + style.ItemInnerSpacing.x +
+        ImGui::CalcTextSize("Super resolution").x + style.ItemSpacing.x +
+        toggle_width + style.ItemSpacing.x + slider_width;
+
+    ImGui::SameLine(ImGui::GetWindowWidth() - style.WindowPadding.x - controls);
     if (ImGui::Checkbox("Super resolution", &vsr_enabled_)) {
         apply_vsr();
     }
     ImGui::SameLine();
-    if (ImGui::Button(paused_ ? "Play" : "Pause")) {
+    if (ImGui::Button(paused_ ? "Play" : "Pause", ImVec2(toggle_width, 0.0f))) {
         paused_ = !paused_;
         player_.set_paused(paused_);
     }
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(140.0f);
+    ImGui::SetNextItemWidth(slider_width);
     if (ImGui::SliderInt("##volume", &volume_, 0, 130, "vol %d")) {
         player_.set_volume(volume_);
     }
 
     ImGui::End();
+    ImGui::PopStyleVar();
 }
 
 void App::draw_update_banner() {
@@ -695,7 +842,8 @@ void App::draw_update_banner() {
     // nothing blocks playback.
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(
-        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - 16.0f, viewport->WorkPos.y + 16.0f),
+        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - theme::scaled(16.0f),
+               viewport->WorkPos.y + theme::scaled(16.0f)),
         ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.85f);
 
@@ -723,89 +871,151 @@ void App::draw_diagnostics() {
         return;
     }
 
+    // Denser rows than the rest of the application: this is a wall of
+    // readings, and the default row spacing turns it into a page of scrolling.
+    // Spacing only — the panel is drawn at the same scale as everything else,
+    // because a surface that sizes itself is how a scale system comes apart.
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                        ImVec2(ImGui::GetStyle().ItemSpacing.x, theme::scaled(3.0f)));
+    // The gutter between the two columns of sections.
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(theme::scaled(14.0f), 0.0f));
+
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(
-        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - 20.0f, viewport->WorkPos.y + 20.0f),
+        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - theme::scaled(20.0f),
+               viewport->WorkPos.y + theme::scaled(20.0f)),
         ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-    ImGui::SetNextWindowBgAlpha(0.85f);
+    // Nearly opaque. It reads over whatever the video happens to be showing,
+    // and it is only on screen while somebody is deliberately looking at it.
+    ImGui::SetNextWindowBgAlpha(0.94f);
 
     ImGui::Begin("Diagnostics", &show_diagnostics_,
                  ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing);
 
     const auto& d = player_.diagnostics();
 
+    // The labels used to be padded out to a fixed character count, which lines
+    // the colons up in a monospace font and does not in a proportional one.
+    // The value column is measured from the longest labels below instead, so
+    // it holds whatever the font is. Equal character counts are not equal
+    // widths here, hence measuring all three rather than picking one.
+    // Aligned by padding each label out to the widest one, rather than by an
+    // absolute column. SameLine's offset form measures from an origin that
+    // moves — window origin in a plain window, cell origin inside a table,
+    // neither including the same padding — and getting it wrong stays
+    // invisible until some label happens to be long enough to collide. The
+    // spacing form is measured from the end of the label, so it cannot.
+    // Equal character counts are not equal widths, hence measuring all three.
+    const float label_column = std::max({ImGui::CalcTextSize("Composition swap chain").x,
+                                         ImGui::CalcTextSize("Hardware decode wanted").x,
+                                         ImGui::CalcTextSize("Rebuffers this channel").x});
+    const float column_gap   = theme::scaled(18.0f);
+
+    // Label dim, value bright: the reading is what is being looked for, and
+    // the two columns separate without a rule between them.
+    auto field = [label_column, column_gap](const char* label, std::string_view value,
+                                            bool dim = false) {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
+        ImGui::TextUnformatted(label);
+        ImGui::PopStyleColor();
+        // A label wider than the measured maximum keeps the gap and loses the
+        // alignment, which is the harmless way round.
+        ImGui::SameLine(0.0f, std::max(label_column - ImGui::CalcTextSize(label).x, 0.0f) +
+                                  column_gap);
+        if (dim) {
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
+        }
+        ImGui::TextUnformatted(value.data(), value.data() + value.size());
+        if (dim) {
+            ImGui::PopStyleColor();
+        }
+    };
+
+    // Two columns of whole sections. Stacked, the readings run to about a
+    // third more than the window is tall and the panel scrolls; the sections
+    // are self-contained, so splitting them costs nothing.
+    if (!ImGui::BeginTable("##readings", 2, ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        return;
+    }
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+
     ImGui::SeparatorText("Presentation");
-    ImGui::Text("Composition swap chain : %s", d.swapchain_state.c_str());
-    ImGui::Text("Window                 : %dx%d", window_.width(), window_.height());
+    field("Composition swap chain", d.swapchain_state);
+    field("Window", std::format("{}x{}", window_.width(), window_.height()));
 
     ImGui::SeparatorText("Decode");
-    ImGui::Text("Codec                  : %s",
-                d.video_codec.empty() ? "-" : d.video_codec.c_str());
-    ImGui::Text("Source                 : %dx%d", d.video_width, d.video_height);
-    ImGui::Text("Hardware decode wanted : %s", d.hwdec_requested.c_str());
-    ImGui::Text("Hardware decode active : %s",
-                d.hwdec_active.empty() ? "-" : d.hwdec_active.c_str());
+    field("Codec", d.video_codec.empty() ? "-" : d.video_codec);
+    field("Source", std::format("{}x{}", d.video_width, d.video_height));
+    field("Hardware decode wanted", d.hwdec_requested);
+    field("Hardware decode active", d.hwdec_active.empty() ? "-" : d.hwdec_active);
 
     ImGui::SeparatorText("Super resolution");
     // Requested, attached and confirmed are distinct on purpose. There is no
     // reliable signal that the driver actually ran RTX VSR on a frame, so this
     // never claims it did.
-    ImGui::Text("Requested              : %s", d.vsr_requested ? "yes" : "no");
-    ImGui::Text("Filter attached        : %s", d.vsr_filter_attached ? "yes" : "no");
-    ImGui::TextDisabled("Confirmed              : unavailable (no signal exposed)");
+    field("Requested", d.vsr_requested ? "yes" : "no");
+    field("Filter attached", d.vsr_filter_attached ? "yes" : "no");
+    field("Confirmed", "unavailable (no signal exposed)", true);
 
     ImGui::SeparatorText("Stream");
-    ImGui::Text("Core idle              : %s", d.core_idle ? "yes" : "no");
-    ImGui::Text("Paused for cache       : %s", d.paused_for_cache ? "yes" : "no");
-    ImGui::Text("Demuxer cache          : %.1fs", d.cache_seconds);
-    ImGui::Text("Buffer phase           : %s (target %.0fs)",
-                d.buffer_phase == core::BufferPhase::Zap ? "zap" : "steady",
-                core::buffer_phase_targets(d.buffer_phase).cache_seconds);
-    ImGui::Text("Buffer phase command   : %s",
-                player::to_string(d.buffer_phase_command_state));
-    ImGui::Text("Buffer commands        : %d accepted / %d rejected",
-                d.buffer_commands_accepted, d.buffer_commands_rejected);
+    field("Core idle", d.core_idle ? "yes" : "no");
+    field("Paused for cache", d.paused_for_cache ? "yes" : "no");
+    field("Demuxer cache", std::format("{:.1f}s", d.cache_seconds));
+    field("Buffer phase",
+          std::format("{} (target {:.0f}s)",
+                      d.buffer_phase == core::BufferPhase::Zap ? "zap" : "steady",
+                      core::buffer_phase_targets(d.buffer_phase).cache_seconds));
+    field("Buffer phase command", player::to_string(d.buffer_phase_command_state));
+    field("Buffer commands", std::format("{} accepted / {} rejected",
+                                         d.buffer_commands_accepted, d.buffer_commands_rejected));
+    field("Tune-in time", std::format("{:.2f}s", d.last_load_seconds));
+    field("Health discontinuities", std::format("{}", d.health_discontinuities));
+    field("mpv restart events", std::format("{}", d.mpv_playback_restart_events));
 
-    ImGui::Text("Tune-in time           : %.2fs", d.last_load_seconds);
-    ImGui::Text("Health discontinuities : %d", d.health_discontinuities);
-    ImGui::Text("mpv restart events     : %d", d.mpv_playback_restart_events);
+    ImGui::TableSetColumnIndex(1);
 
     const auto supervisor_stats = core::project_supervisor_stats(
         supervisor_.current(), supervisor_clock_.now());
     ImGui::SeparatorText("Playback health");
-    ImGui::Text("Verdict                : %s", core::to_string(health_snapshot_.verdict));
-    ImGui::Text("Degraded reason        : %s",
-                health_snapshot_.degraded_reason
-                    ? core::to_string(*health_snapshot_.degraded_reason) : "-");
-    ImGui::Text("Progressing            : %s",
-                !health_snapshot_.progressing ? "unknown"
-                    : (*health_snapshot_.progressing ? "yes" : "no"));
-    ImGui::Text("Input advancing        : %s",
-                !health_snapshot_.input_advancing ? "unknown"
-                    : (*health_snapshot_.input_advancing ? "yes" : "no"));
+    field("Verdict", core::to_string(health_snapshot_.verdict));
+    field("Degraded reason", health_snapshot_.degraded_reason
+                                 ? core::to_string(*health_snapshot_.degraded_reason) : "-");
+    field("Progressing", !health_snapshot_.progressing ? "unknown"
+                             : (*health_snapshot_.progressing ? "yes" : "no"));
+    field("Input advancing", !health_snapshot_.input_advancing ? "unknown"
+                                 : (*health_snapshot_.input_advancing ? "yes" : "no"));
 
     ImGui::SeparatorText("Supervisor");
-    ImGui::Text("State                  : %s", core::to_string(supervisor_stats.state));
-    ImGui::Text("Transport              : %s",
-                supervisor_stats.transport ? core::to_string(*supervisor_stats.transport) : "-");
-    ImGui::Text("Attempt                : %zu / %zu", supervisor_stats.attempt,
-                supervisor_stats.attempt_ceiling);
-    ImGui::Text("Reason                 : %s",
-                supervisor_stats.reason ? supervisor_stats.reason->c_str() : "-");
-    ImGui::Text("Recovery budget        : %s",
-                supervisor_stats.elapsed_budget
-                    ? std::format("{:.0f}ms", supervisor_stats.elapsed_budget->count() * 1000.0).c_str()
-                    : "-");
-    ImGui::Text("Policy                 : %s", supervisor_stats.policy_version.data());
+    field("State", core::to_string(supervisor_stats.state));
+    field("Transport",
+          supervisor_stats.transport ? core::to_string(*supervisor_stats.transport) : "-");
+    field("Attempt", std::format("{} / {}", supervisor_stats.attempt,
+                                 supervisor_stats.attempt_ceiling));
+    field("Reason", supervisor_stats.reason ? std::string_view(*supervisor_stats.reason) : "-");
+    field("Recovery budget",
+          supervisor_stats.elapsed_budget
+              ? std::format("{:.0f}ms", supervisor_stats.elapsed_budget->count() * 1000.0)
+              : std::string("-"));
+    field("Policy", supervisor_stats.policy_version);
 
     ImGui::SeparatorText("Live sync");
-    ImGui::Text("Target offset          : %.1fs", d.live_target_seconds);
-    ImGui::Text("Playback speed         : %.3fx", d.playback_speed);
-    ImGui::Text("Rebuffers this channel : %d", d.rebuffer_count);
-    ImGui::TextDisabled("Offset is estimated from buffer depth (no manifest)");
+    field("Target offset", std::format("{:.1f}s", d.live_target_seconds));
+    field("Playback speed", std::format("{:.3f}x", d.playback_speed));
+    field("Rebuffers this channel", std::format("{}", d.rebuffer_count));
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
+    ImGui::TextUnformatted("Offset is estimated from buffer depth (no manifest)");
+    ImGui::PopStyleColor();
 
+    ImGui::EndTable();
+
+    // Full width, under both columns: log lines are long and splitting them
+    // into a column would wrap every one of them.
     if (ImGui::CollapsingHeader("Log")) {
-        ImGui::BeginChild("log-scroll", ImVec2(720.0f, 260.0f));
+        ImGui::BeginChild("log-scroll",
+                          ImVec2(theme::scaled(560.0f), theme::scaled(200.0f)));
         for (const auto& line : log::recent()) {
             ImGui::TextUnformatted(line.c_str());
         }
@@ -816,6 +1026,7 @@ void App::draw_diagnostics() {
     }
 
     ImGui::End();
+    ImGui::PopStyleVar(2);
 }
 
 void App::draw_frame() {
@@ -826,6 +1037,15 @@ void App::draw_frame() {
     ImGui::NewFrame();
 
     ImGuiIO& io = ImGui::GetIO();
+
+    // What keeps the playback overlay up. Movement rather than position: a
+    // pointer parked over the video is somebody watching, not somebody using
+    // the controls.
+    if (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || io.MouseWheel != 0.0f ||
+        ImGui::IsAnyMouseDown()) {
+        last_pointer_activity_ = ImGui::GetTime();
+    }
+
     if (ImGui::IsKeyPressed(ImGuiKey_Tab, false) && !io.WantTextInput) {
         show_browser_ = !show_browser_;
     }
@@ -836,6 +1056,14 @@ void App::draw_frame() {
         stage_ == Stage::Browsing) {
         paused_ = !paused_;
         player_.set_paused(paused_);
+    }
+
+    // Until mpv owns the video plane there is nothing behind the UI layer but
+    // an empty composition visual, which the desktop shows through as white.
+    // The backdrop is what the window is made of in every state before the
+    // first frame arrives — logging in, connected but idle, and mid-load.
+    if (!video_attached_) {
+        theme::draw_backdrop();
     }
 
     switch (stage_) {

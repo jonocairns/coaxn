@@ -7,28 +7,8 @@
 #include <string>
 
 #include "app/app.hpp"
+#include "app/theme.hpp"
 #include "util/log.hpp"
-
-namespace {
-
-// Sized for a television viewing distance rather than a desktop one.
-constexpr float kUiScale = 1.45f;
-
-void configure_style() {
-    ImGui::StyleColorsDark();
-
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding    = 6.0f;
-    style.FrameRounding     = 4.0f;
-    style.ScrollbarRounding = 8.0f;
-    style.WindowPadding     = ImVec2(14.0f, 12.0f);
-    style.ItemSpacing       = ImVec2(10.0f, 8.0f);
-    style.ScaleAllSizes(kUiScale);
-
-    ImGui::GetIO().FontGlobalScale = kUiScale;
-}
-
-}  // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // Must happen before the window exists so the client area is not scaled by
@@ -47,7 +27,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     io.IniFilename = nullptr;  // no layout file beside the executable
-    configure_style();
+    coax::app::theme::configure_style();
 
     coax::log::info("Coax native POC starting");
 

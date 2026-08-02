@@ -57,6 +57,7 @@ compile_commands.json
 *.log
 *.bak
 *.swp
+__pycache__/
 
 # vcpkg
 vcpkg_installed/
@@ -73,3 +74,7 @@ third_party/mpv/
 
 # Local runtime state (contains provider credentials)
 coax-portal.json
+
+# Editor and tooling state
+.vscode/
+.repoql/

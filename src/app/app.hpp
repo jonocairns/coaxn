@@ -45,6 +45,9 @@ private:
     void draw_frame();
     void draw_login();
     void draw_browser();
+    // The column the channel list occupies. Shared with the playback overlay,
+    // which starts where it ends rather than running underneath it.
+    [[nodiscard]] static float browser_width();
     void draw_status_bar();
     void draw_update_banner();
     void draw_diagnostics();
@@ -66,6 +69,14 @@ private:
     void load_saved_portal();
     void save_portal() const;
 
+    // The status line is both the progress report and the error channel, so
+    // what it is carrying has to be recorded alongside the text for the login
+    // screen to colour it.
+    void set_status(std::string text, bool error = false) {
+        status_       = std::move(text);
+        status_error_ = error;
+    }
+
     win::AppWindow       window_;
     win::UiLayer         ui_;
     win::CompositionTree composition_;
@@ -80,6 +91,7 @@ private:
 
     Stage       stage_ = Stage::Login;
     std::string status_;
+    bool        status_error_ = false;
     std::string direct_media_;
 
     // Catalog loading runs off the UI thread; these hand the result back.
@@ -106,10 +118,23 @@ private:
     std::string playing_channel_id_;
     std::string playing_channel_name_;
     bool        show_browser_     = true;
+    // Whether the previous frame was filtering, so the frame a search clears
+    // can collapse the categories it opened. Without the edge the collapsed
+    // state would have to be forced every frame, which is what stopped the
+    // headers from opening on click.
+    bool        search_was_active_ = false;
     bool        show_diagnostics_ = false;
+    // Whether mpv's swap chain is in the composition tree. Nothing else paints
+    // the area behind the UI, so this decides whether the backdrop has to.
+    bool        video_attached_   = false;
     bool        vsr_enabled_      = true;
     bool        paused_           = false;
     int         volume_           = 100;
+
+    // The playback overlay hides itself once the pointer settles. Held as a
+    // fraction rather than a boolean so it crosses rather than blinks.
+    double      last_pointer_activity_ = 0.0;
+    float       status_bar_fade_       = 1.0f;
 
     // mpv reports video dimensions asynchronously after a load, so the scale
     // factor has to be recomputed when they arrive rather than at play() time.

@@ -124,6 +124,7 @@ if(COAX_BUILD_APP)
         "${CMAKE_BINARY_DIR}/coax.rc"
         src/main.cpp
         src/app/app.cpp
+        src/app/theme.cpp
         src/app/update_check.cpp
         src/core/channel_index.cpp
         src/xtream/xtream_client.cpp
@@ -137,7 +138,7 @@ if(COAX_BUILD_APP)
     target_include_directories(coax PRIVATE src)
     target_link_libraries(coax PRIVATE
         coax_player imgui nlohmann_json
-        d3d11 dxgi dxguid dcomp winhttp crypt32 shell32 ole32 uuid)
+        d3d11 dxgi dxguid dcomp dwmapi winhttp crypt32 shell32 ole32 uuid)
     target_compile_definitions(coax PRIVATE
         UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
         # The running build's own version, for the update check to compare
