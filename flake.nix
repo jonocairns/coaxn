@@ -13,20 +13,33 @@
       # Cross-compiling shell: Linux tools on PATH, Windows libraries on the
       # link path. `cross.mkShell` wires the mingw-w64 compiler wrapper up with
       # the right NIX_LDFLAGS, which a bare `nix shell` does not do.
-      devShells.${system}.default = cross.mkShell {
-        nativeBuildInputs = with pkgs; [
-          cmake
-          ninja
-          p7zip
-          curl
-        ];
+      devShells.${system} = {
+        default = cross.mkShell {
+          nativeBuildInputs = with pkgs; [
+            cmake
+            ninja
+            p7zip
+            curl
+          ];
 
-        # mcfgthreads is the threading runtime nixpkgs' mingw gcc links against;
-        # without it on the link path every binary fails with -lmcfgthread.
-        buildInputs = [
-          cross.windows.mingw_w64
-          cross.windows.mcfgthreads
-        ];
+          # mcfgthreads is the threading runtime nixpkgs' mingw gcc links against;
+          # without it on the link path every binary fails with -lmcfgthread.
+          buildInputs = [
+            cross.windows.mingw_w64
+            cross.windows.mcfgthreads
+          ];
+        };
+
+        # Native compiler path for coax_core and its tests. Keeping this separate
+        # from the MinGW shell prevents the cross compiler wrapper from becoming
+        # CMake's implicit CXX during the portable boundary check.
+        core = pkgs.mkShell {
+          nativeBuildInputs = with pkgs; [
+            cmake
+            ninja
+            gcc
+          ];
+        };
       };
     };
 }

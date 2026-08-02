@@ -77,12 +77,29 @@ and its much smaller target live offset.
 
 | Concern | Setting |
 |---|---|
-| Capacity | `demuxer-readahead-secs=50`, `demuxer-max-bytes=400MiB` |
+| Zap target (each new load) | `cache-secs=1`, `demuxer-readahead-secs=1` |
+| Steady target (after five healthy seconds) | `cache-secs=10`, `demuxer-readahead-secs=10` |
+| Capacity ceiling | `demuxer-max-bytes=64MiB` |
 | Resume threshold after a rebuffer | `cache-pause-wait=2` |
 | Behaviour on a dry cache | `cache-pause=yes`, `cache-pause-initial=yes` |
 
 Pausing to refill beats stuttering through an empty cache, and matches
 ExoPlayer's `BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS` of 2000.
+
+The 64 MiB value is a byte ceiling, not a phase target. It is set when libmpv
+is created and never rewritten during a load. The two time targets are
+reasserted at one second for every load because a preceding steady load may
+have widened them. They are changed to ten seconds once per load, only for the
+active generation. Both asynchronous property-command results are observed and
+reported in diagnostics. The phase names the intended per-load policy, while a
+separate command state remains pending until both succeed and becomes explicitly
+failed if either is rejected; a partial command is never reported as confirmed.
+
+Socket timing and probing remain separate from buffer policy. Coax does not set
+`network-timeout`, `demuxer-lavf-analyzeduration`, or
+`demuxer-lavf-probesize` in the default configuration. Provider MPEG-TS can
+need a complete PMT before tracks appear, and prolonged silence is classified
+by the multi-signal health fold rather than a per-file socket deadline.
 
 ### Live offset control
 
@@ -121,18 +138,46 @@ offset is estimated, and never presents it as measured. Where a provider offers
 
 ### Supervisor
 
-**STUB — specified, not implemented.**
+The portable supervisor handles failures that buffer absorption cannot. Its
+pure reducer consumes generation-scoped events and injected monotonic time; a
+host owns one deadline re-derived from the latest state. The fixed retry
+schedule is `[500, 1000, 2000, 4000, 5000]` milliseconds, with a 30-second
+wall-clock budget for the whole recovery episode. The attempt count clears only
+after the recovered load produces a first frame and then remains healthy for
+five seconds. A first frame by itself is not recovery evidence.
 
-Handles what transport recovery cannot: an exhausted reconnect budget, a
-persistently failing channel, a stream that ends. Its shape, following
-`DefaultLoadErrorHandlingPolicy`:
+The host queues emitted effects and drains them from the outermost dispatch
+frame. A synchronous load result therefore becomes a later reducer event rather
+than re-entering the reducer or duplicating state-change callbacks.
 
-- Reload the channel on terminal failure, with backoff `min((n-1) * 1s, 5s)`.
-- Give up after 3 attempts and surface the failure rather than looping.
-- Treat 403, 404, 410, 416, 500 and 503 as **exclusion** rather than retry: a
-  channel the provider has withdrawn should be marked bad, not hammered.
-- Recreate the libmpv instance when bounded recovery fails, without restarting
-  the UI.
+Continuous MPEG-TS recovery reopens the resolved stream. HLS recovery performs
+a fresh replace load at the advertised live edge using `live_start_index=-1`
+and disables hidden playlist/segment retry beneath the supervisor. A classified
+format-probe failure spends one normal attempt on a reopen with an explicit
+demuxer format. Authentication or an unavailable resolved source is terminal.
+
+A libmpv shutdown or event-queue failure emits one `recreate-player` effect.
+That effect destroys and initializes the in-process libmpv owner, then reloads
+the same generation, transport, and active forced-probe mode; the HWND, UI, and
+process remain alive. The
+same five-attempt schedule and 30-second budget bound recreation. A stale
+effect cannot replace a newer channel because the player checks the generation
+before acting and the reducer drops every mismatched outcome.
+
+Playback health is a separate pure fold sampled every 500 ms. It requires
+agreement between playback progress, cache depletion, and input advance across
+multiple observations. Open stalls confirm after eight seconds, progress
+stalls after one second and at least three observations, and decode stalls
+after six seconds and at least eight observations. A single mpv level never
+starts recovery. Timeline discontinuities compare media movement with elapsed
+monotonic time and are diagnostic only:
+
+```
+abs((currentPlayback - previousPlayback) - elapsed) > 1 second
+```
+
+The health discontinuity counter resets per load and remains distinct from the
+number of `MPV_EVENT_PLAYBACK_RESTART` edges reported by mpv.
 
 ### Cross-cutting: generations
 
@@ -141,7 +186,12 @@ retry or recovery action belonging to a superseded generation is discarded.
 Without this, a slow retry can resurrect a channel the viewer has already left
 — the failure mode that makes rapid channel changing feel broken.
 
-**STUB** — required by the supervisor; not yet present.
+Only a new user channel intent advances the generation. Recovery reloads and
+player recreation retain it. Async load and buffer commands are stamped when
+issued, while playlist entry IDs correlate later start, first-frame and
+structured end events back to that generation. The adapter journals every edge
+in order; draining several libmpv events in one frame cannot collapse them into
+a mutable diagnostics snapshot.
 
 ## Trade-offs
 
@@ -151,8 +201,15 @@ losing battle, up to the 30s ceiling. For live sport this is a real cost — a
 phone notification can arrive before the picture — which is why the increment
 is small and the controller actively claws it back.
 
-**Buffer memory for absorption.** A 400MiB cache ceiling is generous, chosen so
-4K HEVC has room. It is a ceiling, not an allocation.
+**Buffer memory for absorption.** The evidence-backed 64 MiB cache ceiling is a
+ceiling, not an allocation. Time-based buffering moves from 1 second during zap
+to 10 seconds after the healthy window, so every channel does not pay steady
+memory and opening-read costs before its first frame.
+
+**Bounded recovery can surface failure.** Five attempts and 30 seconds prevent
+a dead provider or broken decoder from producing an infinite reopen loop. The
+cost is an explicit failed state that needs a new channel intent; diagnostics
+retain the detection, current attempt, elapsed budget and policy version.
 
 **Learned latency is discarded on channel change.** The controller resets per
 channel. Latency learned on a bad channel says nothing about the next one, and

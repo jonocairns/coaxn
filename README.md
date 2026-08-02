@@ -4,10 +4,8 @@ A Windows live-TV player built directly on libmpv, where video and UI are
 composited into **one** top-level application surface so the window can be
 screen-shared without a black video region.
 
-This is a proof of concept. It deliberately trades test coverage and stream
-recovery for a working end-to-end slice: log in to an Xtream Codes portal,
-find a channel, play it with hardware decoding and NVIDIA super resolution,
-and share the window.
+This is a proof of concept with a portable playback-health fold and bounded,
+generation-scoped recovery supervisor around the native libmpv owner.
 
 ## What works
 
@@ -19,12 +17,11 @@ and share the window.
 - Video and UI in one DirectComposition tree under one HWND
 - Credentials encrypted at rest with DPAPI, never written to the log
 
-## What is deliberately missing
-
-Stream recovery. There is no retry policy, no reconnect budget and no
-generation-scoped channel switching yet — a dropped stream stays dropped until
-you pick a channel again. Buffering and network timeouts are whatever mpv
-defaults to. See the PRD for the shape this takes when it matters.
+Recovery uses five attempts (`500, 1000, 2000, 4000, 5000` ms) inside one
+30-second episode. Buffer targets move from 1 second while tuning to 10 seconds
+after five healthy seconds; the static cache ceiling is 64 MiB. FFmpeg reconnect
+remains disabled for continuous live TS and socket timing stays at the pinned
+runtime default.
 
 ## Building
 
@@ -41,6 +38,15 @@ Then, inside the shell:
 ./scripts/fetch-libmpv.sh
 cmake -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw.cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
+```
+
+The portable model and tests use a native compiler and require neither Windows
+nor libmpv:
+
+```bash
+nix develop .#core --command bash -c \
+  'cmake -S . -B build-core -G Ninja -DCOAX_BUILD_APP=OFF -DBUILD_TESTING=ON && \
+   cmake --build build-core && ctest --test-dir build-core --output-on-failure'
 ```
 
 The executable and `libmpv-2.dll` land in `build/`. From WSL you can launch it

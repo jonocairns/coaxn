@@ -4,16 +4,14 @@
 
 #include <format>
 
+#include "core/policy.hpp"
 #include "util/log.hpp"
+#include "player/transport_log_classifier.hpp"
 
 namespace coax::player {
 namespace {
 
-// Properties observed for diagnostics and for swap-chain acquisition. The
-// swap chain is observed rather than polled because polling after
-// mpv_initialize races video-output configuration: the property reports
-// unavailable until the VO exists.
-enum ObserveId : uint64_t {
+enum ObserveId : std::uint64_t {
     kDisplaySwapchain = 1,
     kHwdecCurrent,
     kVideoCodec,
@@ -22,6 +20,12 @@ enum ObserveId : uint64_t {
     kCoreIdle,
     kPausedForCache,
     kCacheDuration,
+    kCacheEnd,
+    kPlaybackTime,
+    kAvSync,
+    kCacheSpeed,
+    kEstimatedVfFps,
+    kContainerFps,
 };
 
 void set_option(mpv_handle* mpv, const char* name, const std::string& value) {
@@ -35,103 +39,75 @@ std::string composition_size(int width, int height) {
     return std::format("{}x{}", width < 1 ? 1 : width, height < 1 ? 1 : height);
 }
 
+PlayerEndReason normalize_end_reason(mpv_end_file_reason reason) {
+    switch (reason) {
+        case MPV_END_FILE_REASON_EOF: return PlayerEndReason::Eof;
+        case MPV_END_FILE_REASON_STOP: return PlayerEndReason::Stop;
+        case MPV_END_FILE_REASON_QUIT: return PlayerEndReason::Quit;
+        case MPV_END_FILE_REASON_ERROR: return PlayerEndReason::Error;
+        case MPV_END_FILE_REASON_REDIRECT: return PlayerEndReason::Redirect;
+    }
+    return PlayerEndReason::Unknown;
+}
+
+void observe(mpv_handle* mpv, std::uint64_t id, const char* name, mpv_format format) {
+    const int status = mpv_observe_property(mpv, id, name, format);
+    if (status < 0) log::warn("mpv property {} observation rejected: {}", name,
+                              mpv_error_string(status));
+}
+
 }  // namespace
 
 MpvPlayer::~MpvPlayer() {
-    if (mpv_) {
-        mpv_terminate_destroy(mpv_);
-        mpv_ = nullptr;
-    }
+    events_.dispose();
+    destroy_backend();
 }
 
 bool MpvPlayer::initialize(const PlayerConfig& config, std::string& error) {
-    mpv_ = mpv_create();
-    if (!mpv_) {
-        error = "mpv_create failed";
-        return false;
-    }
+    config_ = config;
+    has_config_ = true;
+    return initialize_backend(error);
+}
 
-    // Presentation: mpv renders into a composition swap chain it does not
-    // present to a window of its own. Coax attaches that swap chain to its own
-    // DirectComposition visual so video and UI share one top-level surface.
+bool MpvPlayer::initialize_backend(std::string& error) {
+    mpv_ = mpv_create();
+    if (!mpv_) { error = "mpv_create failed"; return false; }
+
     set_option(mpv_, "vo", "gpu-next");
     set_option(mpv_, "gpu-api", "d3d11");
     set_option(mpv_, "d3d11-output-mode", "composition");
     set_option(mpv_, "d3d11-composition-size",
-               composition_size(config.composition_width, config.composition_height));
-
-    diagnostics_.hwdec_requested = config.hardware_decode ? "d3d11va" : "no";
+               composition_size(config_.composition_width, config_.composition_height));
+    diagnostics_.hwdec_requested = config_.hardware_decode ? "d3d11va" : "no";
     set_option(mpv_, "hwdec", diagnostics_.hwdec_requested);
 
-    // --- Buffering -------------------------------------------------------
-    //
-    // Capacity and latency are separate concerns. A large cache is what
-    // absorbs a network stall; how far behind live we actually sit is held by
-    // the live-offset controller, not by these numbers. ExoPlayer draws the
-    // same distinction between DefaultLoadControl's 50s buffer and the much
-    // smaller target live offset.
-    // Probe limits are only applied when explicitly asked for. Truncating
-    // analysis trades tune-in time for channels that never play at all.
-    if (config.analyze_duration_seconds > 0.0) {
+    // Provider MPEG-TS needs complete PMT probing. These are opt-in only; zero
+    // deliberately preserves the pinned runtime defaults.
+    if (config_.analyze_duration_seconds > 0.0) {
         set_option(mpv_, "demuxer-lavf-analyzeduration",
-                   std::format("{:.2f}", config.analyze_duration_seconds));
+                   std::format("{:.2f}", config_.analyze_duration_seconds));
     }
-    if (config.probe_size_bytes > 0) {
-        set_option(mpv_, "demuxer-lavf-probesize", std::to_string(config.probe_size_bytes));
+    if (config_.probe_size_bytes > 0) {
+        set_option(mpv_, "demuxer-lavf-probesize", std::to_string(config_.probe_size_bytes));
     }
 
     set_option(mpv_, "cache", "yes");
-
-    // A ceiling on the time targets below, not a target itself. The demuxer
-    // reads it once at creation, so it can never become a per-phase value.
-    // 64MiB is the figure qualified against real provider streams in the
-    // Electron implementation; the 400MiB this previously used was guesswork
-    // and accounted for most of the process working set.
     set_option(mpv_, "demuxer-max-bytes", "64MiB");
     set_option(mpv_, "demuxer-max-back-bytes", "16MiB");
-
-    // Single-phase for now. The qualified design phases this: ~1s while tuning
-    // in so the opening read burst is small, then ~10s once playing. Phasing
-    // needs the supervisor to drive the transition, so until then this is one
-    // conservative value biased towards absorbing stalls.
-    set_option(mpv_, "demuxer-readahead-secs", "10");
-    set_option(mpv_, "cache-secs", "10");
-
-    // Rebuffer thresholds, mirroring DefaultLoadControl:
-    // BUFFER_FOR_PLAYBACK_MS = 1s, BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 2s.
-    // Pausing to refill beats stuttering through a dry cache.
+    set_option(mpv_, "cache-secs", "1");
+    set_option(mpv_, "demuxer-readahead-secs", "1");
     set_option(mpv_, "cache-pause", "yes");
     set_option(mpv_, "cache-pause-initial", "yes");
     set_option(mpv_, "cache-pause-wait", "2");
 
-    // --- Transport recovery ----------------------------------------------
-    //
-    // Deliberately off by default for live streams.
-    //
-    // FFmpeg's reconnect works by re-opening the URL and resuming at a byte
-    // offset. A live TS stream is not seekable, so there is no correct resume
-    // point: the server replies from the head of its own buffer and playback
-    // replays content it has already shown. The failure is invisible to every
-    // signal we watch, because the cache never runs dry and paused-for-cache
-    // never fires.
-    //
-    // A supervisor reloading the channel at the live edge is the correct
-    // recovery mechanism for this stream type. Left switchable so the two can
-    // be compared against a real provider rather than argued about.
-    if (config.transport_reconnect) {
+    if (config_.transport_reconnect) {
         set_option(mpv_, "stream-lavf-o",
-                   "reconnect=1,"
-                   "reconnect_on_network_error=1,"
-                   "reconnect_delay_max=5");
+                   "reconnect=1,reconnect_on_network_error=1,reconnect_delay_max=5");
     }
-    set_option(mpv_, "network-timeout", "20");
+    // No network-timeout override. The multi-signal health fold owns prolonged
+    // silence, while mpv retains its pinned-runtime socket timing policy.
 
-    // Small speed changes must not shift pitch, or the live-offset controller
-    // would be audible.
     set_option(mpv_, "audio-pitch-correction", "yes");
-
-    // Appliance behaviour: stay alive between channels, never take over the
-    // terminal, and keep the live edge rather than buffering for latency.
     set_option(mpv_, "idle", "yes");
     set_option(mpv_, "terminal", "no");
     set_option(mpv_, "keep-open", "no");
@@ -144,267 +120,384 @@ bool MpvPlayer::initialize(const PlayerConfig& config, std::string& error) {
     const int status = mpv_initialize(mpv_);
     if (status < 0) {
         error = std::format("mpv_initialize failed: {}", mpv_error_string(status));
-        mpv_terminate_destroy(mpv_);
-        mpv_ = nullptr;
+        destroy_backend();
         return false;
     }
 
-    // Without this, MPV_EVENT_LOG_MESSAGE is never delivered and mpv's own
-    // diagnostics -- including FFmpeg demuxer and protocol warnings -- are
-    // silently discarded.
     mpv_request_log_messages(mpv_, "warn");
-
-    mpv_observe_property(mpv_, kDisplaySwapchain, "display-swapchain", MPV_FORMAT_INT64);
-    mpv_observe_property(mpv_, kHwdecCurrent,     "hwdec-current",     MPV_FORMAT_STRING);
-    mpv_observe_property(mpv_, kVideoCodec,       "video-codec",       MPV_FORMAT_STRING);
-    mpv_observe_property(mpv_, kVideoWidth,       "width",             MPV_FORMAT_INT64);
-    mpv_observe_property(mpv_, kVideoHeight,      "height",            MPV_FORMAT_INT64);
-    mpv_observe_property(mpv_, kCoreIdle,         "core-idle",         MPV_FORMAT_FLAG);
-    mpv_observe_property(mpv_, kPausedForCache,   "paused-for-cache",  MPV_FORMAT_FLAG);
-    mpv_observe_property(mpv_, kCacheDuration,    "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
+    observe(mpv_, kDisplaySwapchain, "display-swapchain", MPV_FORMAT_INT64);
+    observe(mpv_, kHwdecCurrent, "hwdec-current", MPV_FORMAT_STRING);
+    observe(mpv_, kVideoCodec, "video-codec", MPV_FORMAT_STRING);
+    observe(mpv_, kVideoWidth, "width", MPV_FORMAT_INT64);
+    observe(mpv_, kVideoHeight, "height", MPV_FORMAT_INT64);
+    observe(mpv_, kCoreIdle, "core-idle", MPV_FORMAT_FLAG);
+    observe(mpv_, kPausedForCache, "paused-for-cache", MPV_FORMAT_FLAG);
+    observe(mpv_, kCacheDuration, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
+    observe(mpv_, kCacheEnd, "demuxer-cache-time", MPV_FORMAT_DOUBLE);
+    observe(mpv_, kPlaybackTime, "playback-time", MPV_FORMAT_DOUBLE);
+    observe(mpv_, kAvSync, "avsync", MPV_FORMAT_DOUBLE);
+    observe(mpv_, kCacheSpeed, "cache-speed", MPV_FORMAT_DOUBLE);
+    observe(mpv_, kEstimatedVfFps, "estimated-vf-fps", MPV_FORMAT_DOUBLE);
+    observe(mpv_, kContainerFps, "container-fps", MPV_FORMAT_DOUBLE);
 
     log::info("libmpv initialized (client API {}.{})",
               mpv_client_api_version() >> 16, mpv_client_api_version() & 0xFFFF);
     return true;
 }
 
-void MpvPlayer::play(const std::string& url) {
-    if (!mpv_) {
-        return;
-    }
-    // The authenticated URL is passed through the client API only; it is never
-    // written to the log or shown in the UI.
-    log::info("Loading {}", log::redact_stream_url(url));
-
-    load_started_at_    = std::chrono::steady_clock::now();
-    load_in_flight_     = true;
-    first_restart_seen_ = false;
-
-    const char* command[] = {"loadfile", url.c_str(), "replace", nullptr};
-    const int   status    = mpv_command_async(mpv_, 0, command);
-    if (status < 0) {
-        log::error("loadfile failed: {}", mpv_error_string(status));
-        load_in_flight_ = false;
-    }
+void MpvPlayer::destroy_backend() {
+    if (swapchain_) publish_swapchain(nullptr);
+    if (mpv_) mpv_terminate_destroy(mpv_);
+    mpv_ = nullptr;
+    swapchain_ = nullptr;
+    current_entry_id_.reset();
 }
 
-void MpvPlayer::stop() {
-    if (!mpv_) {
-        return;
+std::uint64_t MpvPlayer::next_request_id() { return ++request_sequence_; }
+
+bool MpvPlayer::play(const std::string& url, core::Generation generation,
+                     core::RecoveryTransport transport, bool force_probed_format) {
+    if (!mpv_) return false;
+    target_ = PlaybackTarget{url, generation, transport, force_probed_format};
+    reset_load_observations(diagnostics_);
+    buffer_phase_gate_.begin_load(generation);
+    apply_buffer_phase(generation, core::BufferPhase::Zap);
+    return issue_load(force_probed_format);
+}
+
+bool MpvPlayer::issue_load(bool force_probed_format) {
+    if (!mpv_ || !target_) return false;
+    log::info("Loading {} generation {}", log::redact_stream_url(target_->url),
+              target_->generation.value());
+    load_started_at_ = std::chrono::steady_clock::now();
+    load_in_flight_ = true;
+    file_loaded_ = false;
+    transport_log_armed_ = false;
+    transport_classification_reported_ = false;
+    target_->probed_format_forced = force_probed_format;
+
+    const std::uint64_t request_id = next_request_id();
+    events_.track_load(request_id, target_->generation);
+
+    mpv_node command{};
+    mpv_node values[5]{};
+    mpv_node_list list{};
+    command.format = MPV_FORMAT_NODE_ARRAY;
+    command.u.list = &list;
+    list.values = values;
+    list.num = 3;
+    values[0].format = MPV_FORMAT_STRING;
+    values[0].u.string = const_cast<char*>("loadfile");
+    values[1].format = MPV_FORMAT_STRING;
+    values[1].u.string = const_cast<char*>(target_->url.c_str());
+    values[2].format = MPV_FORMAT_STRING;
+    values[2].u.string = const_cast<char*>("replace");
+
+    mpv_node option_values[2]{};
+    char* option_keys[2]{};
+    mpv_node_list options{};
+    std::string lavf_options;
+    const char* forced_format = nullptr;
+    if (force_probed_format) {
+        forced_format = target_->transport == core::RecoveryTransport::Hls ? "hls" : "mpegts";
+    }
+    int option_count = 0;
+    if (forced_format) {
+        option_keys[option_count] = const_cast<char*>("demuxer-lavf-format");
+        option_values[option_count].format = MPV_FORMAT_STRING;
+        option_values[option_count].u.string = const_cast<char*>(forced_format);
+        ++option_count;
+    }
+    if (target_->transport == core::RecoveryTransport::Hls) {
+        lavf_options = std::format("live_start_index={},{}", core::kHlsLiveStartIndex,
+                                   core::kHlsRuntimeRetryOptions);
+        option_keys[option_count] = const_cast<char*>("demuxer-lavf-o");
+        option_values[option_count].format = MPV_FORMAT_STRING;
+        option_values[option_count].u.string = lavf_options.data();
+        ++option_count;
+    }
+    if (option_count > 0) {
+        values[3].format = MPV_FORMAT_INT64;
+        values[3].u.int64 = -1;
+        values[4].format = MPV_FORMAT_NODE_MAP;
+        values[4].u.list = &options;
+        options.num = option_count;
+        options.values = option_values;
+        options.keys = option_keys;
+        list.num = 5;
+    }
+
+    const int status = mpv_command_node_async(mpv_, request_id, &command);
+    if (status < 0) {
+        load_in_flight_ = false;
+        events_.command_rejected_immediately(request_id, status);
+        log::error("loadfile command rejected: {}", mpv_error_string(status));
+        return false;
+    }
+    return true;
+}
+
+void MpvPlayer::stop(core::Generation generation) {
+    if (!mpv_) return;
+    if (const auto entry = events_.active_entry()) {
+        events_.intentional_stop(*entry, generation, IntentionalStopKind::Requested);
     }
     const char* command[] = {"stop", nullptr};
-    mpv_command_async(mpv_, 0, command);
+    mpv_command_async(mpv_, next_request_id(), command);
+}
+
+std::optional<core::RecoveryTransport> MpvPlayer::reopen_current(
+    core::Generation generation, bool force_probed_format, bool require_hls) {
+    if (!target_ || target_->generation != generation || !mpv_ ||
+        (require_hls && target_->transport != core::RecoveryTransport::Hls)) return std::nullopt;
+    reset_load_observations(diagnostics_);
+    buffer_phase_gate_.begin_load(generation);
+    apply_buffer_phase(generation, core::BufferPhase::Zap);
+    if (!issue_load(force_probed_format)) return std::nullopt;
+    return target_->transport;
+}
+
+std::optional<core::RecoveryTransport> MpvPlayer::recreate_player(
+    core::Generation generation, std::string& error) {
+    if (!target_ || target_->generation != generation || !has_config_) return std::nullopt;
+    const auto target = *target_;
+    destroy_backend();
+    events_ = PlayerEventAdapter{};
+    if (!initialize_backend(error)) return std::nullopt;
+    // Synchronous UI-thread recreation cannot be superseded mid-call, but the
+    // equality check is retained as the explicit replacement fence.
+    if (!target_ || target_->generation != generation) return std::nullopt;
+    if (!play(target.url, target.generation, target.transport,
+              target.probed_format_forced)) {
+        return std::nullopt;
+    }
+    return target.transport;
+}
+
+bool MpvPlayer::apply_buffer_phase(core::Generation generation, core::BufferPhase phase) {
+    if (!mpv_ || !target_ || target_->generation != generation ||
+        !buffer_phase_gate_.begin(generation, phase)) return false;
+    diagnostics_.buffer_phase = phase;
+    diagnostics_.buffer_phase_command_state = BufferPhaseCommandState::Pending;
+    const auto targets = core::buffer_phase_targets(phase);
+    const bool cache = issue_buffer_property(generation, phase, BufferProperty::CacheSeconds,
+                                             targets.cache_seconds);
+    const bool readahead = issue_buffer_property(generation, phase,
+        BufferProperty::ReadaheadSeconds, targets.readahead_seconds);
+    return cache && readahead;
+}
+
+void MpvPlayer::observe_buffer_command_result(core::Generation generation,
+                                              const PropertyCommandResult& result) {
+    result.accepted ? ++diagnostics_.buffer_commands_accepted
+                    : ++diagnostics_.buffer_commands_rejected;
+    const auto property = result.property == BufferProperty::CacheSeconds
+        ? BufferPhaseProperty::CacheSeconds : BufferPhaseProperty::ReadaheadSeconds;
+    const auto settlement = buffer_phase_gate_.settle(
+        generation, result.phase, property, result.accepted);
+    if (!settlement) return;
+    diagnostics_.buffer_phase_command_state = *settlement;
+}
+
+bool MpvPlayer::issue_buffer_property(core::Generation generation, core::BufferPhase phase,
+                                      BufferProperty property, double value) {
+    const char* name = property == BufferProperty::CacheSeconds
+        ? "cache-secs" : "demuxer-readahead-secs";
+    const std::string seconds_value = std::format("{}", value);
+    // libmpv's C client command surface uses input.conf command names. JSON
+    // IPC calls this operation `set_property`, while the native command is
+    // `set`; mixing the two is rejected as MPV_ERROR_INVALID_PARAMETER.
+    const char* command[] = {"set", name, seconds_value.c_str(), nullptr};
+    const std::uint64_t request_id = next_request_id();
+    events_.track_property(request_id, generation, phase, property);
+    const int status = mpv_command_async(mpv_, request_id, command);
+    if (status < 0) {
+        events_.command_rejected_immediately(request_id, status);
+        return false;
+    }
+    return true;
 }
 
 void MpvPlayer::set_composition_size(int width, int height) {
-    if (!mpv_) {
-        return;
-    }
+    config_.composition_width = width;
+    config_.composition_height = height;
+    if (!mpv_) return;
     const std::string value = composition_size(width, height);
     mpv_set_property_string(mpv_, "d3d11-composition-size", value.c_str());
 }
 
 void MpvPlayer::set_vsr(bool enabled, double scale) {
-    if (!mpv_) {
-        return;
-    }
+    if (!mpv_) return;
     vsr_enabled_ = enabled;
-    vsr_scale_   = scale;
-
-    // scaling-mode=nvidia selects NVIDIA RTX Video Super Resolution inside the
-    // D3D11 video processor. Attachment is not activation: the driver may
-    // decline for the source format, resolution or driver configuration, and
-    // mpv reports no signal that would let us claim otherwise.
-    const std::string filter =
-        enabled ? std::format("d3d11vpp=scaling-mode=nvidia:scale={:.3f}", scale)
-                : std::string{};
-
-    // Assigning "vf" rebuilds the filter graph and reconfigures the video
-    // chain even when the value is unchanged, which interrupts decoding.
-    // Only touch it when the graph would actually differ.
-    if (filter == applied_filter_) {
-        return;
-    }
+    vsr_scale_ = scale;
+    const std::string filter = enabled
+        ? std::format("d3d11vpp=scaling-mode=nvidia:scale={:.3f}", scale) : std::string{};
+    if (filter == applied_filter_) return;
     applied_filter_ = filter;
-
     const int status = mpv_set_property_string(mpv_, "vf", filter.c_str());
-    diagnostics_.vsr_requested       = enabled;
+    diagnostics_.vsr_requested = enabled;
     diagnostics_.vsr_filter_attached = enabled && status >= 0;
-
-    if (status < 0) {
-        log::warn("Setting video filter failed: {}", mpv_error_string(status));
-    } else {
-        log::info("Video filter set to '{}'", filter.empty() ? "(none)" : filter);
-    }
+    if (status < 0) log::warn("Setting video filter failed: {}", mpv_error_string(status));
 }
 
 void MpvPlayer::set_volume(int percent) {
-    if (!mpv_) {
-        return;
-    }
+    if (!mpv_) return;
     const std::string value = std::to_string(percent);
     mpv_set_property_string(mpv_, "volume", value.c_str());
 }
-
 void MpvPlayer::set_speed(double speed) {
-    if (!mpv_) {
-        return;
-    }
+    if (!mpv_) return;
     const std::string value = std::format("{:.4f}", speed);
     mpv_set_property_string(mpv_, "speed", value.c_str());
     diagnostics_.playback_speed = speed;
 }
-
 void MpvPlayer::set_live_sync_state(double target_seconds, int rebuffer_count) {
     diagnostics_.live_target_seconds = target_seconds;
-    diagnostics_.rebuffer_count      = rebuffer_count;
+    diagnostics_.rebuffer_count = rebuffer_count;
 }
-
 void MpvPlayer::set_paused(bool paused) {
-    if (!mpv_) {
-        return;
-    }
-    mpv_set_property_string(mpv_, "pause", paused ? "yes" : "no");
+    if (mpv_) mpv_set_property_string(mpv_, "pause", paused ? "yes" : "no");
 }
 
 void MpvPlayer::publish_swapchain(void* swapchain) {
-    if (swapchain == swapchain_) {
-        return;
-    }
+    if (swapchain == swapchain_) return;
     swapchain_ = swapchain;
     diagnostics_.swapchain_state = swapchain ? "attached" : "none";
+    if (swapchain_callback_) swapchain_callback_(swapchain);
+}
 
-    log::info("Composition swap chain {}", swapchain ? "available" : "released");
-    if (swapchain_callback_) {
-        swapchain_callback_(swapchain);
+void MpvPlayer::handle_property(std::uint64_t id, const mpv_event_property& property) {
+    auto optional_double = [&]() -> std::optional<double> {
+        if (property.format == MPV_FORMAT_DOUBLE && property.data)
+            return *static_cast<double*>(property.data);
+        return std::nullopt;
+    };
+    switch (id) {
+        case kDisplaySwapchain: {
+            void* pointer = nullptr;
+            if (property.format == MPV_FORMAT_INT64 && property.data) {
+                pointer = reinterpret_cast<void*>(static_cast<std::intptr_t>(
+                    *static_cast<std::int64_t*>(property.data)));
+            }
+            publish_swapchain(pointer); break;
+        }
+        case kHwdecCurrent:
+            diagnostics_.hwdec_active = property.format == MPV_FORMAT_STRING && property.data
+                ? *static_cast<char**>(property.data) : ""; break;
+        case kVideoCodec:
+            diagnostics_.video_codec = property.format == MPV_FORMAT_STRING && property.data
+                ? *static_cast<char**>(property.data) : ""; break;
+        case kVideoWidth:
+            diagnostics_.video_width = property.format == MPV_FORMAT_INT64 && property.data
+                ? static_cast<int>(*static_cast<std::int64_t*>(property.data)) : 0; break;
+        case kVideoHeight:
+            diagnostics_.video_height = property.format == MPV_FORMAT_INT64 && property.data
+                ? static_cast<int>(*static_cast<std::int64_t*>(property.data)) : 0; break;
+        case kCoreIdle:
+            diagnostics_.core_idle = property.format == MPV_FORMAT_FLAG && property.data &&
+                *static_cast<int*>(property.data) != 0; break;
+        case kPausedForCache:
+            diagnostics_.paused_for_cache = property.format == MPV_FORMAT_FLAG && property.data &&
+                *static_cast<int*>(property.data) != 0; break;
+        case kCacheDuration:
+            diagnostics_.cache_duration_seconds = optional_double();
+            diagnostics_.cache_seconds = diagnostics_.cache_duration_seconds.value_or(0.0);
+            break;
+        case kCacheEnd: diagnostics_.cache_end_seconds = optional_double(); break;
+        case kPlaybackTime: diagnostics_.playback_time_seconds = optional_double(); break;
+        case kAvSync: diagnostics_.av_sync_seconds = optional_double(); break;
+        case kCacheSpeed: diagnostics_.input_rate_bytes_per_second = optional_double(); break;
+        case kEstimatedVfFps: diagnostics_.video_fps_estimate = optional_double(); break;
+        case kContainerFps: diagnostics_.container_fps = optional_double(); break;
+        default: break;
     }
 }
 
-void MpvPlayer::handle_property(uint64_t observe_id, const mpv_event_property& property) {
-    switch (observe_id) {
-        case kDisplaySwapchain: {
-            // The property carries the IDXGISwapChain address as an int64.
-            // Treated as a borrowed pointer: DirectComposition takes its own
-            // reference when the visual content is set.
-            void* pointer = nullptr;
-            if (property.format == MPV_FORMAT_INT64 && property.data) {
-                pointer = reinterpret_cast<void*>(
-                    static_cast<intptr_t>(*static_cast<int64_t*>(property.data)));
-            }
-            publish_swapchain(pointer);
-            break;
-        }
-        case kHwdecCurrent:
-            if (property.format == MPV_FORMAT_STRING && property.data) {
-                diagnostics_.hwdec_active = *static_cast<char**>(property.data);
-            }
-            break;
-        case kVideoCodec:
-            if (property.format == MPV_FORMAT_STRING && property.data) {
-                diagnostics_.video_codec = *static_cast<char**>(property.data);
-            }
-            break;
-        case kVideoWidth:
-            if (property.format == MPV_FORMAT_INT64 && property.data) {
-                diagnostics_.video_width = static_cast<int>(*static_cast<int64_t*>(property.data));
-            }
-            break;
-        case kVideoHeight:
-            if (property.format == MPV_FORMAT_INT64 && property.data) {
-                diagnostics_.video_height = static_cast<int>(*static_cast<int64_t*>(property.data));
-            }
-            break;
-        case kCoreIdle:
-            if (property.format == MPV_FORMAT_FLAG && property.data) {
-                diagnostics_.core_idle = *static_cast<int*>(property.data) != 0;
-            }
-            break;
-        case kPausedForCache:
-            if (property.format == MPV_FORMAT_FLAG && property.data) {
-                diagnostics_.paused_for_cache = *static_cast<int*>(property.data) != 0;
-            }
-            break;
-        case kCacheDuration:
-            if (property.format == MPV_FORMAT_DOUBLE && property.data) {
-                diagnostics_.cache_seconds = *static_cast<double*>(property.data);
-            }
-            break;
-        default:
-            break;
-    }
+core::PlaybackHealthObservation MpvPlayer::health_observation() const {
+    return {.av_sync_seconds = diagnostics_.av_sync_seconds,
+            .buffer_seconds = diagnostics_.cache_duration_seconds,
+            .cache_end_seconds = diagnostics_.cache_end_seconds,
+            .cache_paused = diagnostics_.paused_for_cache,
+            .input_rate_bytes_per_second = diagnostics_.input_rate_bytes_per_second,
+            .ipc_round_trip_ms = std::nullopt,
+            .playback_time_seconds = diagnostics_.playback_time_seconds,
+            .video_fps_estimate = diagnostics_.video_fps_estimate};
 }
 
 void MpvPlayer::pump() {
-    if (!mpv_) {
-        return;
-    }
-
+    if (!mpv_) return;
     for (;;) {
         mpv_event* event = mpv_wait_event(mpv_, 0.0);
-        if (!event || event->event_id == MPV_EVENT_NONE) {
-            break;
-        }
-
+        if (!event || event->event_id == MPV_EVENT_NONE) break;
         switch (event->event_id) {
             case MPV_EVENT_PROPERTY_CHANGE:
                 handle_property(event->reply_userdata,
-                                *static_cast<mpv_event_property*>(event->data));
+                    *static_cast<mpv_event_property*>(event->data)); break;
+            case MPV_EVENT_COMMAND_REPLY:
+                events_.command_result(event->reply_userdata, event->error);
                 break;
-
-            case MPV_EVENT_LOG_MESSAGE: {
-                const auto* message = static_cast<mpv_event_log_message*>(event->data);
-                std::string text(message->text);
-                while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
-                    text.pop_back();
-                }
-                log::warn("mpv/{}: {}", message->prefix, text);
-                break;
-            }
-
-            case MPV_EVENT_END_FILE: {
-                const auto* end = static_cast<mpv_event_end_file*>(event->data);
-                if (end->reason == MPV_END_FILE_REASON_ERROR) {
-                    log::error("Playback ended with error: {}", mpv_error_string(end->error));
-                }
+            case MPV_EVENT_START_FILE: {
+                const auto* start = static_cast<mpv_event_start_file*>(event->data);
+                current_entry_id_ = start->playlist_entry_id;
+                events_.start_file(start->playlist_entry_id);
+                transport_log_armed_ = true;
+                applied_filter_.clear();
                 break;
             }
-
-            case MPV_EVENT_PLAYBACK_RESTART:
-                // Fires once when playback begins, and again whenever mpv has
-                // to resynchronise -- which on this provider means a timeline
-                // discontinuity in the stream. Only the later ones count.
-                if (first_restart_seen_) {
-                    ++diagnostics_.discontinuities;
-                    log::warn("Stream discontinuity #{} (mpv resynchronised)",
-                              diagnostics_.discontinuities);
-                } else {
-                    first_restart_seen_ = true;
-                }
-                break;
-
             case MPV_EVENT_FILE_LOADED:
+                file_loaded_ = true;
                 if (load_in_flight_) {
-                    diagnostics_.last_load_seconds =
-                        std::chrono::duration<double>(
-                            std::chrono::steady_clock::now() - load_started_at_).count();
+                    diagnostics_.last_load_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - load_started_at_).count();
                     load_in_flight_ = false;
                     log::info("Channel ready in {:.2f}s", diagnostics_.last_load_seconds);
                 }
-                log::info("File loaded");
-                // mpv clears the graph between files, so the cached value no
-                // longer reflects reality and the filter must be reassigned.
-                applied_filter_.clear();
-                if (vsr_enabled_) {
-                    set_vsr(true, vsr_scale_);
+                if (vsr_enabled_) set_vsr(true, vsr_scale_);
+                break;
+            case MPV_EVENT_PLAYBACK_RESTART:
+                ++diagnostics_.mpv_playback_restart_events;
+                if (current_entry_id_) events_.playback_restart(*current_entry_id_);
+                break;
+            case MPV_EVENT_END_FILE: {
+                const auto* end = static_cast<mpv_event_end_file*>(event->data);
+                events_.end_file(end->playlist_entry_id, normalize_end_reason(end->reason),
+                                 end->error, end->playlist_insert_id,
+                                 end->playlist_insert_num_entries);
+                if (end->reason == MPV_END_FILE_REASON_ERROR) {
+                    log::error("Playback ended with structured error {}", end->error);
                 }
                 break;
-
-            case MPV_EVENT_SHUTDOWN:
-                log::warn("mpv requested shutdown");
-                return;
-
-            default:
+            }
+            case MPV_EVENT_LOG_MESSAGE: {
+                const auto* message = static_cast<mpv_event_log_message*>(event->data);
+                if (transport_log_armed_ && !transport_classification_reported_ && target_) {
+                    if (const auto classification = classify_transport_log(
+                            message->text, target_->transport, file_loaded_,
+                            target_->probed_format_forced)) {
+                        transport_classification_reported_ = true;
+                        if (std::holds_alternative<AuthenticationRejected>(*classification)) {
+                            events_.authentication_rejected(target_->generation);
+                        } else {
+                            events_.transport_failure(
+                                target_->generation,
+                                std::get<core::TransportFailureReason>(*classification));
+                        }
+                    }
+                }
+                // mpv warnings can embed authenticated stream URLs. Preserve
+                // the component and severity but never persist raw transport text.
+                log::warn("mpv/{} warning (details redacted)", message->prefix);
                 break;
+            }
+            case MPV_EVENT_QUEUE_OVERFLOW:
+                events_.backend_failed(target_ ? target_->generation : core::Generation{},
+                                       MPV_ERROR_EVENT_QUEUE_FULL);
+                break;
+            case MPV_EVENT_SHUTDOWN:
+                events_.backend_failed(target_ ? target_->generation : core::Generation{},
+                                       MPV_ERROR_UNINITIALIZED);
+                return;
+            default: break;
         }
     }
 }

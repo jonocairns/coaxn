@@ -3,10 +3,14 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "core/channel_index.hpp"
+#include "core/playback_health.hpp"
+#include "core/supervisor_host.hpp"
 #include "player/live_sync.hpp"
 #include "player/mpv_player.hpp"
 #include "win/app_window.hpp"
@@ -45,6 +49,12 @@ private:
 
     void begin_connect();
     void finish_connect();
+    void begin_health_load();
+    void process_player_events();
+    void flush_pending_stream_ends();
+    void sample_playback_health();
+    void execute_supervisor_effect(const core::SupervisorEffect& effect);
+    void on_supervisor_state_changed(const core::SupervisorState& state);
     void update_live_sync();
     void play(const core::Channel& channel);
     void apply_vsr();
@@ -57,6 +67,9 @@ private:
     win::CompositionTree composition_;
     player::MpvPlayer    player_;
     core::ChannelIndex   channels_;
+
+    core::SteadySupervisorClock supervisor_clock_;
+    core::PlaybackSupervisor    supervisor_;
 
     std::unique_ptr<xtream::Client> client_;
     xtream::Credentials             credentials_;
@@ -95,6 +108,24 @@ private:
     player::LiveSync live_sync_;
     bool             was_paused_for_cache_ = false;
     int              rebuffer_count_       = 0;
+
+    core::Generation generation_;
+    std::optional<core::PlaybackHealthState> playback_health_;
+    core::BufferHealthSnapshot health_snapshot_;
+    core::SupervisorStatsSnapshot supervisor_snapshot_;
+    core::TimePoint next_health_sample_{};
+    bool first_frame_seen_ = false;
+    bool stall_reported_ = false;
+    bool decode_stall_reported_ = false;
+    bool exact_failure_reported_ = false;
+    std::optional<bool> last_cache_state_dispatched_;
+
+    struct PendingStreamEnd {
+        core::Generation generation;
+        core::EndReason reason;
+        core::TimePoint dispatch_at;
+    };
+    std::vector<PendingStreamEnd> pending_stream_ends_;
 };
 
 }  // namespace coax::app
