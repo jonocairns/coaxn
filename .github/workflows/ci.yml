@@ -1,0 +1,70 @@
+name: ci
+
+# Nothing validated a pull request before this. release.yml runs only on a tag
+# push, so the first thing to notice a broken build was a failed release --
+# after the tag existed and the version had already been bumped.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to a branch makes the run already in flight irrelevant. Pushes to
+# main are left alone: each one is a distinct merge worth a result of its own.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  core:
+    name: portable core tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+
+      # Needs neither Windows nor libmpv, so it finishes long before the
+      # cross-build and fails fast on anything in core/ or util/.
+      - name: Test the portable core
+        run: |
+          nix develop .#core --command cmake -S . -B build-core -G Ninja \
+            -DCOAX_BUILD_APP=OFF -DBUILD_TESTING=ON
+          nix develop .#core --command cmake --build build-core
+          nix develop .#core --command ctest --test-dir build-core --output-on-failure
+
+  windows:
+    name: windows cross-build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+
+      # The pinned runtime is a 117 MB download that only moves when the fetch
+      # script does, and the script exits early when the tree is already
+      # unpacked -- so the pin itself is the cache key.
+      - name: Cache pinned libmpv
+        uses: actions/cache@v4
+        with:
+          path: third_party/mpv
+          key: libmpv-${{ hashFiles('scripts/fetch-libmpv.sh') }}
+
+      - name: Fetch pinned libmpv
+        run: nix develop --command ./scripts/fetch-libmpv.sh
+
+      # The app and player targets are where most of the code lives and none of
+      # it is reachable from the core tests, so without this a green PR could
+      # still fail to produce a coax.exe. The player test binary is built here
+      # but not run: it is a Windows executable and this runner is Linux.
+      - name: Cross-compile
+        run: |
+          nix develop --command cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw.cmake \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          nix develop --command cmake --build build
