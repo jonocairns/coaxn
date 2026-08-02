@@ -1,0 +1,73 @@
+name: release
+
+# Shipping an update is a tag push. The Windows artifacts are cross-compiled
+# on Linux, so no Windows runner is involved.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+
+      - name: Fetch pinned libmpv
+        run: nix develop --command ./scripts/fetch-libmpv.sh
+
+      - name: Test the portable core
+        run: |
+          nix develop .#core --command cmake -S . -B build-core -G Ninja \
+            -DCOAX_BUILD_APP=OFF -DBUILD_TESTING=ON
+          nix develop .#core --command cmake --build build-core
+          nix develop .#core --command ctest --test-dir build-core --output-on-failure
+
+      - name: Build and package
+        run: |
+          nix develop --command cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw.cmake \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          nix develop --command cmake --build build --target package
+
+      # The version lives in CMakeLists, but the tag is what users compare
+      # against: the in-app update check tests the release tag against the
+      # version compiled into the binary. If the two drift, everyone running
+      # the new build is told to upgrade to the version they already have, and
+      # the prompt never goes away. Naming the artifacts from the tag turns
+      # that silent trap into a failed release.
+      - name: Check the tag matches the built version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          missing=0
+          for artifact in \
+            "build/coax-${version}-win64-setup.exe" \
+            "build/coax-${version}-win64.zip" \
+            "build/coax-${version}-win64-debug.zip"
+          do
+            if [ ! -f "$artifact" ]; then
+              echo "::error::Expected $artifact. Tag ${GITHUB_REF_NAME} does not match the"
+              echo "::error::version in CMakeLists.txt. Bump project(coax_native VERSION ...)."
+              missing=1
+            fi
+          done
+          ls -la build/*.zip build/*setup.exe || true
+          exit "$missing"
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            build/coax-*-setup.exe
+            build/coax-*-win64.zip
+            build/coax-*-win64-debug.zip

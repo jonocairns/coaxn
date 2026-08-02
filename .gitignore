@@ -57,6 +57,7 @@ compile_commands.json
 *.log
 *.bak
 *.swp
+__pycache__/
 
 # vcpkg
 vcpkg_installed/
@@ -67,3 +68,12 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Pinned libmpv runtime, fetched by scripts/fetch-libmpv.sh
+third_party/mpv/
+
+# Local runtime state (contains provider credentials)
+coax-portal.json
+
+# Editor and tooling state
+.vscode/
