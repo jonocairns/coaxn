@@ -166,7 +166,9 @@ void App::load_saved_portal() {
     username_   = stored.substr(first + 1, second - first - 1);
     password_   = stored.substr(second + 1);
     set_status("Saved portal loaded");
-    log::info("Restored saved portal for {}", portal_url_);
+    // A pasted portal link carries the username and password in its query, and
+    // the session log sits next to the executable in plain text.
+    log::info("Restored saved portal for {}", log::redact_portal_url(portal_url_));
 }
 
 void App::save_portal() const {

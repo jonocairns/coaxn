@@ -17,7 +17,8 @@ add_library(coax_core
     src/core/playback_health.cpp
     src/core/supervisor.cpp
     src/core/supervisor_host.cpp
-    src/core/version.cpp)
+    src/core/version.cpp
+    src/util/redact.cpp)
 target_include_directories(coax_core PUBLIC src)
 target_compile_options(coax_core PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -36,7 +37,8 @@ if(BUILD_TESTING)
         test/core/playback_health_tests.cpp
         test/core/supervisor_tests.cpp
         test/core/supervisor_host_tests.cpp
-        test/core/version_tests.cpp)
+        test/core/version_tests.cpp
+        test/util/redact_tests.cpp)
     target_link_libraries(coax_core_tests PRIVATE Catch2::Catch2WithMain coax_core)
     target_compile_options(coax_core_tests PRIVATE -Wall -Wextra -Wpedantic)
     if(WIN32)
