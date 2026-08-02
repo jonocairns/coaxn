@@ -102,7 +102,30 @@ bool App::initialize(std::string& error) {
     } else {
         load_saved_portal();
     }
+
+    begin_update_check();
     return true;
+}
+
+void App::begin_update_check() {
+    update_done_.store(false, std::memory_order_release);
+    update_thread_ = std::thread([this] {
+        update_result_ = check_for_update();
+        update_done_.store(true, std::memory_order_release);
+    });
+}
+
+void App::finish_update_check() {
+    if (!update_done_.exchange(false, std::memory_order_acq_rel)) {
+        return;
+    }
+    // Joining is what publishes the worker's write; nothing reads
+    // update_available_ before this point.
+    if (update_thread_.joinable()) {
+        update_thread_.join();
+    }
+    update_available_ = std::move(update_result_);
+    update_result_.reset();
 }
 
 void App::handle_resize(int width, int height) {
@@ -662,6 +685,39 @@ void App::draw_status_bar() {
     ImGui::End();
 }
 
+void App::draw_update_banner() {
+    if (!update_available_ || update_dismissed_) {
+        return;
+    }
+
+    // Top-right, clear of the channel list and the status bar. This is a
+    // notice, not a modal: someone mid-programme can ignore or dismiss it and
+    // nothing blocks playback.
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(
+        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - 16.0f, viewport->WorkPos.y + 16.0f),
+        ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.85f);
+
+    ImGui::Begin("##update", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+
+    ImGui::Text("Version %s is available", update_available_->version.c_str());
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Download")) {
+        open_in_browser(update_available_->page_url);
+        update_dismissed_ = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Later")) {
+        update_dismissed_ = true;
+    }
+
+    ImGui::End();
+}
+
 void App::draw_diagnostics() {
     if (!show_diagnostics_) {
         return;
@@ -763,6 +819,8 @@ void App::draw_diagnostics() {
 }
 
 void App::draw_frame() {
+    finish_update_check();
+
     ui_.begin_frame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -790,6 +848,7 @@ void App::draw_frame() {
             draw_status_bar();
             break;
     }
+    draw_update_banner();
     draw_diagnostics();
 
     ImGui::Render();
@@ -840,6 +899,11 @@ int App::run() {
 void App::shutdown() {
     if (connect_thread_.joinable()) {
         connect_thread_.join();
+    }
+    // The check is bounded by the WinHTTP timeouts, so this cannot hang
+    // shutdown indefinitely.
+    if (update_thread_.joinable()) {
+        update_thread_.join();
     }
     supervisor_.dispose();
     player_.stop(generation_);

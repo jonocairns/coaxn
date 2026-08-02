@@ -20,6 +20,9 @@
             ninja
             p7zip
             curl
+            # Builds the Windows installer from Linux; see the packaging
+            # section of the README.
+            nsis
           ];
 
           # mcfgthreads is the threading runtime nixpkgs' mingw gcc links against;

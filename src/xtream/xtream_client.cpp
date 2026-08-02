@@ -10,6 +10,7 @@
 #include <format>
 #include <utility>
 
+#include "util/http.hpp"
 #include "util/log.hpp"
 
 namespace coax::xtream {
@@ -17,57 +18,7 @@ namespace {
 
 using json = nlohmann::json;
 
-// --- small Win32 helpers ---------------------------------------------------
-
-std::wstring widen(std::string_view text) {
-    if (text.empty()) {
-        return {};
-    }
-    const int needed = MultiByteToWideChar(CP_UTF8, 0, text.data(),
-                                           static_cast<int>(text.size()), nullptr, 0);
-    std::wstring out(static_cast<std::size_t>(needed), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
-                        out.data(), needed);
-    return out;
-}
-
-std::string narrow(std::wstring_view text) {
-    if (text.empty()) {
-        return {};
-    }
-    const int needed = WideCharToMultiByte(CP_UTF8, 0, text.data(),
-                                           static_cast<int>(text.size()),
-                                           nullptr, 0, nullptr, nullptr);
-    std::string out(static_cast<std::size_t>(needed), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
-                        out.data(), needed, nullptr, nullptr);
-    return out;
-}
-
-// Closes a WinHTTP handle on scope exit.
-class Handle {
-public:
-    Handle() = default;
-    explicit Handle(HINTERNET h) : h_(h) {}
-    ~Handle() { if (h_) WinHttpCloseHandle(h_); }
-
-    Handle(const Handle&)            = delete;
-    Handle& operator=(const Handle&) = delete;
-    Handle(Handle&& other) noexcept : h_(std::exchange(other.h_, nullptr)) {}
-    Handle& operator=(Handle&& other) noexcept {
-        if (this != &other) {
-            if (h_) WinHttpCloseHandle(h_);
-            h_ = std::exchange(other.h_, nullptr);
-        }
-        return *this;
-    }
-
-    [[nodiscard]] HINTERNET get() const { return h_; }
-    explicit operator bool() const { return h_ != nullptr; }
-
-private:
-    HINTERNET h_ = nullptr;
-};
+using util::http::narrow;
 
 std::string url_encode(std::string_view text) {
     static constexpr std::string_view kHex = "0123456789ABCDEF";
@@ -114,36 +65,6 @@ int field_int(const json& object, std::string_view key) {
     }
 }
 
-struct CrackedUrl {
-    std::wstring host;
-    std::wstring path_and_query;
-    INTERNET_PORT port   = 0;
-    bool          secure = false;
-};
-
-bool crack(std::string_view url, CrackedUrl& out) {
-    const std::wstring wide = widen(url);
-
-    URL_COMPONENTS parts{};
-    parts.dwStructSize      = sizeof(parts);
-    parts.dwSchemeLength    = static_cast<DWORD>(-1);
-    parts.dwHostNameLength  = static_cast<DWORD>(-1);
-    parts.dwUrlPathLength   = static_cast<DWORD>(-1);
-    parts.dwExtraInfoLength = static_cast<DWORD>(-1);
-
-    if (!WinHttpCrackUrl(wide.c_str(), static_cast<DWORD>(wide.size()), 0, &parts)) {
-        return false;
-    }
-
-    out.host   = std::wstring(parts.lpszHostName, parts.dwHostNameLength);
-    out.port   = parts.nPort;
-    out.secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
-    out.path_and_query =
-        std::wstring(parts.lpszUrlPath, parts.dwUrlPathLength) +
-        std::wstring(parts.lpszExtraInfo, parts.dwExtraInfoLength);
-    return true;
-}
-
 // Extracts one query parameter from a raw ?a=b&c=d string.
 std::string query_param(std::wstring_view query, std::wstring_view key) {
     std::size_t cursor = 0;
@@ -167,8 +88,8 @@ std::string query_param(std::wstring_view query, std::wstring_view key) {
 }  // namespace
 
 bool parse_portal_url(std::string_view url, Credentials& out) {
-    CrackedUrl cracked;
-    if (!crack(url, cracked)) {
+    util::http::CrackedUrl cracked;
+    if (!util::http::crack(url, cracked)) {
         return false;
     }
 
@@ -201,71 +122,7 @@ bool Client::get(std::string_view query, std::string& body, std::string& error) 
         "{}/player_api.php?username={}&password={}&{}",
         creds_.base_url, url_encode(creds_.username), url_encode(creds_.password), query);
 
-    CrackedUrl cracked;
-    if (!crack(url, cracked)) {
-        error = "Portal URL could not be parsed";
-        return false;
-    }
-
-    Handle session(WinHttpOpen(L"coax-native/0.1",
-                               WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
-    if (!session) {
-        error = std::format("WinHttpOpen failed ({})", GetLastError());
-        return false;
-    }
-
-    // Providers are often slow; these are generous but bounded.
-    WinHttpSetTimeouts(session.get(), 10000, 15000, 30000, 30000);
-
-    Handle connect(WinHttpConnect(session.get(), cracked.host.c_str(), cracked.port, 0));
-    if (!connect) {
-        error = std::format("Cannot reach {} ({})", narrow(cracked.host), GetLastError());
-        return false;
-    }
-
-    Handle request(WinHttpOpenRequest(
-        connect.get(), L"GET", cracked.path_and_query.c_str(), nullptr,
-        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-        cracked.secure ? WINHTTP_FLAG_SECURE : 0));
-    if (!request) {
-        error = std::format("WinHttpOpenRequest failed ({})", GetLastError());
-        return false;
-    }
-
-    if (!WinHttpSendRequest(request.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-        !WinHttpReceiveResponse(request.get(), nullptr)) {
-        error = std::format("Request failed ({})", GetLastError());
-        return false;
-    }
-
-    DWORD status = 0;
-    DWORD size   = sizeof(status);
-    WinHttpQueryHeaders(request.get(),
-                        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
-    if (status != 200) {
-        error = std::format("Provider returned HTTP {}", status);
-        return false;
-    }
-
-    body.clear();
-    for (;;) {
-        DWORD available = 0;
-        if (!WinHttpQueryDataAvailable(request.get(), &available) || available == 0) {
-            break;
-        }
-        const std::size_t offset = body.size();
-        body.resize(offset + available);
-        DWORD read = 0;
-        if (!WinHttpReadData(request.get(), body.data() + offset, available, &read)) {
-            error = std::format("Read failed ({})", GetLastError());
-            return false;
-        }
-        body.resize(offset + read);
-    }
-    return true;
+    return util::http::get(url, body, error);
 }
 
 bool Client::fetch_catalog(Catalog& out, std::string& error) const {

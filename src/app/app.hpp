@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "app/update_check.hpp"
 #include "core/channel_index.hpp"
 #include "core/playback_health.hpp"
 #include "core/supervisor_host.hpp"
@@ -45,10 +46,13 @@ private:
     void draw_login();
     void draw_browser();
     void draw_status_bar();
+    void draw_update_banner();
     void draw_diagnostics();
 
     void begin_connect();
     void finish_connect();
+    void begin_update_check();
+    void finish_update_check();
     void begin_health_load();
     void process_player_events();
     void flush_pending_stream_ends();
@@ -84,6 +88,15 @@ private:
     std::mutex               connect_mutex_;
     xtream::Catalog          connect_catalog_;
     std::string              connect_error_;
+
+    // Update check. Runs once at startup on its own thread. The worker only
+    // ever touches update_result_; the UI thread joins before moving it into
+    // update_available_, which is the one the frame loop reads.
+    std::thread               update_thread_;
+    std::atomic<bool>         update_done_{false};
+    std::optional<UpdateInfo> update_result_;
+    std::optional<UpdateInfo> update_available_;
+    bool                      update_dismissed_ = false;
 
     // UI state
     std::string portal_url_;

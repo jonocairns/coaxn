@@ -5,6 +5,7 @@
 #include <format>
 
 #include "util/log.hpp"
+#include "win/resource.h"
 
 // Provided by imgui_impl_win32; declared here to avoid pulling the backend
 // header into every translation unit that includes this one.
@@ -99,6 +100,10 @@ bool AppWindow::create(const wchar_t* title, int width, int height, std::string&
     window_class.hInstance     = instance;
     window_class.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
     window_class.lpszClassName = kWindowClass;
+    // Icon comes from the executable's own resources (see coax.rc.in). Absent
+    // it, the taskbar and Alt-Tab fall back to the generic application icon.
+    window_class.hIcon         = LoadIconW(instance, MAKEINTRESOURCEW(IDI_COAX_APP));
+    window_class.hIconSm       = window_class.hIcon;
     // No background brush: DirectComposition owns the surface.
     window_class.hbrBackground = nullptr;
 
