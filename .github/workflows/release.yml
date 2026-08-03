@@ -1,28 +1,86 @@
 name: release
 
-# Shipping an update is a tag push. The Windows artifacts are cross-compiled
-# on Linux, so no Windows runner is involved.
+# Releasing is merging a pull request. release-please watches main and keeps a
+# release PR up to date with every conventional commit since the last release,
+# carrying the version bump and the CHANGELOG entry. Merging it is the decision
+# to ship: that stages a draft GitHub release, and the second job here
+# cross-compiles the Windows artifacts and attaches them to it. Publishing the
+# draft by hand is the last step, and the only one users can see.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pull-requests: write
+
+# Two releases attaching artifacts at once would race. Merges to main are cheap
+# to serialise and a release is rare, so nothing here is worth cancelling.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  release:
+  prepare:
+    name: release pull request
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      released: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      # Reads the repository through the API, so it needs no checkout. On most
+      # pushes this only refreshes the pending release PR and stops there.
+      - uses: googleapis/release-please-action@v4
+        id: release
+
+  artifacts:
+    name: windows artifacts
+    needs: prepare
+    if: needs.prepare.outputs.released == 'true'
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+
+      # The release PR rewrote project(coax_native VERSION ...), so this
+      # checkout already carries the version that was just tagged. Asserting
+      # they agree costs nothing and catches the one failure that would
+      # otherwise be silent: if the x-release-please-version annotation in
+      # CMakeLists.txt were lost, the release would still be created, but the
+      # artifacts would be built and named from the previous version -- and the
+      # update check would then offer everyone a download of the build they are
+      # already running, with no way to make the prompt go away.
+      - name: Check CMakeLists matches the release
+        run: |
+          version=$(sed -n 's/^project(coax_native VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [ "$version" != "${{ needs.prepare.outputs.version }}" ]; then
+            echo "::error::Released ${{ needs.prepare.outputs.version }}, but CMakeLists.txt says ${version:-nothing}."
+            echo "::error::Check the x-release-please-version annotation above project() in CMakeLists.txt."
+            exit 1
+          fi
 
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: "experimental-features = nix-command flakes"
 
+      # The pinned runtime is a 117 MB download that only moves when the fetch
+      # script does, and the script exits early when the tree is already
+      # unpacked -- so the pin itself is the cache key. Same key as ci.yml, so a
+      # release usually reuses what a merge to main already downloaded.
+      - name: Cache pinned libmpv
+        uses: actions/cache@v4
+        with:
+          path: third_party/mpv
+          key: libmpv-${{ hashFiles('scripts/fetch-libmpv.sh') }}
+
       - name: Fetch pinned libmpv
         run: nix develop --command ./scripts/fetch-libmpv.sh
 
+      # ci.yml covers this commit too, but it runs in parallel and nothing here
+      # waits on it. A release is rare and shipping an untested build is not
+      # worth the few minutes saved, so it stands on its own tests.
       - name: Test the portable core
         run: |
           nix develop .#core --command cmake -S . -B build-core -G Ninja \
@@ -37,37 +95,34 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo
           nix develop --command cmake --build build --target package
 
-      # The version lives in CMakeLists, but the tag is what users compare
-      # against: the in-app update check tests the release tag against the
-      # version compiled into the binary. If the two drift, everyone running
-      # the new build is told to upgrade to the version they already have, and
-      # the prompt never goes away. Naming the artifacts from the tag turns
-      # that silent trap into a failed release.
-      - name: Check the tag matches the built version
-        if: startsWith(github.ref, 'refs/tags/v')
+      # A release holding two of the three artifacts is worse than one holding
+      # none, because it looks complete. Checked together, before any upload.
+      - name: Check the artifacts exist
         run: |
-          version="${GITHUB_REF_NAME#v}"
           missing=0
           for artifact in \
-            "build/coax-${version}-win64-setup.exe" \
-            "build/coax-${version}-win64.zip" \
-            "build/coax-${version}-win64-debug.zip"
+            "build/coax-${{ needs.prepare.outputs.version }}-win64-setup.exe" \
+            "build/coax-${{ needs.prepare.outputs.version }}-win64.zip" \
+            "build/coax-${{ needs.prepare.outputs.version }}-win64-debug.zip"
           do
             if [ ! -f "$artifact" ]; then
-              echo "::error::Expected $artifact. Tag ${GITHUB_REF_NAME} does not match the"
-              echo "::error::version in CMakeLists.txt. Bump project(coax_native VERSION ...)."
+              echo "::error::Packaging did not produce $artifact."
               missing=1
             fi
           done
           ls -la build/*.zip build/*setup.exe || true
           exit "$missing"
 
-      - name: Publish
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            build/coax-*-setup.exe
-            build/coax-*-win64.zip
-            build/coax-*-win64-debug.zip
+      # --clobber so a re-run after a failed upload replaces what it left
+      # behind rather than erroring on the half that already arrived.
+      - name: Attach the artifacts to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release upload "$TAG" \
+            "build/coax-${VERSION}-win64-setup.exe" \
+            "build/coax-${VERSION}-win64.zip" \
+            "build/coax-${VERSION}-win64-debug.zip" \
+            --clobber

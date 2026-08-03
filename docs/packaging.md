@@ -22,21 +22,43 @@ NSIS compresses with LZMA where the zip uses deflate.
 
 ## Shipping a release
 
-Push a version tag. [`.github/workflows/release.yml`](../.github/workflows/release.yml)
-runs the core tests, cross-compiles, packages, and attaches all three artifacts
-to a GitHub release:
+Releasing is merging a pull request and then publishing a draft. No version is
+typed, no tag is written by hand, and nothing happens on a development machine.
 
-```bash
-git tag v0.2.0 && git push origin v0.2.0
-```
+release-please watches `main` and keeps a release pull request open, rewriting
+it on every push. The PR is a running proposal: the next version, derived from
+the conventional-commit prefixes since the last release, and the `CHANGELOG.md`
+entry that goes with it. Ignore it and it keeps growing. Merge it and that is
+the decision to ship.
 
-The version lives in `project(coax_native VERSION ...)` in
-[CMakeLists.txt](../CMakeLists.txt), and **the tag must match it**. The workflow
-names the expected artifacts from the tag and fails if they are missing, which
-is deliberate: the in-app update check compares the release tag against the
-version compiled into the binary, so a tag ahead of `CMakeLists.txt` would tell
-everyone running the new build to upgrade to the version they already have, and
-the prompt would never clear.
+Merging it makes [`.github/workflows/release.yml`](../.github/workflows/release.yml)
+stage a **draft** release and attach all three artifacts to it, after running
+the core tests and cross-compiling. Then someone downloads the installer, runs
+it on Windows, and presses Publish.
+
+That last step is deliberate and it is the only manual one. The in-app update
+check reads `releases/latest`, which skips drafts, so nobody is told to upgrade
+until a human has confirmed the build installs. A draft that turns out to be
+broken is deleted, and no user ever saw it.
+
+Three things follow from the prefixes, so they are worth getting right:
+`feat:` bumps the minor, `fix:` the patch, and anything else — `docs:`, `ci:`,
+`refactor:` — lands in the changelog without moving the version. Before 1.0 a
+breaking change bumps the minor rather than the major.
+
+### Where the version lives
+
+Still `project(coax_native VERSION ...)` in [CMakeLists.txt](../CMakeLists.txt),
+which is what CPack names the artifacts from and what the update check compiles
+into the binary. The difference is that release-please owns the line and edits
+it in the release PR, so it is never bumped by hand. It finds the line by the
+`x-release-please-version` comment directly above it — delete that annotation
+and releases would be tagged ahead of the build they contain, which is why the
+release job re-reads `CMakeLists.txt` and fails if it disagrees with the version
+just released.
+
+`version.txt` and `.release-please-manifest.json` are release-please's own
+bookkeeping. Nothing in the build reads either one; leave both to the bot.
 
 ## Update notifications
 

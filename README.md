@@ -73,6 +73,11 @@ nix develop .#core --command bash -c \
    cmake --build build-core && ctest --test-dir build-core --output-on-failure'
 ```
 
+Commit subjects follow [Conventional Commits](https://www.conventionalcommits.org):
+`feat:` bumps the minor version, `fix:` the patch, and everything else lands in
+the changelog without moving the version. The prefixes are not decoration —
+release-please derives the next release from them.
+
 Packaging and release mechanics live in [docs/packaging.md](docs/packaging.md).
 
 ## Architecture
