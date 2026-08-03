@@ -398,11 +398,26 @@ void MpvPlayer::publish_swapchain(void* swapchain, SwapchainAcquisition source) 
     // returned is the previous reference dropped, which is what keeps the
     // compositor from being left holding the last reference to an object mpv
     // is already tearing down.
-    if (swapchain_callback_) swapchain_callback_(acquired.get());
-    held_swapchain_ = std::move(acquired);
-    attached_ = incoming.present() ? incoming : core::SwapchainIdentity{};
+    //
+    // The presentation layer, not this one, is the authority on whether the
+    // content actually attached: SetContent can refuse. Recording a refusal as
+    // an attachment would report a live swap chain that is on nothing, and
+    // would make the next identical notification a suppressed duplicate — so
+    // a refusal leaves nothing attached, and a later reconfiguration or
+    // observation republishes and tries again.
+    const bool published = swapchain_callback_ ? swapchain_callback_(acquired.get()) : true;
 
-    if (transition == core::SwapchainTransition::Reattach) {
+    // The previous reference is dropped either way. The old content is cleared
+    // before the new is set and that clear is committed even when the attach
+    // fails, so the object has left the visual in both outcomes.
+    held_swapchain_ = published ? std::move(acquired) : win::ComPtr<IUnknown>{};
+    attached_ = published && incoming.present() ? incoming : core::SwapchainIdentity{};
+
+    if (!published) {
+        log::error("Composition tree refused the swap chain from {} (epoch {}); "
+                   "nothing is attached", to_string(source), swapchain_epoch_);
+    }
+    if (published && transition == core::SwapchainTransition::Reattach) {
         ++diagnostics_.swapchain_reattachments;
         if (address_changed) ++diagnostics_.swapchain_replacements;
     }
@@ -411,7 +426,7 @@ void MpvPlayer::publish_swapchain(void* swapchain, SwapchainAcquisition source) 
     diagnostics_.swapchain_acquisition = attached_.present() ? source
                                                              : SwapchainAcquisition::None;
 
-    switch (transition) {
+    switch (published ? transition : core::SwapchainTransition::Ignore) {
         case core::SwapchainTransition::Attach:
             log::info("Composition swap chain attached via {} (epoch {})",
                       to_string(source), swapchain_epoch_);

@@ -110,7 +110,11 @@ struct PlaybackTarget {
 // RAII libmpv owner. The UI thread is the sole caller.
 class MpvPlayer {
 public:
-    using SwapchainCallback = std::function<void(void* swapchain)>;
+    // Returns whether the presentation layer now holds exactly what it was
+    // handed. A refused attachment must not be recorded as one: it would both
+    // report a live attachment that does not exist and suppress the next
+    // identical notification as a duplicate, leaving no way back.
+    using SwapchainCallback = std::function<bool(void* swapchain)>;
 
     MpvPlayer() = default;
     ~MpvPlayer();

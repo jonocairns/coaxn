@@ -167,6 +167,11 @@ private:
     // Presentation lifetime. The budget bounds and paces rebuilds; the rest is
     // what F1 reports, kept here rather than in the player's diagnostics
     // because it outlives the UI device it describes.
+    // Whether the UI device and composition tree are both up. A rebuild drops
+    // it, and only a complete rebuild restores it: between those points the
+    // ImGui D3D11 backend has been shut down, and drawing a frame against it
+    // dereferences a null backend rather than failing.
+    bool presentation_ready_ = false;
     core::PresentationRebuildBudget presentation_budget_;
     std::string last_device_loss_;
     int         device_loss_events_    = 0;

@@ -83,6 +83,7 @@ bool App::initialize(std::string& error) {
         return false;
     }
     composition_.set_ui_content(ui_.swapchain());
+    presentation_ready_ = true;
 
     player::PlayerConfig config;
     config.composition_width  = window_.width();
@@ -95,8 +96,13 @@ bool App::initialize(std::string& error) {
     // unavailable until mpv's video output exists, and mpv may replace the
     // swap chain later.
     player_.on_swapchain([this](void* swapchain) {
-        composition_.set_video_content(static_cast<IUnknown*>(swapchain));
-        video_attached_ = swapchain != nullptr;
+        const bool attached = composition_.set_video_content(
+            static_cast<IUnknown*>(swapchain));
+        // Only a content change the tree accepted counts. Otherwise the
+        // backdrop stays drawn, which is the honest thing to show when the
+        // video visual is holding nothing.
+        video_attached_ = attached && swapchain != nullptr;
+        return attached;
     });
 
     window_.on_resize([this](int width, int height) { handle_resize(width, height); });
@@ -219,6 +225,13 @@ bool App::rebuild_presentation() {
     // tree holding it goes, and the tree leaves the device before the device
     // does. The player moves to a new epoch as it detaches, so the address it
     // just released cannot be mistaken for whatever the rebuilt mpv reports.
+    // Nothing may draw from here until the far end of this function. Tearing
+    // the UI layer down shuts the ImGui D3D11 backend down with it, and a
+    // frame drawn against that backend does not fail — it dereferences a null
+    // pointer. A rebuild that fails partway is the ordinary case, not an
+    // exotic one: an adapter that is mid-reset refuses device creation, which
+    // is exactly why the attempt is retried.
+    presentation_ready_ = false;
     player_.detach_swapchain();
     video_attached_ = false;
     composition_.destroy();
@@ -235,6 +248,7 @@ bool App::rebuild_presentation() {
     }
     composition_.set_ui_content(ui_.swapchain());
 
+    presentation_ready_ = true;
     ++presentation_rebuilds_;
     log::info("Presentation rebuilt ({}x{})", window_.width(), window_.height());
     return true;
@@ -1251,6 +1265,15 @@ void App::draw_diagnostics() {
 
 void App::draw_frame() {
     finish_update_check();
+
+    // Between a rebuild's teardown and its completion there is no backend to
+    // draw with. Skipped rather than guarded further in, because a partial
+    // frame is worth nothing: the composition tree that would present it does
+    // not exist either. Reached from the window procedure as well as the
+    // frame loop, so the check has to live here rather than at the call site.
+    if (!presentation_ready_) {
+        return;
+    }
 
     ui_.begin_frame();
     ImGui_ImplWin32_NewFrame();

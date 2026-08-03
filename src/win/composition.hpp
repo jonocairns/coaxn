@@ -30,7 +30,12 @@ public:
     // release its own reference until after the content has been cleared.
     // Taking a reference is the caller's job regardless: the pointer arrives
     // from mpv unowned.
-    void set_video_content(IUnknown* swapchain);
+    //
+    // Returns whether the visual now holds exactly what was asked for. A
+    // refused attach is reported rather than only logged, because the caller
+    // records attachment state that diagnostics are read from, and an
+    // attachment the tree rejected would otherwise be reported as live.
+    [[nodiscard]] bool set_video_content(IUnknown* swapchain);
     void set_ui_content(IUnknown* swapchain);
 
     void commit();

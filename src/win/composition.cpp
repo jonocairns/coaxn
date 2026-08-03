@@ -38,9 +38,9 @@ bool CompositionTree::create(HWND window, IDXGIDevice* dxgi_device, std::string&
     return true;
 }
 
-void CompositionTree::set_video_content(IUnknown* swapchain) {
+bool CompositionTree::set_video_content(IUnknown* swapchain) {
     if (!video_) {
-        return;
+        return false;
     }
     // Cleared first even when a replacement follows. SetContent is what holds
     // DirectComposition's reference, so this is the only way to drop it on
@@ -54,13 +54,20 @@ void CompositionTree::set_video_content(IUnknown* swapchain) {
     const HRESULT hr = video_->SetContent(swapchain);
     if (FAILED(hr)) {
         log::error("Attaching video content failed (0x{:08X})", static_cast<unsigned>(hr));
-        return;
+        // The clear above is already pending on the visual. Commit it rather
+        // than leaving it for whatever unrelated call happens to commit next:
+        // until then the visual would keep presenting a swap chain the tree no
+        // longer references, and the frame that eventually landed would be an
+        // empty video visual at an unpredictable moment.
+        commit();
+        return false;
     }
     commit();
     // Success is not logged here. The caller knows which acquisition path
     // produced the pointer, which epoch it belongs to and whether it is a real
     // replacement, and says so; a second line per call would only duplicate
     // that with less, and a reconfiguration burst calls this repeatedly.
+    return true;
 }
 
 void CompositionTree::destroy() {

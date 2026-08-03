@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <string_view>
+
 #include "core/presentation.hpp"
 
 using namespace coax::core;
@@ -72,6 +74,24 @@ TEST_CASE("the first rebuild attempt is due immediately and repeated losses coll
     CHECK(budget.attempts() == 1);
     // One attempt outstanding at a time: nothing else is due until it settles.
     CHECK(budget.poll(at(1)) == RebuildDecision::Hold);
+}
+
+TEST_CASE("an attempt that is never settled still cannot spin") {
+    // poll() spends the retry delay itself rather than trusting the caller to
+    // report back. A rebuild that neither succeeds nor fails — an exception on
+    // the way out, a path that forgets — must not hand out the next attempt on
+    // the next frame, because the frame loop polls at frame rate.
+    PresentationRebuildBudget budget;
+    budget.request(at(0));
+    REQUIRE(budget.poll(at(0)) == RebuildDecision::Attempt);
+
+    CHECK(budget.poll(at(0)) == RebuildDecision::Hold);
+    CHECK(budget.poll(at(0.5)) == RebuildDecision::Hold);
+    CHECK(budget.attempts() == 1);
+
+    // And the pacing is the ordinary retry delay, not a stall.
+    CHECK(budget.poll(at(1.0)) == RebuildDecision::Attempt);
+    CHECK(budget.attempts() == 2);
 }
 
 TEST_CASE("a failed rebuild waits out the retry delay rather than spinning") {
