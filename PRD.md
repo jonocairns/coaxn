@@ -211,12 +211,26 @@ Coax Native process
 **The libmpv pin.** mpv `v0.41.0` registers `display-swapchain` and documents
 `--d3d11-output-mode` and `--d3d11-composition-size`, so the composition path
 exists in a tagged release. What the tag does not provide is a *usable artifact*:
-upstream's `mpv-v0.41.0-x86_64-pc-windows-msvc.zip` is a player, with no libmpv
-DLL, import library or headers. Coax therefore pins a prebuilt libmpv
-development package — shinchiro winbuild `20260610` of mpv commit
-`304426c390901436fb1d4a63efbd582ae80c88f4` — recorded in
-`third_party/mpv/PINNED.txt`. The pin is chosen for artifact availability, not
-for any feature missing from the tag.
+none of upstream's Windows archives ships a libmpv DLL, import library or
+headers. Coax therefore pins a prebuilt libmpv development package — shinchiro
+winbuild `20260610` of mpv commit `304426c390901436fb1d4a63efbd582ae80c88f4` —
+recorded in `third_party/mpv/PINNED.txt`. The pin is chosen for artifact
+availability, not for any feature missing from the tag.
+
+Both halves of that were checked against upstream on 3 August 2026, rather than
+asserted:
+
+- `DOCS/man/input.rst` at tag `v0.41.0` documents `display-swapchain` as a
+  read-only int64 swap-chain address, and notes it "may not always be
+  available" when `d3d11-output-mode` is not `composition` — which is the
+  same unavailability the acquisition paths in §7.3 are built around.
+  `DOCS/man/options.rst` at the same tag documents both `--d3d11-output-mode`
+  and `--d3d11-composition-size`.
+- The release's `x86_64-pc-windows-msvc` archive holds six entries —
+  `mpv.exe`, `mpv.com`, `mpv.pdb`, `vulkan-1.dll` and two registration
+  scripts. The `x86_64-w64-mingw32` archive wraps a nested player build of
+  27 entries: FFmpeg, libass, libplacebo and friends alongside `mpv.exe`.
+  Neither contains a libmpv DLL, an import library or a single C header.
 
 That choice carries obligations still outstanding, listed in §8:
 
