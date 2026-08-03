@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Fetch the pinned libmpv Windows development package.
 #
-# The pin is a specific upstream mpv commit rather than a tagged release, but
-# not because the tag lacks anything: v0.41.0 registers display-swapchain and
-# documents --d3d11-output-mode. What it lacks is an artifact -- upstream's
-# Windows zip is a player, with no libmpv DLL, import library or headers -- so
-# the pin follows a build that publishes a development package. Both the build
-# tag and the commit are recorded so the runtime can be re-obtained
+# The pin is an upstream mpv commit rather than a tagged release, chosen for
+# artifact availability rather than for any feature the tag lacks. Both the
+# build tag and the commit below are recorded so the runtime can be re-obtained
 # byte-for-byte.
+#
+# The rationale is not restated here: see docs/packaging.md, and PRD 7.1 for
+# the checks behind it.
 set -euo pipefail
 
 MPV_BUILD_TAG="20260610"
