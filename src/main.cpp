@@ -25,7 +25,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+    // Gamepad nav is deliberately off: nothing feeds it. The flag alone makes
+    // ImGui wait for pad input that no backend here produces, which reads as
+    // controller support without being any.
     io.IniFilename = nullptr;  // no layout file beside the executable
     coax::app::theme::configure_style();
 
