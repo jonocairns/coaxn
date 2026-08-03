@@ -9,13 +9,24 @@
 
 #include "core/playback_health.hpp"
 #include "core/playback_types.hpp"
+#include "core/presentation.hpp"
 #include "player/player_event_adapter.hpp"
 #include "player/buffer_phase_gate.hpp"
+#include "win/com_ptr.hpp"
 
 struct mpv_handle;
 struct mpv_event_property;
+struct IUnknown;
 
 namespace coax::player {
+
+// Which mpv path produced the current attachment. mpv's client API documents an
+// initial property notification but warns that later changes may not always
+// notify, so both paths exist; this records which one is actually doing the
+// work, rather than assuming observation alone is sufficient.
+enum class SwapchainAcquisition { None, PropertyObservation, VideoReconfig };
+
+const char* to_string(SwapchainAcquisition value);
 
 struct PlayerConfig {
     int composition_width = 1920;
@@ -43,7 +54,21 @@ struct Diagnostics {
     bool core_idle = false;
     bool paused_for_cache = false;
     double cache_seconds = 0.0;
-    std::string swapchain_state = "none";
+
+    // Presentation attachment, reported as separate readings rather than one
+    // word. "attached" alone cannot distinguish a live attachment from a stale
+    // one, which is the failure this exists to make visible. Epochs count from
+    // one, so zero is reserved for the detached identity.
+    bool swapchain_attached = false;
+    std::uint64_t swapchain_epoch = 1;
+    // Replacements are the ones that matter: mpv built a different object, at a
+    // different address. Re-attachments also count the precautionary cycles the
+    // epoch rule forces when a reconfiguration reports the same address — which
+    // a window resize can produce steadily, so a single combined number would
+    // say nothing about whether the swap chain was ever actually replaced.
+    int swapchain_replacements = 0;
+    int swapchain_reattachments = 0;
+    SwapchainAcquisition swapchain_acquisition = SwapchainAcquisition::None;
 
     double live_target_seconds = 0.0;
     double playback_speed = 1.0;
@@ -85,7 +110,11 @@ struct PlaybackTarget {
 // RAII libmpv owner. The UI thread is the sole caller.
 class MpvPlayer {
 public:
-    using SwapchainCallback = std::function<void(void* swapchain)>;
+    // Returns whether the presentation layer now holds exactly what it was
+    // handed. A refused attachment must not be recorded as one: it would both
+    // report a live attachment that does not exist and suppress the next
+    // identical notification as a duplicate, leaving no way back.
+    using SwapchainCallback = std::function<bool(void* swapchain)>;
 
     MpvPlayer() = default;
     ~MpvPlayer();
@@ -118,6 +147,11 @@ public:
     [[nodiscard]] std::vector<PlayerEvent> take_events() { return events_.drain(); }
     [[nodiscard]] core::PlaybackHealthObservation health_observation() const;
 
+    // Clears the attachment and moves to a new epoch, so an address equal to
+    // the one just released cannot be mistaken for it later. Called before the
+    // composition tree holding the content is torn down.
+    void detach_swapchain();
+
     void on_swapchain(SwapchainCallback callback) { swapchain_callback_ = std::move(callback); }
     [[nodiscard]] const Diagnostics& diagnostics() const { return diagnostics_; }
     [[nodiscard]] bool initialized() const { return mpv_ != nullptr; }
@@ -127,14 +161,29 @@ private:
     bool initialize_backend(std::string& error);
     void destroy_backend();
     void handle_property(std::uint64_t observe_id, const mpv_event_property& property);
-    void publish_swapchain(void* swapchain);
+    void publish_swapchain(void* swapchain, SwapchainAcquisition source);
+    // Reads display-swapchain directly. The observation path is the primary
+    // one, but the client API only guarantees the initial notification.
+    void acquire_swapchain(SwapchainAcquisition source);
+    // Moves past every address mpv has published so far. Called wherever the
+    // video output can be torn down or rebuilt, which is the only boundary
+    // across which an address can be reused by a different object.
+    void bump_swapchain_epoch();
     std::uint64_t next_request_id();
     bool issue_load(bool force_probed_format);
     bool issue_buffer_property(core::Generation generation, core::BufferPhase phase,
                                BufferProperty property, double value);
 
     mpv_handle* mpv_ = nullptr;
-    void* swapchain_ = nullptr;
+    // The reference is held here for exactly as long as the swap chain is
+    // attached. DirectComposition takes its own on SetContent, but the window
+    // between reading the property and that call is otherwise unowned, and
+    // mpv's video output does not tear down on the UI thread.
+    win::ComPtr<IUnknown> held_swapchain_;
+    core::SwapchainIdentity attached_;
+    // From one, so that the zero in a default-constructed identity can only
+    // ever mean "nothing attached".
+    std::uint64_t swapchain_epoch_ = 1;
     SwapchainCallback swapchain_callback_;
     Diagnostics diagnostics_;
     PlayerConfig config_;

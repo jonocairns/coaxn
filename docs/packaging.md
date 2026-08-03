@@ -70,11 +70,19 @@ The executable carries an icon and version metadata from `src/win/coax.rc.in`.
 ## The pinned libmpv
 
 `scripts/fetch-libmpv.sh` pins a specific upstream mpv commit
-(`304426c390901436fb1d4a63efbd582ae80c88f4`), not a tagged release. The
-composition presentation path this project depends on — `d3d11-output-mode`,
-`d3d11-composition-size` and the `display-swapchain` property — landed after
-v0.41.0, so no stable release is known to carry it. The commit and its source
-URL are recorded in `third_party/mpv/PINNED.txt` after fetching.
+(`304426c390901436fb1d4a63efbd582ae80c88f4`) rather than a tagged release. The
+reason is artifact availability, not a missing feature: the tag carries the
+composition path, but none of upstream's Windows archives ships a libmpv DLL,
+import library or headers, so the pin follows a build that publishes a
+development package.
+
+PRD §7.1 is the canonical statement of this and records the checks behind both
+halves. It is deliberately the only place the argument is made in full — the
+same reasoning written out here and in the fetch script drifted apart once
+already.
+
+The commit and its source URL are recorded in `third_party/mpv/PINNED.txt`
+after fetching.
 
 ## Known gaps
 

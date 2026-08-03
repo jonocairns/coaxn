@@ -11,6 +11,7 @@
 #include "app/update_check.hpp"
 #include "core/channel_index.hpp"
 #include "core/playback_health.hpp"
+#include "core/presentation.hpp"
 #include "core/supervisor_host.hpp"
 #include "player/live_sync.hpp"
 #include "player/mpv_player.hpp"
@@ -66,6 +67,15 @@ private:
     void play(const core::Channel& channel);
     void apply_vsr();
     void handle_resize(int width, int height);
+    void handle_display_change();
+    void handle_resume();
+    // Drains any device loss the UI layer latched and drives the bounded
+    // rebuild. Called once per frame, which is also what paces the retries.
+    void service_presentation();
+    // Tears the presentation surface down and builds it again on a fresh
+    // device. Resuming the channel is not done here: that is playback recovery
+    // and belongs to the supervisor.
+    bool rebuild_presentation();
     void load_saved_portal();
     void save_portal() const;
 
@@ -153,6 +163,19 @@ private:
     player::LiveSync live_sync_;
     bool             was_paused_for_cache_ = false;
     int              rebuffer_count_       = 0;
+
+    // Presentation lifetime. The budget bounds and paces rebuilds; the rest is
+    // what F1 reports, kept here rather than in the player's diagnostics
+    // because it outlives the UI device it describes.
+    // Whether the UI device and composition tree are both up. A rebuild drops
+    // it, and only a complete rebuild restores it: between those points the
+    // ImGui D3D11 backend has been shut down, and drawing a frame against it
+    // dereferences a null backend rather than failing.
+    bool presentation_ready_ = false;
+    core::PresentationRebuildBudget presentation_budget_;
+    std::string last_device_loss_;
+    int         device_loss_events_    = 0;
+    int         presentation_rebuilds_ = 0;
 
     core::Generation generation_;
     std::optional<core::PlaybackHealthState> playback_health_;

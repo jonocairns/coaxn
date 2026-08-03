@@ -27,6 +27,7 @@ enum class DetectionReason {
     HttpRequestTimeout,
     IpcUnresponsive,
     OpenStall,
+    PresentationDeviceLost,
     ProcessExited,
     ProgressStall,
     StreamEndedEof,
@@ -65,6 +66,12 @@ struct IpcUnresponsive { Generation generation; };
 struct ChannelRequested { Generation generation; };
 struct PlaybackInterrupted { Generation generation; };
 struct PlaybackStopped { Generation generation; };
+// The graphics device the video is presented through went away. mpv's own
+// device dies with it, so the stream has to be reopened on a rebuilt one —
+// which is what the player-recreation action already does. Routing it here
+// rather than recovering beside the supervisor is what gives presentation loss
+// the same bounded attempts and the same generation fence as every other fault.
+struct PresentationLost { Generation generation; };
 struct ProcessExited { Generation generation; };
 struct SourceFailed { Generation generation; };
 struct PlaybackStalled { Generation generation; StallKind stall; };
@@ -78,7 +85,8 @@ struct StreamLoadIssued { Generation generation; RecoveryTransport transport; };
 using SupervisorEvent = std::variant<
     DeadlineReached, CacheState, AuthRejected, DecodeStalled, FirstFrame,
     IpcUnresponsive, ChannelRequested, PlaybackInterrupted, PlaybackStopped,
-    ProcessExited, SourceFailed, PlaybackStalled, StreamEnded, StreamLoadIssued>;
+    PresentationLost, ProcessExited, SourceFailed, PlaybackStalled, StreamEnded,
+    StreamLoadIssued>;
 
 struct ReopenStream {};
 struct ReloadHlsLive {};

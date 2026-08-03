@@ -222,6 +222,12 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
         } else if constexpr (std::is_same_v<T, IpcUnresponsive>) {
             return recover(state, DetectionReason::IpcUnresponsive,
                            RecoveryAction::RecreatePlayer, now, policy);
+        } else if constexpr (std::is_same_v<T, PresentationLost>) {
+            // The surface is rebuilt by the platform adapter before this
+            // arrives; what remains is a libmpv instance holding a dead D3D11
+            // device, which only recreation clears.
+            return recover(state, DetectionReason::PresentationDeviceLost,
+                           RecoveryAction::RecreatePlayer, now, policy);
         } else if constexpr (std::is_same_v<T, ProcessExited>) {
             return recover(state, DetectionReason::ProcessExited,
                            RecoveryAction::RecreatePlayer, now, policy);
@@ -309,6 +315,7 @@ const char* to_string(DetectionReason value) {
         case DetectionReason::HttpRequestTimeout: return "http-request-timeout";
         case DetectionReason::IpcUnresponsive: return "ipc-unresponsive";
         case DetectionReason::OpenStall: return "open-stall";
+        case DetectionReason::PresentationDeviceLost: return "presentation-device-lost";
         case DetectionReason::ProcessExited: return "process-exited";
         case DetectionReason::ProgressStall: return "progress-stall";
         case DetectionReason::StreamEndedEof: return "stream-ended-eof";

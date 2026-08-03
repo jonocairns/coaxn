@@ -42,6 +42,15 @@ public:
         }
     }
 
+    // Adopts a pointer this object does not own yet, taking a reference of its
+    // own. The new reference is taken before the old is dropped, so re-adopting
+    // the pointer already held cannot release the last reference to it.
+    void copy_from(T* other) {
+        if (other) other->AddRef();
+        reset();
+        ptr_ = other;
+    }
+
     // For APIs that write a new reference into an out-parameter.
     T** put() {
         reset();

@@ -104,6 +104,61 @@ TEST_CASE("backend failures map to in-process player recreation for both transpo
     CHECK(state.detection == DetectionReason::IpcUnresponsive);
 }
 
+TEST_CASE("presentation loss recreates the player through the shared recovery path") {
+    // The surface is rebuilt by the platform adapter; what reaches the
+    // supervisor is a libmpv instance still holding the device that died.
+    auto result = apply(reach_steady(), PresentationLost{Generation{1}}, 10);
+    CHECK(result.state.name == SupervisorStateName::Recovering);
+    CHECK(result.state.detection == DetectionReason::PresentationDeviceLost);
+    CHECK(recovery(result.state) == RecoveryAction::RecreatePlayer);
+    // Bounding and pacing are inherited, not reimplemented: the same attempt
+    // schedule as every other fault.
+    CHECK(result.state.attempt == 1);
+    CHECK(next_deadline_at(result.state) == at(10.5));
+    CHECK(result.effects.empty());
+
+    result = apply(result.state, DeadlineReached{}, 10.5);
+    REQUIRE(result.effects.size() == 1);
+    CHECK(result.effects[0].generation == Generation{1});
+    CHECK(std::holds_alternative<RecreatePlayer>(result.effects[0].payload));
+
+    // HLS is no different: the device is gone either way.
+    const auto hls = step(reach_steady(Generation{1}, RecoveryTransport::Hls),
+                          PresentationLost{Generation{1}}, 10);
+    CHECK(recovery(hls) == RecoveryAction::RecreatePlayer);
+}
+
+TEST_CASE("presentation rebuilds are bounded and cannot complete for a stale generation") {
+    // A rebuild armed for one channel must not resume it once a newer channel
+    // has been asked for. The rebuild takes real time, so the newer request
+    // can easily arrive in between.
+    auto armed = step(reach_steady(), PresentationLost{Generation{1}}, 10);
+    REQUIRE(next_deadline_at(armed) == at(10.5));
+    const auto superseded = step(armed, ChannelRequested{Generation{2}}, 10.2);
+    CHECK(superseded.name == SupervisorStateName::Loading);
+    CHECK_FALSE(next_deadline_at(superseded));
+    CHECK(apply(superseded, DeadlineReached{}, 10.5).effects.empty());
+    // And the loss itself, reported late for the channel that is gone.
+    CHECK_FALSE(apply(superseded, PresentationLost{Generation{1}}, 10.6).transition);
+
+    // A device that keeps dying exhausts the shared attempt budget and stops.
+    auto state = reach_steady();
+    double now = 10.0;
+    for (std::size_t attempt = 0; attempt < kDefaultRecoveryPolicy.attempt_delays.size();
+         ++attempt) {
+        state = step(state, PresentationLost{Generation{1}}, now);
+        CHECK(state.attempt == attempt + 1);
+        now += kDefaultRecoveryPolicy.attempt_delays[attempt].count();
+        state = step(state, DeadlineReached{}, now);
+    }
+    const auto exhausted = apply(state, PresentationLost{Generation{1}}, now);
+    CHECK(exhausted.state.name == SupervisorStateName::Failed);
+    CHECK(exhausted.state.failure == FailureReason::AttemptsExhausted);
+    CHECK(exhausted.effects.empty());
+    // Failed is terminal until a new channel is chosen: it does not loop.
+    CHECK_FALSE(apply(exhausted.state, PresentationLost{Generation{1}}, now + 1).transition);
+}
+
 TEST_CASE("HLS failure classes and stalls reload the advertised live edge") {
     for (const auto reason : {TransportFailureReason::HlsPlaylistFailed,
                               TransportFailureReason::HlsSegmentUnavailable,

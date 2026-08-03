@@ -93,6 +93,35 @@ LRESULT AppWindow::handle_message(HWND window, UINT message, WPARAM wparam, LPAR
             return 0;
         }
 
+        case WM_DISPLAYCHANGE: {
+            // A mode change, a monitor arriving or one being unplugged. The
+            // window can end up on a different display at a different scale
+            // without a WM_SIZE, so the client size is re-read here rather than
+            // taken from the message: its parameters describe the *screen*.
+            RECT client{};
+            GetClientRect(window, &client);
+            width_  = client.right - client.left;
+            height_ = client.bottom - client.top;
+            log::info("Display configuration changed ({}x{} client)", width_, height_);
+            if (display_handler_) {
+                display_handler_();
+            }
+            return 0;
+        }
+
+        case WM_POWERBROADCAST:
+            // Resume, in both the forms Windows sends it: automatic wake and
+            // user-initiated wake. What follows is a check, not a rebuild — the
+            // adapter is usually fine, and treating every resume as a loss
+            // would throw playback away for nothing.
+            if (wparam == PBT_APMRESUMEAUTOMATIC || wparam == PBT_APMRESUMESUSPEND) {
+                log::info("System resumed from suspend");
+                if (resume_handler_) {
+                    resume_handler_();
+                }
+            }
+            return TRUE;
+
         case WM_SYSKEYDOWN:
             // Alt+Enter toggles fullscreen; swallow it so Windows does not beep.
             if (wparam == VK_RETURN) {

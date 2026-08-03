@@ -83,6 +83,7 @@ bool App::initialize(std::string& error) {
         return false;
     }
     composition_.set_ui_content(ui_.swapchain());
+    presentation_ready_ = true;
 
     player::PlayerConfig config;
     config.composition_width  = window_.width();
@@ -95,15 +96,22 @@ bool App::initialize(std::string& error) {
     // unavailable until mpv's video output exists, and mpv may replace the
     // swap chain later.
     player_.on_swapchain([this](void* swapchain) {
-        composition_.set_video_content(static_cast<IUnknown*>(swapchain));
-        video_attached_ = swapchain != nullptr;
+        const bool attached = composition_.set_video_content(
+            static_cast<IUnknown*>(swapchain));
+        // Only a content change the tree accepted counts. Otherwise the
+        // backdrop stays drawn, which is the honest thing to show when the
+        // video visual is holding nothing.
+        video_attached_ = attached && swapchain != nullptr;
+        return attached;
     });
 
     window_.on_resize([this](int width, int height) { handle_resize(width, height); });
-    // Registered only now that everything they touch exists: both fire from
-    // the window procedure, which runs as soon as the window is created.
+    // Registered only now that everything they touch exists: all of these fire
+    // from the window procedure, which runs as soon as the window is created.
     window_.on_paint([this] { draw_frame(); });
     window_.on_dpi_changed([this](float scale) { theme::set_dpi_scale(scale); });
+    window_.on_display_change([this] { handle_display_change(); });
+    window_.on_resume([this] { handle_resume(); });
 
     if (!direct_media_.empty()) {
         stage_                = Stage::Browsing;
@@ -147,6 +155,103 @@ void App::handle_resize(int width, int height) {
     composition_.set_ui_content(ui_.swapchain());
     player_.set_composition_size(width, height);
     apply_vsr();
+}
+
+void App::handle_display_change() {
+    // Size and scale first, because both can have moved: the window may now be
+    // on a different monitor at a different DPI without any of the messages
+    // that usually announce that having been sent.
+    theme::set_dpi_scale(window_.dpi_scale());
+    handle_resize(window_.width(), window_.height());
+    // The tree is re-committed even when nothing above changed anything.
+    // DirectComposition binds its target to a display topology, and a
+    // reconfiguration can leave the previous commit describing one that no
+    // longer exists.
+    composition_.commit();
+    // A monitor change can be the visible half of an adapter reset. Asking is
+    // cheap; discovering it on the next present is a lost frame either way.
+    ui_.verify_device();
+}
+
+void App::handle_resume() {
+    // Suspend can reset the adapter, and nothing reports that until work is
+    // submitted, so the device is treated as suspect until it says otherwise.
+    // A failed check latches a loss the frame loop then acts on; it does not
+    // rebuild from inside the window procedure.
+    if (!ui_.verify_device()) {
+        log::warn("Display device did not survive suspend");
+    }
+}
+
+void App::service_presentation() {
+    if (auto loss = ui_.take_device_loss()) {
+        last_device_loss_ = std::move(loss->detail);
+        ++device_loss_events_;
+        presentation_budget_.request(supervisor_clock_.now());
+    }
+
+    switch (presentation_budget_.poll(supervisor_clock_.now())) {
+        case core::RebuildDecision::Hold:
+            return;
+        case core::RebuildDecision::Exhausted:
+            set_status("Display device lost and could not be rebuilt", true);
+            log::error("Presentation rebuild abandoned after {} attempts; last loss: {}",
+                       presentation_budget_.attempts(),
+                       last_device_loss_.empty() ? "none reported" : last_device_loss_);
+            return;
+        case core::RebuildDecision::Attempt:
+            break;
+    }
+
+    if (!rebuild_presentation()) {
+        presentation_budget_.failed(supervisor_clock_.now());
+        return;
+    }
+    presentation_budget_.succeeded();
+
+    // The surface is back, but mpv still holds a device that no longer exists.
+    // Recreating it and resuming the channel is playback recovery, so it goes
+    // to the supervisor: that is what bounds the attempts and what stops a
+    // superseded channel from being resurrected by a rebuild that started
+    // before the newer one was requested.
+    supervisor_.dispatch(core::PresentationLost{generation_});
+}
+
+bool App::rebuild_presentation() {
+    log::warn("Rebuilding presentation, attempt {} of {}",
+              presentation_budget_.attempts(), presentation_budget_.attempt_ceiling());
+
+    // Outwards from the content. mpv's swap chain leaves the visual before the
+    // tree holding it goes, and the tree leaves the device before the device
+    // does. The player moves to a new epoch as it detaches, so the address it
+    // just released cannot be mistaken for whatever the rebuilt mpv reports.
+    // Nothing may draw from here until the far end of this function. Tearing
+    // the UI layer down shuts the ImGui D3D11 backend down with it, and a
+    // frame drawn against that backend does not fail — it dereferences a null
+    // pointer. A rebuild that fails partway is the ordinary case, not an
+    // exotic one: an adapter that is mid-reset refuses device creation, which
+    // is exactly why the attempt is retried.
+    presentation_ready_ = false;
+    player_.detach_swapchain();
+    video_attached_ = false;
+    composition_.destroy();
+    ui_.destroy();
+
+    std::string error;
+    if (!ui_.create(window_.width(), window_.height(), error)) {
+        log::error("UI layer rebuild failed: {}", error);
+        return false;
+    }
+    if (!composition_.create(window_.handle(), ui_.dxgi_device(), error)) {
+        log::error("Composition tree rebuild failed: {}", error);
+        return false;
+    }
+    composition_.set_ui_content(ui_.swapchain());
+
+    presentation_ready_ = true;
+    ++presentation_rebuilds_;
+    log::info("Presentation rebuilt ({}x{})", window_.width(), window_.height());
+    return true;
 }
 
 void App::load_saved_portal() {
@@ -1003,7 +1108,7 @@ void App::draw_diagnostics() {
     // invisible until some label happens to be long enough to collide. The
     // spacing form is measured from the end of the label, so it cannot.
     // Equal character counts are not equal widths, hence measuring all three.
-    const float label_column = std::max({ImGui::CalcTextSize("Composition swap chain").x,
+    const float label_column = std::max({ImGui::CalcTextSize("Presentation rebuilds").x,
                                          ImGui::CalcTextSize("Hardware decode wanted").x,
                                          ImGui::CalcTextSize("Rebuffers this channel").x});
     const float column_gap   = theme::scaled(18.0f);
@@ -1039,9 +1144,41 @@ void App::draw_diagnostics() {
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
 
+    // Broken out rather than reported as one word, because "attached" cannot
+    // distinguish a live attachment from a stale one — which is the whole
+    // failure. The epoch says which generation of mpv's video output the
+    // attached object belongs to, and the acquisition path says whether
+    // property observation is really carrying the contract or the
+    // reconfiguration fallback is doing the work.
     ImGui::SeparatorText("Presentation");
-    field("Composition swap chain", d.swapchain_state);
+    field("Swap chain attached", d.swapchain_attached ? "yes" : "no");
+    field("Swap chain epoch", std::format("{}", d.swapchain_epoch));
+    field("Acquired via", player::to_string(d.swapchain_acquisition));
+    field("Replacements", std::format("{}", d.swapchain_replacements));
+    field("Re-attachments", std::format("{}", d.swapchain_reattachments));
+    field("Device losses", std::format("{}", device_loss_events_));
+    field("Last device loss", last_device_loss_.empty() ? "-" : last_device_loss_,
+          last_device_loss_.empty());
+    field("Presentation rebuilds", std::format("{}", presentation_rebuilds_));
     field("Window", std::format("{}x{}", window_.width(), window_.height()));
+
+    // Runs the whole loss path — bounded rebuild, player recreation,
+    // re-attach at a new epoch — without a real device removal. §7.3 is
+    // re-checked on every runtime upgrade, and the honest triggers for that
+    // (disabling the display adapter, suspending the machine) are disruptive
+    // enough that in practice they do not get run, which would leave the
+    // recovery path re-verified by nothing. Deliberately reached only from
+    // this panel rather than a keybind, so it cannot be hit while watching.
+    //
+    // It does not fake a device loss: the loss counters and the last-loss
+    // reason describe what DXGI actually reported, and a forced rebuild is
+    // not that.
+    if (ImGui::SmallButton("Force rebuild")) {
+        log::warn("Presentation rebuild forced from diagnostics");
+        presentation_budget_.request(supervisor_clock_.now());
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(exercises the device-loss recovery path)");
 
     ImGui::SeparatorText("Decode");
     field("Codec", d.video_codec.empty() ? "-" : d.video_codec);
@@ -1129,6 +1266,15 @@ void App::draw_diagnostics() {
 void App::draw_frame() {
     finish_update_check();
 
+    // Between a rebuild's teardown and its completion there is no backend to
+    // draw with. Skipped rather than guarded further in, because a partial
+    // frame is worth nothing: the composition tree that would present it does
+    // not exist either. Reached from the window procedure as well as the
+    // frame loop, so the check has to live here rather than at the call site.
+    if (!presentation_ready_) {
+        return;
+    }
+
     ui_.begin_frame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -1192,6 +1338,10 @@ int App::run() {
     while (window_.pump_messages()) {
         player_.pump();
         process_player_events();
+        // Before the supervisor polls, so a rebuild completed this turn has
+        // already dispatched its loss and the recovery deadline it arms is
+        // measured from now rather than from a frame later.
+        service_presentation();
         supervisor_.poll();
         sample_playback_health();
 
@@ -1232,7 +1382,12 @@ void App::shutdown() {
     }
     supervisor_.dispose();
     player_.stop(generation_);
-    composition_.set_video_content(nullptr);
+    // Outwards from the content, the same order the rebuild path uses. The
+    // player detaches again when it is destroyed with this object, but that is
+    // member destruction order deciding it; doing it here is what makes the
+    // ordering the code's rather than the layout's.
+    player_.detach_swapchain();
+    composition_.destroy();
     ui_.destroy();
     ImGui_ImplWin32_Shutdown();
     window_.destroy();
