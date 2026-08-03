@@ -5,9 +5,9 @@ tags: [handoff, plan, supervisor, recovery, health, playback, port, mpv]
 
 # Task: port the playback supervisor and health model to Coax Native
 
-Port the recovery supervisor and playback-health model from the Electron
-implementation (`/home/jonoc/coax`, TypeScript) into the native rewrite
-(`/home/jonoc/coaxn`, C++20). The native player, frame loop and live-offset
+Port the recovery supervisor and playback-health model from the frozen Electron
+implementation (TypeScript, a separate checkout) into this native rewrite
+(C++20). The native player, frame loop and live-offset
 controller already exist; this task adds the remaining policy layer and the
 lossless adapter events needed to drive it.
 
@@ -19,7 +19,7 @@ silently. Raise a proposed behaviour change and record the evidence for it.
 
 ## Read first
 
-Start with `/home/jonoc/coax/src/main/supervisor/policy.ts`. It is short, and
+Start with `src/main/supervisor/policy.ts` in the Electron tree. It is short, and
 every constant is justified in a comment. It is the best available description
 of how this system is meant to behave.
 
@@ -376,7 +376,6 @@ Cross-compile the Windows application and run any registered Windows adapter
 tests rather than stopping after compilation:
 
 ```bash
-cd /home/jonoc/coaxn
 nix develop --command bash -c \
   'cmake --build build && ctest --test-dir build --output-on-failure'
 ```

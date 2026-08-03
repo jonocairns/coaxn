@@ -5,7 +5,7 @@ tags: [handoff, plan, presentation, swapchain, directcomposition, d3d11, device-
 
 # Task: own the composition swap chain's lifetime and survive device loss
 
-Implement PRD §8.1 and §8.2 in `/home/jonoc/coaxn`. They are one task: both end in
+Implement PRD §8.1 and §8.2. They are one task: both end in
 the same recovery path, and doing either alone leaves the other half of the
 failure unhandled.
 
@@ -187,7 +187,6 @@ ctest --test-dir build-core --output-on-failure
 ```
 
 ```bash
-cd /home/jonoc/coaxn
 nix develop --command bash -c \
   'cmake --build build && ctest --test-dir build --output-on-failure'
 ```
