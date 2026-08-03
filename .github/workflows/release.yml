@@ -11,10 +11,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
-
 # Two releases attaching artifacts at once would race. Merges to main are cheap
 # to serialise and a release is rare, so nothing here is worth cancelling.
 concurrency:
@@ -25,6 +21,11 @@ jobs:
   prepare:
     name: release pull request
     runs-on: ubuntu-latest
+    # Granted per job rather than to the whole workflow: this is the only job
+    # that writes a pull request, and the one below has no business doing so.
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       released: ${{ steps.release.outputs.release_created }}
       tag: ${{ steps.release.outputs.tag_name }}
@@ -40,6 +41,9 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.released == 'true'
     runs-on: ubuntu-latest
+    # Enough to attach assets to the release, and nothing else.
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4

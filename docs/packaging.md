@@ -39,7 +39,17 @@ it on Windows, and presses Publish.
 That last step is deliberate and it is the only manual one. The in-app update
 check reads `releases/latest`, which skips drafts, so nobody is told to upgrade
 until a human has confirmed the build installs. A draft that turns out to be
-broken is deleted, and no user ever saw it.
+broken is deleted and no user ever saw it.
+
+What a deleted draft does not undo is the version number. Merging the release PR
+already moved `CMakeLists.txt`, `CHANGELOG.md` and the manifest on `main`, and
+`force-tag-creation` means the tag exists from that moment too. So abandoning a
+draft spends the version: the fix ships as the next one rather than reusing it,
+and the dangling tag is cleaned up by hand if it bothers you. That setting is
+not optional, incidentally — GitHub does not create a tag for a draft release
+until it is published, and without a tag release-please cannot find where the
+previous release ended, so the next changelog would repeat commits that had
+already shipped.
 
 Three things follow from the prefixes, so they are worth getting right:
 `feat:` bumps the minor, `fix:` the patch, and anything else — `docs:`, `ci:`,
