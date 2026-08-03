@@ -15,6 +15,7 @@ include(FetchContent)
 # check, rather than relying on include discipline alone.
 add_library(coax_core
     src/core/playback_health.cpp
+    src/core/presentation.cpp
     src/core/supervisor.cpp
     src/core/supervisor_host.cpp
     src/core/version.cpp
@@ -35,6 +36,7 @@ if(BUILD_TESTING)
     add_executable(coax_core_tests
         test/core/generation_tests.cpp
         test/core/playback_health_tests.cpp
+        test/core/presentation_tests.cpp
         test/core/supervisor_tests.cpp
         test/core/supervisor_host_tests.cpp
         test/core/version_tests.cpp
@@ -105,6 +107,10 @@ if(COAX_BUILD_APP)
         src/player/mpv_player.cpp)
     target_include_directories(coax_player PUBLIC src)
     target_link_libraries(coax_player PUBLIC coax_core PRIVATE libmpv)
+    # The swap chain is a COM object, so the adapter that owns its reference
+    # pulls in <unknwn.h>. These keep that from dragging in the rest of Win32
+    # and its min/max macros along with it.
+    target_compile_definitions(coax_player PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_compile_options(coax_player PRIVATE -Wall -Wextra -Wpedantic)
 
     if(BUILD_TESTING)

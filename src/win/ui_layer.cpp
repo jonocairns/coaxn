@@ -4,6 +4,7 @@
 #include <imgui_impl_dx11.h>
 
 #include <format>
+#include <utility>
 
 #include "util/log.hpp"
 
@@ -89,9 +90,58 @@ bool UiLayer::create(int width, int height, std::string& error) {
         error = "ImGui DX11 backend failed to initialize";
         return false;
     }
+    imgui_ready_ = true;
 
     log::info("UI layer ready ({}x{})", width_, height_);
     return true;
+}
+
+void UiLayer::note_result(HRESULT hr, const char* operation) {
+    if (hr != DXGI_ERROR_DEVICE_REMOVED && hr != DXGI_ERROR_DEVICE_RESET) {
+        if (FAILED(hr)) {
+            log::warn("{} failed (0x{:08X})", operation, static_cast<unsigned>(hr));
+        }
+        return;
+    }
+
+    const core::DeviceLossKind kind = hr == DXGI_ERROR_DEVICE_REMOVED
+                                          ? core::DeviceLossKind::Removed
+                                          : core::DeviceLossKind::Reset;
+    // Presenting into a removed device fails every frame from here on, so this
+    // is where the repetition stops: one report per loss, not one per frame.
+    if (!loss_.raise(kind)) {
+        return;
+    }
+
+    // The result of Present says only that the device is gone. The removal
+    // reason says what took it — a hang, a driver upgrade, an internal driver
+    // error — which is the part worth having in a log after the fact.
+    const HRESULT reason = device_ ? device_->GetDeviceRemovedReason() : hr;
+    pending_loss_ = DeviceLossReport{
+        kind, std::format("{} on {} (removal reason 0x{:08X})", core::to_string(kind),
+                          operation, static_cast<unsigned>(reason))};
+    log::error("D3D11 device lost: {}", pending_loss_->detail);
+}
+
+bool UiLayer::verify_device() {
+    if (!device_) {
+        return false;
+    }
+    const HRESULT reason = device_->GetDeviceRemovedReason();
+    if (SUCCEEDED(reason)) {
+        return true;
+    }
+    // GetDeviceRemovedReason returns the specific cause, not the two results
+    // Present reports. Anything other than a reset is treated as a removal;
+    // the exact HRESULT is carried in the report either way.
+    note_result(reason == DXGI_ERROR_DEVICE_RESET ? DXGI_ERROR_DEVICE_RESET
+                                                  : DXGI_ERROR_DEVICE_REMOVED,
+                "device verification");
+    return false;
+}
+
+std::optional<DeviceLossReport> UiLayer::take_device_loss() {
+    return std::exchange(pending_loss_, std::nullopt);
 }
 
 bool UiLayer::create_render_target() {
@@ -118,7 +168,9 @@ void UiLayer::resize(int width, int height) {
                                                  static_cast<UINT>(height_),
                                                  DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr)) {
-        log::error("ResizeBuffers failed (0x{:08X})", static_cast<unsigned>(hr));
+        // Resizing is the other place a removed adapter surfaces, and a window
+        // being dragged between displays hits it before any present does.
+        note_result(hr, "ResizeBuffers");
         return;
     }
     create_render_target();
@@ -129,7 +181,10 @@ void UiLayer::begin_frame() {
 }
 
 void UiLayer::end_frame() {
-    if (!render_target_) {
+    // Nothing submitted to a lost device can succeed, and the rebuild is
+    // already queued. Drawing anyway would burn a frame's work to produce the
+    // same error the latch has already reported.
+    if (!render_target_ || loss_.lost()) {
         return;
     }
 
@@ -154,16 +209,25 @@ void UiLayer::end_frame() {
 
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-    swapchain_->Present(1, 0);
+    note_result(swapchain_->Present(1, 0), "Present");
 }
 
 void UiLayer::destroy() {
-    ImGui_ImplDX11_Shutdown();
+    if (imgui_ready_) {
+        ImGui_ImplDX11_Shutdown();
+        imgui_ready_ = false;
+    }
     render_target_.reset();
     swapchain_.reset();
     dxgi_device_.reset();
     context_.reset();
     device_.reset();
+    loss_.clear();
+    pending_loss_.reset();
+    // Zeroed so a rebuild at the same size still creates its render target
+    // rather than being short-circuited by resize()'s no-change check.
+    width_  = 0;
+    height_ = 0;
 }
 
 }  // namespace coax::win

@@ -16,6 +16,8 @@ public:
     using CloseHandler  = std::function<void()>;
     using PaintHandler  = std::function<void()>;
     using DpiHandler    = std::function<void(float scale)>;
+    using DisplayHandler = std::function<void()>;
+    using ResumeHandler  = std::function<void()>;
 
     // The size is in logical pixels; the window is created at that size scaled
     // by whatever its monitor is running at.
@@ -35,6 +37,13 @@ public:
     // thread until the mouse is released, and delivers WM_SIZE from inside it.
     void on_paint(PaintHandler handler)   { paint_handler_  = std::move(handler); }
     void on_dpi_changed(DpiHandler handler) { dpi_handler_   = std::move(handler); }
+    // A monitor was added, removed or changed mode. Neither WM_SIZE nor
+    // WM_DPICHANGED is guaranteed to follow, so the client size and the scale
+    // both have to be re-read rather than waited for.
+    void on_display_change(DisplayHandler handler) { display_handler_ = std::move(handler); }
+    // The machine resumed from sleep. The adapter may have been reset while it
+    // was suspended, which nothing reports until work is submitted to it.
+    void on_resume(ResumeHandler handler) { resume_handler_ = std::move(handler); }
 
     [[nodiscard]] HWND handle() const { return window_; }
     [[nodiscard]] int  width()  const { return width_; }
@@ -54,10 +63,12 @@ private:
     bool          running_ = true;
     bool          fullscreen_ = false;
     WINDOWPLACEMENT saved_placement_{};
-    ResizeHandler resize_handler_;
-    CloseHandler  close_handler_;
-    PaintHandler  paint_handler_;
-    DpiHandler    dpi_handler_;
+    ResizeHandler  resize_handler_;
+    CloseHandler   close_handler_;
+    PaintHandler   paint_handler_;
+    DpiHandler     dpi_handler_;
+    DisplayHandler display_handler_;
+    ResumeHandler  resume_handler_;
 };
 
 }  // namespace coax::win

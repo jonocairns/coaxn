@@ -1,5 +1,7 @@
 #include "player/mpv_player.hpp"
 
+#include <unknwn.h>
+
 #include <mpv/client.h>
 
 #include <format>
@@ -56,7 +58,22 @@ void observe(mpv_handle* mpv, std::uint64_t id, const char* name, mpv_format for
                               mpv_error_string(status));
 }
 
+constexpr const char* kDisplaySwapchainProperty = "display-swapchain";
+
+std::uint64_t swapchain_address(void* pointer) {
+    return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer));
+}
+
 }  // namespace
+
+const char* to_string(SwapchainAcquisition value) {
+    switch (value) {
+        case SwapchainAcquisition::None: return "none";
+        case SwapchainAcquisition::PropertyObservation: return "property observation";
+        case SwapchainAcquisition::VideoReconfig: return "video-reconfig read";
+    }
+    return "none";
+}
 
 MpvPlayer::~MpvPlayer() {
     events_.dispose();
@@ -125,7 +142,7 @@ bool MpvPlayer::initialize_backend(std::string& error) {
     }
 
     mpv_request_log_messages(mpv_, "warn");
-    observe(mpv_, kDisplaySwapchain, "display-swapchain", MPV_FORMAT_INT64);
+    observe(mpv_, kDisplaySwapchain, kDisplaySwapchainProperty, MPV_FORMAT_INT64);
     observe(mpv_, kHwdecCurrent, "hwdec-current", MPV_FORMAT_STRING);
     observe(mpv_, kVideoCodec, "video-codec", MPV_FORMAT_STRING);
     observe(mpv_, kVideoWidth, "width", MPV_FORMAT_INT64);
@@ -146,10 +163,12 @@ bool MpvPlayer::initialize_backend(std::string& error) {
 }
 
 void MpvPlayer::destroy_backend() {
-    if (swapchain_) publish_swapchain(nullptr);
+    // Detach before mpv can release its own reference. The visual holds a
+    // reference of DirectComposition's own, so clearing the content is what
+    // lets the object die; doing it afterwards is the stale-pointer window.
+    detach_swapchain();
     if (mpv_) mpv_terminate_destroy(mpv_);
     mpv_ = nullptr;
-    swapchain_ = nullptr;
     current_entry_id_.reset();
 }
 
@@ -359,11 +378,93 @@ void MpvPlayer::set_paused(bool paused) {
     if (mpv_) mpv_set_property_string(mpv_, "pause", paused ? "yes" : "no");
 }
 
-void MpvPlayer::publish_swapchain(void* swapchain) {
-    if (swapchain == swapchain_) return;
-    swapchain_ = swapchain;
-    diagnostics_.swapchain_state = swapchain ? "attached" : "none";
-    if (swapchain_callback_) swapchain_callback_(swapchain);
+void MpvPlayer::publish_swapchain(void* swapchain, SwapchainAcquisition source) {
+    const core::SwapchainIdentity incoming{swapchain_address(swapchain), swapchain_epoch_};
+    const auto transition = core::decide_swapchain_transition(attached_, incoming);
+    if (transition == core::SwapchainTransition::Ignore) return;
+    // A replacement at a new address is mpv having built a different object. A
+    // replacement at the same address is this epoch rule doing its job: the two
+    // are worth telling apart when reading a log after a failure.
+    const bool address_changed = attached_.address != incoming.address;
+
+    // Reference first, before the address is handed anywhere. Between reading
+    // the property and DirectComposition taking its own reference on
+    // SetContent, nothing owns this object, and mpv's video output does not
+    // tear down on this thread.
+    win::ComPtr<IUnknown> acquired;
+    if (incoming.present()) acquired.copy_from(static_cast<IUnknown*>(swapchain));
+
+    // The callback clears the old content and sets the new. Only once it has
+    // returned is the previous reference dropped, which is what keeps the
+    // compositor from being left holding the last reference to an object mpv
+    // is already tearing down.
+    if (swapchain_callback_) swapchain_callback_(acquired.get());
+    held_swapchain_ = std::move(acquired);
+    attached_ = incoming.present() ? incoming : core::SwapchainIdentity{};
+
+    if (transition == core::SwapchainTransition::Reattach) {
+        ++diagnostics_.swapchain_reattachments;
+        if (address_changed) ++diagnostics_.swapchain_replacements;
+    }
+    diagnostics_.swapchain_attached = attached_.present();
+    diagnostics_.swapchain_epoch = swapchain_epoch_;
+    diagnostics_.swapchain_acquisition = attached_.present() ? source
+                                                             : SwapchainAcquisition::None;
+
+    switch (transition) {
+        case core::SwapchainTransition::Attach:
+            log::info("Composition swap chain attached via {} (epoch {})",
+                      to_string(source), swapchain_epoch_);
+            break;
+        case core::SwapchainTransition::Reattach:
+            // Only a real replacement is logged. The same-address case is
+            // routine — a reconfiguration advances the epoch on every window
+            // resize — and a line per occurrence would evict the history worth
+            // having from a bounded log. Its count is in the diagnostics.
+            if (address_changed) {
+                log::info("Composition swap chain replaced via {} (epoch {}, replacement {})",
+                          to_string(source), swapchain_epoch_,
+                          diagnostics_.swapchain_replacements);
+            }
+            break;
+        case core::SwapchainTransition::Detach:
+            log::info("Composition swap chain detached (epoch {})", swapchain_epoch_);
+            break;
+        case core::SwapchainTransition::Ignore:
+            break;
+    }
+}
+
+void MpvPlayer::acquire_swapchain(SwapchainAcquisition source) {
+    if (!mpv_) return;
+    std::int64_t value = 0;
+    const int status = mpv_get_property(mpv_, kDisplaySwapchainProperty,
+                                        MPV_FORMAT_INT64, &value);
+    if (status < 0) {
+        // Unavailable means the video output does not exist yet, not that the
+        // attachment is gone: the observation path is what reports a real
+        // teardown. Leaving the attachment alone here avoids detaching a live
+        // swap chain because a read raced the video output's creation, and is
+        // the expected answer either side of one, so it is not worth a warning.
+        if (status != MPV_ERROR_PROPERTY_UNAVAILABLE) {
+            log::warn("display-swapchain read during {} failed: {}", to_string(source),
+                      mpv_error_string(status));
+        }
+        return;
+    }
+    publish_swapchain(reinterpret_cast<void*>(static_cast<std::intptr_t>(value)), source);
+}
+
+void MpvPlayer::bump_swapchain_epoch() {
+    ++swapchain_epoch_;
+    diagnostics_.swapchain_epoch = swapchain_epoch_;
+}
+
+void MpvPlayer::detach_swapchain() {
+    publish_swapchain(nullptr, SwapchainAcquisition::None);
+    // A later address equal to the one just released belongs to a different
+    // object, and the epoch is the only thing that can say so.
+    bump_swapchain_epoch();
 }
 
 void MpvPlayer::handle_property(std::uint64_t id, const mpv_event_property& property) {
@@ -379,7 +480,7 @@ void MpvPlayer::handle_property(std::uint64_t id, const mpv_event_property& prop
                 pointer = reinterpret_cast<void*>(static_cast<std::intptr_t>(
                     *static_cast<std::int64_t*>(property.data)));
             }
-            publish_swapchain(pointer); break;
+            publish_swapchain(pointer, SwapchainAcquisition::PropertyObservation); break;
         }
         case kHwdecCurrent:
             diagnostics_.hwdec_active = property.format == MPV_FORMAT_STRING && property.data
@@ -457,6 +558,16 @@ void MpvPlayer::pump() {
             case MPV_EVENT_PLAYBACK_RESTART:
                 ++diagnostics_.mpv_playback_restart_events;
                 if (current_entry_id_) events_.playback_restart(*current_entry_id_);
+                break;
+            case MPV_EVENT_VIDEO_RECONFIG:
+                // The video output rebuilds its swap chain here, and the client
+                // API only guarantees the *initial* property notification — a
+                // later change may not notify at all. This is both the fallback
+                // acquisition and the epoch boundary: a replacement allocated at
+                // the address of the object it replaced is indistinguishable
+                // from it without one.
+                bump_swapchain_epoch();
+                acquire_swapchain(SwapchainAcquisition::VideoReconfig);
                 break;
             case MPV_EVENT_END_FILE: {
                 const auto* end = static_cast<mpv_event_end_file*>(event->data);
