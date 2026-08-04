@@ -111,9 +111,9 @@ contract is §7.3.
 generation-scoped load/stop/reconfiguration, volume, mute, pause, fullscreen and
 clean shutdown.
 
-**Provider.** Xtream credential import from a pasted portal link or explicit
-fields, DPAPI-encrypted at rest, catalog fetch off the UI thread, category
-grouping and live search, playback by internal channel ID.
+**Provider.** Xtream credentials entered as portal URL, username and password,
+DPAPI-encrypted at rest, catalog fetch off the UI thread, category grouping and
+live search, playback by internal channel ID.
 
 **Recovery.** The supervisor, health fold and buffer-phase policy in a
 Windows-free `core/`, covered by tests that run without Windows or libmpv:

@@ -39,7 +39,14 @@ short version.
   `project()` line**. The updater matches per line, so a marker on its own line
   above `project()` matches nothing and silently stops bumping the version.
 - `CHANGELOG.md`, `version.txt`, `.release-please-manifest.json` — bot-owned.
-- `assets/coax.ico` — generated; rerun `python3 scripts/make-icon.py` instead.
+- Everything in `assets/` — `coax.ico` and the two `coax-mark-*.svg` files are
+  all generated from one geometry; rerun `python3 scripts/make-icon.py` instead.
+  The mark is also drawn a third time, in `theme::draw_logo`, and the constants
+  there and in the script are meant to agree.
+- Changing `assets/coax.ico` does not rebuild the resource on its own: ninja
+  does not track it as an input to the RC step, so `rm -f
+  build/CMakeFiles/coax.dir/coax.rc.res` before rebuilding or the executable
+  keeps the old icon and the build still looks green.
 - Never create a tag or a GitHub release by hand. Releasing is merging the
   release PR, then publishing the draft it stages.
 
