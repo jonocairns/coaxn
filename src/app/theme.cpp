@@ -3,6 +3,8 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cmath>
+#include <span>
 #include <string>
 
 #include "util/log.hpp"
@@ -10,20 +12,34 @@
 namespace coax::app::theme {
 namespace {
 
-// Design size, before any scaling. Since 1.92 ImGui rasterises glyphs at the
-// scaled size rather than stretching an atlas, so this stays a design number
-// and the text is sharp whatever the scale ends up being.
-constexpr float kFontSizeBase = 16.0f;
+// Tried in order, per face. Segoe UI ships with every supported Windows
+// version; Selawik is the metric-compatible clone, and Arial is the belt and
+// braces for a stripped install. Semibold rather than bold for the strong
+// face: bold beside this body weight is a shout, and the point of the second
+// face is hierarchy, not emphasis.
+constexpr const char* kRegularFiles[]  = {"segoeui.ttf", "selawk.ttf", "arial.ttf"};
+constexpr const char* kSemiboldFiles[] = {"seguisb.ttf", "selawksb.ttf", "segoeuib.ttf",
+                                          "arialbd.ttf"};
 
-// Tried in order. Segoe UI ships with every supported Windows version; Arial
-// is the belt and braces for a stripped install.
-constexpr const char* kFontFiles[] = {"segoeui.ttf", "arial.ttf"};
+// Extra advance baked into every glyph of the micro face. ImGui takes this in
+// absolute pixels and does not scale it — with the type, the display, or the
+// size a caller pushes — so it is set for the one size the face is used at.
+// At micro sizes the error over a DPI change is a fraction of a pixel per
+// glyph, which is why this is a constant rather than a reload.
+constexpr float kMicroTracking = 0.9f;
 
 // The display's contribution to the scale, and the unscaled style it is
 // applied to. ScaleAllSizes truncates, so rescaling has to start from the
 // original values every time rather than compounding on the current ones.
 float      dpi_scale = 1.0f;
 ImGuiStyle base_style;
+
+// The type scale, in the order it is loaded. `regular` is the atlas's first
+// font and therefore ImGui's default; the other two are only ever reached by
+// pushing them.
+ImFont* regular_face  = nullptr;
+ImFont* strong_face   = nullptr;
+ImFont* micro_face    = nullptr;
 
 ImVec4 rgba(ImU32 color) {
     return ImGui::ColorConvertU32ToFloat4(color);
@@ -48,30 +64,74 @@ void apply_scale() {
     style.FontScaleDpi  = dpi_scale;
 }
 
-void load_font() {
-    ImFontConfig config;
-    // Without this a missing file asserts rather than returning null, and the
-    // fallback below never gets its turn.
-    config.Flags |= ImFontFlags_NoLoadError;
-
+std::string fonts_directory() {
     char       directory[MAX_PATH]{};
     const UINT length = GetWindowsDirectoryA(directory, MAX_PATH);
-    if (length > 0 && length < MAX_PATH) {
-        for (const char* file : kFontFiles) {
-            const std::string path = std::string(directory) + "\\Fonts\\" + file;
-            if (ImGui::GetIO().Fonts->AddFontFromFileTTF(path.c_str(), kFontSizeBase, &config)) {
-                log::info("UI font: {}", path);
-                return;
-            }
-        }
+    if (length == 0 || length >= MAX_PATH) {
+        return {};
+    }
+    return std::string(directory) + "\\Fonts\\";
+}
+
+// The first of `files` that exists, at `size`, tracked out by `tracking`. Null
+// when none of them do, which is a case every caller has an answer for rather
+// than a failure: a stripped install still has to draw something.
+ImFont* load_face(const std::string& directory, std::span<const char* const> files,
+                  float size, float tracking) {
+    if (directory.empty()) {
+        return nullptr;
     }
 
-    // The scalable default, not the classic bitmap one: that is only clean at
-    // 13px, and everything here is drawn larger than that.
-    ImFontConfig fallback;
-    fallback.SizePixels = kFontSizeBase;
-    ImGui::GetIO().Fonts->AddFontDefaultVector(&fallback);
-    log::warn("No system UI font found; using the embedded default");
+    ImFontConfig config;
+    // Without this a missing file asserts rather than returning null, and the
+    // next candidate never gets its turn.
+    config.Flags |= ImFontFlags_NoLoadError;
+    config.GlyphExtraAdvanceX = tracking;
+
+    for (const char* file : files) {
+        const std::string path = directory + file;
+        if (ImFont* font = ImGui::GetIO().Fonts->AddFontFromFileTTF(path.c_str(), size,
+                                                                   &config)) {
+            log::info("UI face: {}", path);
+            return font;
+        }
+    }
+    return nullptr;
+}
+
+void load_fonts() {
+    const std::string directory = fonts_directory();
+
+    // Loaded first, so it is Fonts[0] and therefore what ImGui draws with
+    // unless something pushes otherwise.
+    regular_face = load_face(directory, kRegularFiles, kFontSizeBase, 0.0f);
+    if (regular_face == nullptr) {
+        // The scalable default, not the classic bitmap one: that is only clean
+        // at 13px, and everything here is drawn larger than that.
+        ImFontConfig fallback;
+        fallback.SizePixels = kFontSizeBase;
+        regular_face        = ImGui::GetIO().Fonts->AddFontDefaultVector(&fallback);
+        log::warn("No system UI font found; using the embedded default");
+    }
+
+    strong_face = load_face(directory, kSemiboldFiles, kFontSizeBase, 0.0f);
+    if (strong_face == nullptr) {
+        // A hierarchy of one weight is still a hierarchy — size and colour
+        // carry it — and it beats refusing to start over a missing font file.
+        strong_face = regular_face;
+        log::warn("No semibold UI face found; headings fall back to the regular one");
+    }
+
+    // The semibold file again rather than a reference to the face above,
+    // because the tracking belongs to the source: ImGui adds it to the glyph
+    // advance as the atlas is baked, not as text is drawn.
+    micro_face = load_face(directory, kSemiboldFiles, kMicroSize, kMicroTracking);
+    if (micro_face == nullptr) {
+        micro_face = load_face(directory, kRegularFiles, kMicroSize, kMicroTracking);
+    }
+    if (micro_face == nullptr) {
+        micro_face = regular_face;
+    }
 }
 
 }  // namespace
@@ -101,19 +161,33 @@ void configure_style() {
     style.PopupRounding           = 0.0f;
     style.GrabRounding            = 0.0f;
     style.ScrollbarRounding       = 0.0f;
-    style.WindowBorderSize        = 1.0f;
-    style.FrameBorderSize         = 1.0f;
-    style.WindowPadding           = ImVec2(16.0f, 14.0f);
-    style.FramePadding            = ImVec2(12.0f, 8.0f);
-    style.ItemSpacing             = ImVec2(10.0f, 9.0f);
-    style.ItemInnerSpacing        = ImVec2(8.0f, 6.0f);
-    style.ScrollbarSize           = 12.0f;
+    // One border in the whole application: the edge of a surface that floats
+    // over something else. A field is already darker than the panel it is cut
+    // into and a button already lighter, so an outline around either is a line
+    // drawn to say what the fill has said.
+    style.WindowBorderSize        = kStrokeHairline;
+    style.PopupBorderSize         = kStrokeHairline;
+    style.ChildBorderSize         = 0.0f;
+    style.FrameBorderSize         = 0.0f;
+    // Roomier than before, in both axes. Space is the cheapest way to separate
+    // two things, and it is the one that leaves nothing on screen to look at.
+    // Every one of these is a step on the scale, so the window's own rhythm and
+    // the rhythm of anything laid out by hand inside it are the same rhythm.
+    style.WindowPadding           = ImVec2(kSpace5, kSpace5);
+    style.FramePadding            = ImVec2(kSpace3, kSpace2);
+    style.ItemSpacing             = ImVec2(kSpace3, kSpace3);
+    style.ItemInnerSpacing        = ImVec2(kSpace2, kSpace1);
+    style.ScrollbarSize           = kSpace3;
     style.WindowTitleAlign        = ImVec2(0.0f, 0.5f);
-    style.SeparatorTextBorderSize = 1.0f;
+    style.SeparatorTextBorderSize = kStrokeHairline;
     // No leading stub before the label. The default pads one in on the left,
     // which reads as an unexplained indent when the rule is faint.
-    style.SeparatorTextPadding    = ImVec2(0.0f, 8.0f);
+    style.SeparatorTextPadding    = ImVec2(0.0f, kSpace3);
     style.SeparatorTextAlign      = ImVec2(0.0f, 0.5f);
+    // Set rather than left at zero, which would make it whatever size the
+    // first font in the atlas happens to have been loaded at. It is the same
+    // number, but the type scale is meant to be stated, not inferred.
+    style.FontSizeBase            = kFontSizeBase;
 
     ImVec4* colors = style.Colors;
     colors[ImGuiCol_Text]                 = rgba(kText);
@@ -160,7 +234,76 @@ void configure_style() {
     base_style = style;
     apply_scale();
 
-    load_font();
+    load_fonts();
+}
+
+ScopedStyle::~ScopedStyle() {
+    // The three stacks are independent, so the order between them is free; what
+    // matters is that a guard pops only its own pushes. Nested guards are
+    // destroyed in reverse order of construction, which keeps each one's
+    // pushes contiguous at the top of the stack it touched.
+    for (int pushed = 0; pushed < fonts_; ++pushed) {
+        ImGui::PopFont();
+    }
+    if (vars_ > 0) {
+        ImGui::PopStyleVar(vars_);
+    }
+    if (colors_ > 0) {
+        ImGui::PopStyleColor(colors_);
+    }
+}
+
+ScopedStyle& ScopedStyle::color(ImGuiCol target, ImU32 value) {
+    ImGui::PushStyleColor(target, value);
+    ++colors_;
+    return *this;
+}
+
+ScopedStyle& ScopedStyle::var(ImGuiStyleVar target, float value) {
+    ImGui::PushStyleVar(target, value);
+    ++vars_;
+    return *this;
+}
+
+ScopedStyle& ScopedStyle::var(ImGuiStyleVar target, ImVec2 value) {
+    ImGui::PushStyleVar(target, value);
+    ++vars_;
+    return *this;
+}
+
+ScopedStyle& ScopedStyle::strong(float multiple) {
+    push_strong(multiple);
+    ++fonts_;
+    return *this;
+}
+
+ScopedStyle& ScopedStyle::micro() {
+    push_micro();
+    ++fonts_;
+    return *this;
+}
+
+void push_strong(float multiple) {
+    // FontSizeBase, not GetFontSize(): the size handed to PushFont is scaled
+    // by the global factors afterwards, so passing an already-scaled one
+    // applies the display's scale twice.
+    ImGui::PushFont(strong_face, ImGui::GetStyle().FontSizeBase * multiple);
+}
+
+void push_micro() {
+    ImGui::PushFont(micro_face, kMicroSize);
+}
+
+void micro_label(const char* text) {
+    ScopedStyle style;
+    style.micro().color(ImGuiCol_Text, kTextFaint);
+    ImGui::TextUnformatted(text);
+}
+
+void separator_label(const char* text) {
+    ScopedStyle style;
+    style.micro().color(ImGuiCol_Text, kTextFaint);
+    ImGui::SeparatorText(text);
 }
 
 void set_dpi_scale(float scale) {
@@ -183,27 +326,13 @@ void draw_backdrop() {
     const ImVec2 bottom_right(viewport->Pos.x + viewport->Size.x,
                               viewport->Pos.y + viewport->Size.y);
 
-    // Two stacked bands rather than one: a single linear ramp over the whole
-    // height reads as flat, and the midpoint gives the falloff a shoulder.
-    const float middle = viewport->Pos.y + viewport->Size.y * 0.55f;
-    draw->AddRectFilledMultiColor(top_left, ImVec2(bottom_right.x, middle),
-                                  kBackdropTop, kBackdropTop,
-                                  kBackdropMiddle, kBackdropMiddle);
-    draw->AddRectFilledMultiColor(ImVec2(top_left.x, middle), bottom_right,
-                                  kBackdropMiddle, kBackdropMiddle,
-                                  kBackdropBottom, kBackdropBottom);
-
-    // A soft accent glow behind where the card sits. Concentric discs of a
-    // low constant alpha accumulate into a smooth falloff, which is cheaper
-    // and sharper than a blurred texture would be.
-    constexpr int kRings = 26;
-    const ImVec2  centre(viewport->Pos.x + viewport->Size.x * 0.5f,
-                         viewport->Pos.y + viewport->Size.y * 0.42f);
-    const float   radius = std::max(viewport->Size.x, viewport->Size.y) * 0.62f;
-    const ImU32   glow   = fade(kAccent, 4.0f / 255.0f);
-    for (int ring = kRings; ring > 0; --ring) {
-        draw->AddCircleFilled(centre, radius * (static_cast<float>(ring) / kRings), glow, 64);
-    }
+    // One value, no ramp. This was a gradient, and before that two bands with
+    // an accent glow behind the login card; both were decoration on a surface
+    // whose entire job is to be the thing the card is not. A ramp was also the
+    // wrong tool at this end of the range: two or three levels of near-black
+    // spread over a whole viewport gives each step tens of rows of pixels, so
+    // it reads as bands with a fade between them rather than as a gradient.
+    draw->AddRectFilled(top_left, bottom_right, kBackdrop);
 }
 
 void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade) {
@@ -212,11 +341,53 @@ void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_ri
     draw_list->AddRectFilledMultiColor(top_left, bottom_right, top, top, bottom, bottom);
 }
 
+namespace {
+
+// One arm of the mark: a stroked spiral of `kSweep` radians whose radius eases
+// from the outer edge down to the inner curl, with a disc at each end. The
+// discs are the round caps — ImGui strokes a path with square ends, and a
+// spiral that stops square looks cut rather than finished.
+void draw_spiral_arm(ImDrawList* draw_list, ImVec2 centre, float radius,
+                     float start, ImU32 color) {
+    // A little under three quarters of a turn. Enough that the arm reads as
+    // wound rather than as a bent line, and not so much that it laps its own
+    // other half: the two arms are one sweep apart in phase, so the further
+    // this goes the closer their turns run to each other.
+    constexpr float kSweep    = 4.7f;
+    constexpr int   kSegments = 56;
+
+    const float outer  = radius * 0.80f;
+    const float inner  = radius * 0.20f;
+    const float stroke = radius * 0.32f;
+
+    ImVec2 first(0.0f, 0.0f);
+    ImVec2 last(0.0f, 0.0f);
+    for (int segment = 0; segment <= kSegments; ++segment) {
+        const float t     = static_cast<float>(segment) / kSegments;
+        const float angle = start + kSweep * t;
+        const float reach = outer + (inner - outer) * t;
+        const ImVec2 point(centre.x + std::cos(angle) * reach,
+                           centre.y + std::sin(angle) * reach);
+        draw_list->PathLineTo(point);
+        if (segment == 0) {
+            first = point;
+        }
+        last = point;
+    }
+    draw_list->PathStroke(color, ImDrawFlags_None, stroke);
+    draw_list->AddCircleFilled(first, stroke * 0.5f, color, 16);
+    draw_list->AddCircleFilled(last, stroke * 0.5f, color, 16);
+}
+
+}  // namespace
+
 void draw_logo(ImDrawList* draw_list, ImVec2 centre, float radius) {
-    draw_list->AddCircleFilled(centre, radius, kBackdropMiddle, 48);
-    draw_list->AddCircle(centre, radius, kAccent, 48, radius * 0.16f);
-    draw_list->AddCircle(centre, radius * 0.58f, fade(kAccent, 0.55f), 40, radius * 0.10f);
-    draw_list->AddCircleFilled(centre, radius * 0.20f, kAccentHover, 24);
+    // Two arms about one centre, half a turn apart. Because both wind the same
+    // way and start opposite each other, they never cross: at any angle one is
+    // always outside the other, which is what makes the pair read as
+    // interlocked without either having to be drawn over the top of the other.
+    draw_spiral_arm(draw_list, centre, radius, 0.0f, kLogoArm);
+    draw_spiral_arm(draw_list, centre, radius, 3.14159265f, kAccent);
 }
 
 void draw_play_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color) {
