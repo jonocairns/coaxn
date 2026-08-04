@@ -13,9 +13,9 @@ three things into `build/`:
 
 | Artifact | For | Size |
 |---|---|---|
-| `coax-0.1.0-win64-setup.exe` | Most people. Installs to Program Files with a Start Menu entry and an uninstaller. | ~34 MB |
-| `coax-0.1.0-win64.zip` | Portable use. Unpack anywhere and run `coax.exe`. | ~46 MB |
-| `coax-0.1.0-win64-debug.zip` | Debugging a released build. | ~7 MB |
+| `coax-1.0.0-win64-setup.exe` | Most people. Installs to Program Files with a Start Menu entry and an uninstaller. | ~34 MB |
+| `coax-1.0.0-win64.zip` | Portable use. Unpack anywhere and run `coax.exe`. | ~46 MB |
+| `coax-1.0.0-win64-debug.zip` | Debugging a released build. | ~7 MB |
 
 The installer is smaller than the archive despite carrying the same payload:
 NSIS compresses with LZMA where the zip uses deflate.
@@ -53,8 +53,8 @@ already shipped.
 
 Three things follow from the prefixes, so they are worth getting right:
 `feat:` bumps the minor, `fix:` the patch, and anything else — `docs:`, `ci:`,
-`refactor:` — lands in the changelog without moving the version. Before 1.0 a
-breaking change bumps the minor rather than the major.
+`refactor:` — lands in the changelog without moving the version. A breaking
+change, written `feat!:` or with a `BREAKING CHANGE:` footer, bumps the major.
 
 ### Where the version lives
 

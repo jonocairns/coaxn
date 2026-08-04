@@ -76,8 +76,8 @@ nix develop .#core --command bash -c \
 Commit subjects follow [Conventional Commits](https://www.conventionalcommits.org):
 `feat:` bumps the minor version and `fix:` the patch, while `docs:`, `ci:` and
 the rest land in the changelog without moving the version. A breaking change —
-`feat!:`, `fix!:`, or a `BREAKING CHANGE:` footer — bumps the minor too, rather
-than the major, until the project reaches 1.0. The prefixes are not decoration:
+`feat!:`, `fix!:`, or a `BREAKING CHANGE:` footer — bumps the major. The
+prefixes are not decoration:
 release-please derives the next release from them.
 
 Packaging and release mechanics live in [docs/packaging.md](docs/packaging.md).
@@ -124,3 +124,4 @@ exposing that is available, so the UI says so rather than guessing.
 | [PRD.md](PRD.md) | Product requirements and the rationale for the native rewrite |
 | [docs/design/live-playback.md](docs/design/live-playback.md) | Live playback, recovery and buffering design |
 | [docs/packaging.md](docs/packaging.md) | Packaging, releases, debug symbols, pinned libmpv |
+| [AGENTS.md](AGENTS.md) | Build commands, commit-prefix rules, generated files — the short version |
