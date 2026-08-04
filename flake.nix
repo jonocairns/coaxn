@@ -23,6 +23,10 @@
             # Builds the Windows installer from Linux; see the packaging
             # section of the README.
             nsis
+            # Not a build dependency. Releases are pull requests now, so
+            # opening one and inspecting the draft the release job stages are
+            # both routine, and neither should need a browser.
+            gh
           ];
 
           # mcfgthreads is the threading runtime nixpkgs' mingw gcc links against;
