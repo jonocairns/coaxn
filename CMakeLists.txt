@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.24)
 # The version has one home, and release-please owns it: the release pull
 # request rewrites the line below, so it is never bumped by hand. CPack names
-# the artifacts from it and the update check compiles it into the binary. The
-# annotation is what release-please matches on -- losing it would leave
-# releases tagged ahead of the build they contain.
-# x-release-please-version
-project(coax_native VERSION 0.1.0 LANGUAGES CXX)
+# the artifacts from it and the update check compiles it into the binary.
+# The trailing annotation has to stay on the same line as the version -- the
+# generic updater matches per line and rewrites only what it finds there, so
+# a marker on its own line silently updates nothing.
+project(coax_native VERSION 0.1.0 LANGUAGES CXX) # x-release-please-version
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

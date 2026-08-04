@@ -62,10 +62,16 @@ Still `project(coax_native VERSION ...)` in [CMakeLists.txt](../CMakeLists.txt),
 which is what CPack names the artifacts from and what the update check compiles
 into the binary. The difference is that release-please owns the line and edits
 it in the release PR, so it is never bumped by hand. It finds the line by the
-`x-release-please-version` comment directly above it — delete that annotation
-and releases would be tagged ahead of the build they contain, which is why the
-release job re-reads `CMakeLists.txt` and fails if it disagrees with the version
-just released.
+`x-release-please-version` comment **trailing that same line**: the generic
+updater works line by line and rewrites only the version it finds on the
+annotated line, so a marker sitting on its own line above `project()` matches
+nothing and silently updates nothing.
+
+Get that wrong and releases are tagged ahead of the build they contain, which
+is why the release job re-reads `CMakeLists.txt` and fails if it disagrees with
+the version just released. Note the one case that check cannot see: while the
+file and the release happen to hold the same version, they agree whether or not
+the annotation works. It is the second release that breaks.
 
 `version.txt` and `.release-please-manifest.json` are release-please's own
 bookkeeping. Nothing in the build reads either one; leave both to the bot.

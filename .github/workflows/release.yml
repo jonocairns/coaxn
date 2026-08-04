@@ -46,7 +46,12 @@ jobs:
       contents: write
 
     steps:
+      # Nothing here talks to git over the network -- the upload authenticates
+      # through GH_TOKEN -- so the checkout credentials would only sit in
+      # .git/config for the fetch, build and packaging steps to trip over.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # The release PR rewrote project(coax_native VERSION ...), so this
       # checkout already carries the version that was just tagged. Asserting
