@@ -24,8 +24,10 @@ void ChannelIndex::reset(std::vector<Category> categories, std::vector<Channel> 
 
     channel_search_keys_.clear();
     channel_search_keys_.reserve(channels_.size());
+    max_channel_number_ = 0;
     for (const auto& channel : channels_) {
         channel_search_keys_.push_back(to_lower(channel.name));
+        max_channel_number_ = std::max(max_channel_number_, channel.number);
     }
 
     category_search_keys_.clear();

@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <cctype>
 #include <cstdio>
 #include <format>
 #include <utility>
@@ -17,8 +18,6 @@ namespace coax::xtream {
 namespace {
 
 using json = nlohmann::json;
-
-using util::http::narrow;
 
 std::string url_encode(std::string_view text) {
     static constexpr std::string_view kHex = "0123456789ABCDEF";
@@ -65,57 +64,32 @@ int field_int(const json& object, std::string_view key) {
     }
 }
 
-// Extracts one query parameter from a raw ?a=b&c=d string.
-std::string query_param(std::wstring_view query, std::wstring_view key) {
-    std::size_t cursor = 0;
-    while (cursor < query.size()) {
-        const auto amp   = query.find(L'&', cursor);
-        const auto piece = query.substr(cursor, amp == std::wstring_view::npos
-                                                    ? std::wstring_view::npos
-                                                    : amp - cursor);
-        const auto eq = piece.find(L'=');
-        if (eq != std::wstring_view::npos && piece.substr(0, eq) == key) {
-            return narrow(piece.substr(eq + 1));
+// A provider's display name with its whitespace regularised: trimmed at both
+// ends, and every internal run of blanks reduced to one. Catalogue names are
+// hand-typed and arrive ragged — "Boxing  05  :  FURY vs HALL  6PM" — which
+// reads as a column of accidental gaps once a few hundred of them are stacked
+// up. Applied where the provider's text is first read rather than where it is
+// drawn, so the search keys are built from the same string the list shows: a
+// name with a double space in it cannot be found by typing one.
+std::string tidy_name(std::string text) {
+    std::string out;
+    out.reserve(text.size());
+    bool pending_space = false;
+    for (const unsigned char ch : text) {
+        if (std::isspace(ch) != 0) {
+            pending_space = !out.empty();
+            continue;
         }
-        if (amp == std::wstring_view::npos) {
-            break;
+        if (pending_space) {
+            out.push_back(' ');
+            pending_space = false;
         }
-        cursor = amp + 1;
+        out.push_back(static_cast<char>(ch));
     }
-    return {};
+    return out;
 }
 
 }  // namespace
-
-bool parse_portal_url(std::string_view url, Credentials& out) {
-    util::http::CrackedUrl cracked;
-    if (!util::http::crack(url, cracked)) {
-        return false;
-    }
-
-    const auto question = cracked.path_and_query.find(L'?');
-    if (question == std::wstring::npos) {
-        return false;
-    }
-    const std::wstring_view query{cracked.path_and_query.data() + question + 1};
-
-    const std::string username = query_param(query, L"username");
-    const std::string password = query_param(query, L"password");
-    if (username.empty() || password.empty()) {
-        return false;
-    }
-
-    const bool default_port =
-        (cracked.secure && cracked.port == 443) || (!cracked.secure && cracked.port == 80);
-
-    out.base_url = std::format("{}://{}{}",
-                               cracked.secure ? "https" : "http",
-                               narrow(cracked.host),
-                               default_port ? std::string{} : std::format(":{}", cracked.port));
-    out.username = username;
-    out.password = password;
-    return true;
-}
 
 bool Client::get(std::string_view query, std::string& body, std::string& error) const {
     const std::string url = std::format(
@@ -151,7 +125,7 @@ bool Client::fetch_catalog(Catalog& out, std::string& error) const {
     for (const auto& entry : categories_json) {
         core::Category category;
         category.id   = field_text(entry, "category_id");
-        category.name = field_text(entry, "category_name");
+        category.name = tidy_name(field_text(entry, "category_name"));
         if (!category.id.empty()) {
             out.categories.push_back(std::move(category));
         }
@@ -179,7 +153,7 @@ bool Client::fetch_catalog(Catalog& out, std::string& error) const {
     for (const auto& entry : streams_json) {
         core::Channel channel;
         channel.id          = field_text(entry, "stream_id");
-        channel.name        = field_text(entry, "name");
+        channel.name        = tidy_name(field_text(entry, "name"));
         channel.category_id = field_text(entry, "category_id");
         channel.logo_url    = field_text(entry, "stream_icon");
         channel.number      = field_int(entry, "num");
