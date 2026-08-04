@@ -124,3 +124,4 @@ exposing that is available, so the UI says so rather than guessing.
 | [PRD.md](PRD.md) | Product requirements and the rationale for the native rewrite |
 | [docs/design/live-playback.md](docs/design/live-playback.md) | Live playback, recovery and buffering design |
 | [docs/packaging.md](docs/packaging.md) | Packaging, releases, debug symbols, pinned libmpv |
+| [AGENTS.md](AGENTS.md) | Build commands, commit-prefix rules, generated files — the short version |
