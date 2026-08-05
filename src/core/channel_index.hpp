@@ -35,9 +35,17 @@ public:
     [[nodiscard]] std::size_t category_count() const { return categories_.size(); }
     [[nodiscard]] bool        empty()          const { return channels_.empty(); }
 
+    // The largest provider-assigned number in the catalogue, or zero when no
+    // channel carries one. A list draws its number column at the width of this
+    // rather than of whatever is on screen, so the names do not shift sideways
+    // as the list is scrolled or filtered — and a provider that numbers
+    // nothing gets no column at all.
+    [[nodiscard]] int max_channel_number() const { return max_channel_number_; }
+
 private:
     std::vector<Category>    categories_;
     std::vector<Channel>     channels_;
+    int                      max_channel_number_ = 0;
 
     // Lowercased names, parallel to the vectors above, so filtering on every
     // keystroke does not re-lowercase thousands of strings.

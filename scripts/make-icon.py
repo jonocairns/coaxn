@@ -1,32 +1,55 @@
 #!/usr/bin/env python3
-"""Generate assets/coax.ico.
+"""Generate the mark: assets/coax.ico and the two assets/coax-mark-*.svg files.
 
-The icon is drawn procedurally rather than committed as an opaque binary so it
-can be re-derived and adjusted. The mark is a coaxial cable cross-section: a
-centre conductor inside a shield ring, on a rounded dark tile.
+The assets are drawn procedurally rather than committed as opaque binaries so
+they can be re-derived and adjusted. The mark is two spiral arms turning about
+one centre, half a turn apart, on a transparent ground. It is the same mark
+theme::draw_logo draws in the application, at the same proportions, and the two
+are meant to stay that way.
 
-Usage: python3 scripts/make-icon.py [output.ico]
+Usage: python3 scripts/make-icon.py [assets-dir]
+
+The argument is the directory the three files are written to, not a file path;
+it defaults to assets/ beside this script's parent and is created if missing.
 """
 
 import binascii
+import math
 import struct
 import sys
 import zlib
 from pathlib import Path
 
 # Rendered at SS times the target size and box-filtered down, which is what
-# keeps the ring edges clean at 16px.
+# keeps the curves clean at 16px.
 SS = 4
 
-BG_TOP = (0x1D, 0x24, 0x30)
-BG_BOTTOM = (0x0F, 0x13, 0x19)
-ACCENT = (0x5C, 0xD0, 0xFF)
+# The bright arm is the application's accent. Its counterpart is a light slate
+# rather than the dark navy the mark was designed against: the icon has no
+# ground of its own to sit on, so both arms have to survive a taskbar that may
+# be black or white, and a dark arm on a dark shelf is half a logo.
+ACCENT = (0x4C, 0x7C, 0xF0)
+SLATE = (0xA9, 0xB3, 0xC9)
+# The same arm for a page that is not dark. A mark with no ground of its own
+# cannot have one colour that works on both, so the second arm is the only
+# thing that changes between the two SVGs below.
+NAVY = (0x2B, 0x32, 0x42)
 
-# Fractions of the icon edge.
-CORNER_RADIUS = 0.22
-RING_OUTER = 0.375
-RING_INNER = 0.265
-CORE_RADIUS = 0.115
+# Fractions of the mark's radius, matching theme::draw_spiral_arm exactly.
+SWEEP = 4.7
+ARM_OUTER = 0.80
+ARM_INNER = 0.20
+ARM_STROKE = 0.32
+
+# The mark's radius as a fraction of the icon edge. Smaller than half, so the
+# arms and their caps clear the edge on every side.
+MARK_RADIUS = 0.46
+
+# Floor on the stroke, in final device pixels. A stroke that is a constant
+# fraction of the edge is a hairline at 256 and invisible at 16, so the small
+# sizes are allowed to be optically heavier than the geometry asks for. This is
+# the whole reason each size is rendered rather than one being scaled down.
+MIN_STROKE_PX = 2.0
 
 # BMP entries below this size, a PNG entry at or above it. Windows has read PNG
 # icon entries since Vista; BMP keeps the small sizes maximally compatible.
@@ -35,54 +58,90 @@ PNG_FROM = 256
 SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 
-def rounded_rect_alpha(x, y, size, radius):
-    """Coverage of a rounded square filling the tile, 0.0 or 1.0 (supersampled)."""
-    inner_max = size - radius
-    cx = min(max(x, radius), inner_max)
-    cy = min(max(y, radius), inner_max)
-    dx = x - cx
-    dy = y - cy
-    return 1.0 if dx * dx + dy * dy <= radius * radius else 0.0
+def arm_distance(dx, dy, radius, stroke):
+    """Distance from a point to one spiral arm's centreline, in pixels.
+
+    The arm is r(phi) = outer -> inner over phi in [0, SWEEP], so a point at
+    polar angle theta can only be near it where phi is theta plus some whole
+    number of turns. Each candidate contributes |r - r(phi)| scaled to the
+    perpendicular: the radial error alone overstates the distance by the angle
+    between the radius and the curve's normal, and correcting it is what keeps
+    this in step with the two renderings that stroke a path. Both ImGui's
+    PathStroke in theme::draw_spiral_arm and the SVG stroke-width below lay
+    their width down normal to the centreline, so measuring radially here would
+    draw the same geometry thinner. The gap is only about 1% at ARM_OUTER, but
+    it reaches 16% by ARM_INNER, where the arm is tightest and the turn
+    sharpest.
+    """
+    dist = math.hypot(dx, dy)
+    if dist <= 0.0:
+        theta = 0.0
+    else:
+        theta = math.atan2(dy, dx)
+
+    outer = ARM_OUTER * radius
+    inner = ARM_INNER * radius
+    # dr/dphi is constant along the sweep, so the radial-to-normal correction
+    # depends only on how far out the candidate sits.
+    slope = (inner - outer) / SWEEP
+    best = float("inf")
+
+    # theta is in (-pi, pi]; the arm spans SWEEP radians from its start, so at
+    # most two whole turns can bring a candidate into range.
+    turn = theta
+    while turn > 0.0:
+        turn -= 2.0 * math.pi
+    while turn <= SWEEP:
+        if turn >= 0.0:
+            reach = outer + (inner - outer) * (turn / SWEEP)
+            normal = reach / math.hypot(reach, slope)
+            best = min(best, abs(dist - reach) * normal)
+        turn += 2.0 * math.pi
+
+    # The round caps at each end, which are discs rather than part of the sweep.
+    for phi in (0.0, SWEEP):
+        reach = outer + (inner - outer) * (phi / SWEEP)
+        cap_x = math.cos(phi) * reach
+        cap_y = math.sin(phi) * reach
+        best = min(best, math.hypot(dx - cap_x, dy - cap_y))
+
+    return best - stroke * 0.5
 
 
 def render(size):
     """Render one square RGBA image as a flat list of (r, g, b, a) tuples."""
     hi = size * SS
-    radius = CORNER_RADIUS * hi
     centre = hi / 2.0
-    ring_outer = RING_OUTER * hi
-    ring_inner = RING_INNER * hi
-    core = CORE_RADIUS * hi
+    radius = MARK_RADIUS * hi
+    stroke = max(ARM_STROKE * radius, MIN_STROKE_PX * SS)
 
-    # Supersampled buffer, then box-downsample into the final grid.
+    # Both arms wind the same way from opposite starts, so the second is the
+    # first read through a half-turn rotation: negating the offsets is the same
+    # as adding pi to the angle, and costs nothing per pixel.
+    arms = ((ACCENT, -1.0), (SLATE, 1.0))
+
+    # Supersampled buffer, then box-downsample into the final grid. Nothing is
+    # accumulated off the arms, so the ground stays transparent.
     acc = [[0.0, 0.0, 0.0, 0.0] for _ in range(size * size)]
 
     for py in range(hi):
-        # Vertical background gradient, evaluated once per row.
-        t = py / max(hi - 1, 1)
-        bg = tuple(BG_TOP[i] + (BG_BOTTOM[i] - BG_TOP[i]) * t for i in range(3))
         dy = py + 0.5 - centre
-        dy2 = dy * dy
         out_y = (py // SS) * size
 
         for px in range(hi):
-            alpha = rounded_rect_alpha(px + 0.5, py + 0.5, hi, radius)
-            if alpha == 0.0:
+            dx = px + 0.5 - centre
+            if dx * dx + dy * dy > (radius + stroke) ** 2:
                 continue
 
-            dx = px + 0.5 - centre
-            dist = (dx * dx + dy2) ** 0.5
-
-            if dist <= core or ring_inner <= dist <= ring_outer:
-                colour = ACCENT
-            else:
-                colour = bg
-
-            cell = acc[out_y + (px // SS)]
-            cell[0] += colour[0]
-            cell[1] += colour[1]
-            cell[2] += colour[2]
-            cell[3] += 255.0
+            for colour, sign in arms:
+                if arm_distance(sign * dx, sign * dy, radius, stroke) > 0.0:
+                    continue
+                cell = acc[out_y + (px // SS)]
+                cell[0] += colour[0]
+                cell[1] += colour[1]
+                cell[2] += colour[2]
+                cell[3] += 255.0
+                break
 
     samples = float(SS * SS)
     pixels = []
@@ -159,13 +218,86 @@ def build_ico(sizes):
     return bytes(out)
 
 
+def svg_points(start, radius, centre, segments=72):
+    """The centreline of one arm, sampled evenly along its sweep."""
+    points = []
+    for step in range(segments + 1):
+        t = step / segments
+        angle = start + SWEEP * t
+        reach = (ARM_OUTER + (ARM_INNER - ARM_OUTER) * t) * radius
+        points.append((centre + math.cos(angle) * reach,
+                       centre + math.sin(angle) * reach))
+    return points
+
+
+def svg_path(start, radius, centre):
+    """The `d` attribute for one arm, as a polyline along its centreline.
+
+    Round joins and caps are the renderer's job here rather than ours: an SVG
+    stroke can ask for them, which is what the icon has to draw discs to fake.
+    """
+    points = svg_points(start, radius, centre)
+    head = "M {:.2f} {:.2f}".format(*points[0])
+    return head + "".join(" L {:.2f} {:.2f}".format(x, y) for x, y in points[1:])
+
+
+def build_svg(second_arm):
+    """The mark as an SVG, `second_arm` being the colour of the slate one."""
+    box = 100.0
+    centre = box / 2.0
+    radius = MARK_RADIUS * box
+    stroke = ARM_STROKE * radius
+    arms = ((0.0, second_arm), (math.pi, ACCENT))
+
+    def rgb(colour):
+        return "#{:02X}{:02X}{:02X}".format(*colour)
+
+    # Trimmed to what the arms actually cover, kept square and centred. The
+    # icon needs its margin — an icon that touches its own edges reads as
+    # cropped — but here the surrounding space belongs to whatever is placing
+    # the mark, and a viewBox padded on its behalf just renders it small.
+    reach = 0.0
+    for start, _ in arms:
+        for point in svg_points(start, radius, centre):
+            reach = max(reach, abs(point[0] - centre), abs(point[1] - centre))
+    reach += stroke / 2.0
+    view = "{:.2f} {:.2f} {:.2f} {:.2f}".format(
+        centre - reach, centre - reach, reach * 2.0, reach * 2.0)
+
+    def arm(start, colour):
+        return (
+            '  <path d="{}" fill="none" stroke="{}" stroke-width="{:.2f}"'
+            ' stroke-linecap="round" stroke-linejoin="round"/>'.format(
+                svg_path(start, radius, centre), rgb(colour), stroke))
+
+    return "\n".join((
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="{}"'
+        ' role="img" aria-label="Coax">'.format(view),
+        "  <title>Coax</title>",
+        arm(*arms[0]),
+        arm(*arms[1]),
+        "</svg>",
+        "",
+    ))
+
+
 def main():
-    dest = Path(sys.argv[1]) if len(sys.argv) > 1 else (
-        Path(__file__).resolve().parent.parent / "assets" / "coax.ico")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(build_ico(SIZES))
-    print(f"wrote {dest} ({dest.stat().st_size} bytes, sizes: "
+    assets = (Path(sys.argv[1]) if len(sys.argv) > 1
+              else Path(__file__).resolve().parent.parent / "assets")
+    assets.mkdir(parents=True, exist_ok=True)
+
+    icon = assets / "coax.ico"
+    icon.write_bytes(build_ico(SIZES))
+    print(f"wrote {icon} ({icon.stat().st_size} bytes, sizes: "
           f"{', '.join(str(s) for s in SIZES)})")
+
+    # Two, because the mark has no ground of its own and a README is read on
+    # whichever page GitHub decides to serve.
+    for name, second_arm in (("coax-mark-on-dark.svg", SLATE),
+                             ("coax-mark-on-light.svg", NAVY)):
+        path = assets / name
+        path.write_text(build_svg(second_arm))
+        print(f"wrote {path} ({path.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":

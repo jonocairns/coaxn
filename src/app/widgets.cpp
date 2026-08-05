@@ -59,8 +59,8 @@ bool volume_slider(const char* id, int& value, int maximum, int unity,
 
     // The figure's slot is measured from the widest reading the track can
     // produce, so the rule does not shorten as the number gets longer.
-    const float readout = ImGui::CalcTextSize("000%").x + theme::scaled(8.0f);
-    const float track   = std::max(width - readout, theme::scaled(24.0f));
+    const float readout = ImGui::CalcTextSize("000%").x + theme::scaled(theme::kSpace2);
+    const float track   = std::max(width - readout, theme::scaled(theme::kSpace6));
 
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float  middle = origin.y + box * 0.5f;
@@ -80,7 +80,7 @@ bool volume_slider(const char* id, int& value, int maximum, int unity,
                            0, maximum);
     }
 
-    const float thickness = theme::scaled(3.0f);
+    const float thickness = theme::scaled(theme::kStrokeTrack);
     const float top       = middle - thickness * 0.5f;
     const float bottom    = middle + thickness * 0.5f;
     const float filled    = track * (static_cast<float>(value) / static_cast<float>(maximum));
@@ -97,15 +97,15 @@ bool volume_slider(const char* id, int& value, int maximum, int unity,
                                                 static_cast<float>(maximum));
         const float reach = thickness * 1.7f;
         draw_list->AddRectFilled(ImVec2(at, middle - reach),
-                                 ImVec2(at + std::max(theme::scaled(1.0f), 1.0f), middle + reach),
+                                 ImVec2(at + std::max(theme::scaled(theme::kStrokeHairline), 1.0f), middle + reach),
                                  theme::with_alpha(theme::kTrackMark, fade), 0.0f);
     }
 
     // Handle and figure only under the pointer. At rest the length of the fill
     // is the reading, and a number that never changes is noise over a picture.
     if (hot) {
-        const float half_width  = theme::scaled(2.0f);
-        const float half_height = theme::scaled(8.0f);
+        const float half_width  = theme::scaled(theme::kStrokeMarker);
+        const float half_height = theme::scaled(theme::kSpace2);
         const float at = std::clamp(origin.x + filled, origin.x + half_width,
                                     origin.x + track - half_width);
         draw_list->AddRectFilled(ImVec2(at - half_width, middle - half_height),
@@ -114,7 +114,7 @@ bool volume_slider(const char* id, int& value, int maximum, int unity,
 
         char figure[8];
         std::snprintf(figure, sizeof(figure), "%d%%", value);
-        draw_list->AddText(ImVec2(origin.x + track + theme::scaled(8.0f),
+        draw_list->AddText(ImVec2(origin.x + track + theme::scaled(theme::kSpace2),
                                   middle - ImGui::GetTextLineHeight() * 0.5f),
                            theme::with_alpha(theme::kTextDim, fade), figure);
     }

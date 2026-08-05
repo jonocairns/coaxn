@@ -2,8 +2,8 @@
 
 #include <imgui.h>
 
-// The application's visual language: one palette, one scale, and the chrome
-// the login screen paints by hand.
+// The application's visual language: one palette, one type scale, and the
+// chrome the login screen paints by hand.
 namespace coax::app::theme {
 
 // The application's own sizing factor, on top of whatever the display is
@@ -24,70 +24,160 @@ inline constexpr float kUiScaleBase = 1.0f;
 // The palette. Every colour the application draws is named here — including
 // the ones only the ImGui style table consumes — so that a colour is changed
 // in one place rather than hunted through the draw code.
+//
+// Neutral by construction. The surfaces are greys with no hue of their own, so
+// the accent is the only colour in the window and does not have to shout to be
+// found. Anything tinted here would be competing with the one thing that is
+// supposed to mean something.
 // ---------------------------------------------------------------------------
 
-// Surfaces, back to front.
-inline constexpr ImU32 kBackdropTop    = IM_COL32(0x16, 0x1D, 0x2B, 0xFF);
-inline constexpr ImU32 kBackdropMiddle = IM_COL32(0x0A, 0x0E, 0x16, 0xFF);
-inline constexpr ImU32 kBackdropBottom = IM_COL32(0x04, 0x06, 0x0A, 0xFF);
-inline constexpr ImU32 kPanel          = IM_COL32(0x13, 0x18, 0x23, 0xFC);
-inline constexpr ImU32 kPanelBorder    = IM_COL32(0x28, 0x32, 0x45, 0xFF);
-inline constexpr ImU32 kTitleBar       = IM_COL32(0x0D, 0x11, 0x1A, 0xFF);
-inline constexpr ImU32 kSeparator      = IM_COL32(0x30, 0x3B, 0x50, 0xFF);
+// Surfaces, back to front. The backdrop is one flat value: a ramp across a
+// couple of levels of near-black has too few steps to be smooth, and an
+// 8-bit gradient over that little range bands into visible strips rather than
+// fading.
+inline constexpr ImU32 kBackdrop       = IM_COL32(0x0B, 0x0B, 0x0D, 0xFF);
+inline constexpr ImU32 kPanel          = IM_COL32(0x11, 0x11, 0x13, 0xFA);
+inline constexpr ImU32 kPanelBorder    = IM_COL32(0x1F, 0x1F, 0x23, 0xFF);
+inline constexpr ImU32 kTitleBar       = IM_COL32(0x0C, 0x0C, 0x0E, 0xFF);
+inline constexpr ImU32 kSeparator      = IM_COL32(0x1C, 0x1C, 0x20, 0xFF);
 inline constexpr ImU32 kTransparent    = IM_COL32(0x00, 0x00, 0x00, 0x00);
-inline constexpr ImU32 kScrim          = IM_COL32(0x02, 0x04, 0x08, 0xB4);
+inline constexpr ImU32 kScrim          = IM_COL32(0x00, 0x00, 0x00, 0xB0);
 
-// Text entry.
-inline constexpr ImU32 kField        = IM_COL32(0x0B, 0x0F, 0x17, 0xFF);
-inline constexpr ImU32 kFieldHover   = IM_COL32(0x14, 0x1B, 0x28, 0xFF);
-inline constexpr ImU32 kFieldActive  = IM_COL32(0x16, 0x1E, 0x2D, 0xFF);
+// Text entry. Darker than the panel rather than lighter: a field is a well cut
+// into the surface, which needs no border to read as one.
+inline constexpr ImU32 kField        = IM_COL32(0x0A, 0x0A, 0x0C, 0xFF);
+inline constexpr ImU32 kFieldHover   = IM_COL32(0x10, 0x10, 0x13, 0xFF);
+inline constexpr ImU32 kFieldActive  = IM_COL32(0x13, 0x13, 0x17, 0xFF);
 
 // Neutral controls. The accent is reserved for the primary action, so an
 // ordinary button stays quiet.
-inline constexpr ImU32 kControl       = IM_COL32(0x1D, 0x25, 0x33, 0xFF);
-inline constexpr ImU32 kControlHover  = IM_COL32(0x28, 0x33, 0x45, 0xFF);
-inline constexpr ImU32 kControlActive = IM_COL32(0x32, 0x3F, 0x55, 0xFF);
-inline constexpr ImU32 kGrab          = IM_COL32(0x2C, 0x36, 0x49, 0xFF);
-inline constexpr ImU32 kGrabHover     = IM_COL32(0x3A, 0x46, 0x5C, 0xFF);
+inline constexpr ImU32 kControl       = IM_COL32(0x17, 0x17, 0x1A, 0xFF);
+inline constexpr ImU32 kControlHover  = IM_COL32(0x20, 0x20, 0x25, 0xFF);
+inline constexpr ImU32 kControlActive = IM_COL32(0x2A, 0x2A, 0x30, 0xFF);
+inline constexpr ImU32 kGrab          = IM_COL32(0x26, 0x26, 0x2B, 0xFF);
+inline constexpr ImU32 kGrabHover     = IM_COL32(0x34, 0x34, 0x3B, 0xFF);
 
 // Selection. A channel list is hundreds of these at once, so they are washes
 // over whatever is behind rather than fills of their own.
-inline constexpr ImU32 kSelection      = IM_COL32(0xFF, 0xFF, 0xFF, 0x0F);
-inline constexpr ImU32 kSelectionHover = IM_COL32(0xFF, 0xFF, 0xFF, 0x1C);
+inline constexpr ImU32 kSelection      = IM_COL32(0xFF, 0xFF, 0xFF, 0x0D);
+inline constexpr ImU32 kSelectionHover = IM_COL32(0xFF, 0xFF, 0xFF, 0x17);
 
-// Text.
-inline constexpr ImU32 kText    = IM_COL32(0xE7, 0xEB, 0xF3, 0xFF);
-inline constexpr ImU32 kTextDim = IM_COL32(0x82, 0x8E, 0xA5, 0xFF);
-inline constexpr ImU32 kError   = IM_COL32(0xFF, 0x7B, 0x72, 0xFF);
+// Text, in three weights of attention: the reading, the label beside it, and
+// the heading above them both. Faint is deliberately quiet — it is only ever
+// used at micro size, where the tracking does the work the colour would.
+// Every one of these is at or above 4.5:1 on the surface it is used on, which
+// is what normal-size text needs to be legible to normal-size eyesight. Faint
+// is the floor of the system, not a licence to go quieter: it was #5C5C64 and
+// measured 2.85:1 at eleven pixels, which is a colour chosen by eye on a good
+// monitor and not readable on a bad one.
+inline constexpr ImU32 kText      = IM_COL32(0xE9, 0xE9, 0xEC, 0xFF);  // 15.6:1
+inline constexpr ImU32 kTextDim   = IM_COL32(0x8B, 0x8B, 0x93, 0xFF);  //  5.6:1
+inline constexpr ImU32 kTextFaint = IM_COL32(0x7C, 0x7C, 0x84, 0xFF);  //  4.6:1
+inline constexpr ImU32 kError     = IM_COL32(0xEC, 0x6A, 0x62, 0xFF);  //  6.1:1
 
-// Accent.
-inline constexpr ImU32 kAccent       = IM_COL32(0x35, 0x74, 0xF0, 0xFF);
-inline constexpr ImU32 kAccentHover  = IM_COL32(0x4C, 0x8A, 0xFF, 0xFF);
-inline constexpr ImU32 kAccentActive = IM_COL32(0x27, 0x5F, 0xD0, 0xFF);
-inline constexpr ImU32 kOnAccent     = IM_COL32(0xFF, 0xFF, 0xFF, 0xFF);
+// Accent. This is the brand colour and it is only ever decoration — the mark,
+// the volume fill, the rule beside the playing channel — so it is chosen to
+// look right rather than to be read off.
+inline constexpr ImU32 kAccent      = IM_COL32(0x4C, 0x7C, 0xF0, 0xFF);
+inline constexpr ImU32 kAccentHover = IM_COL32(0x6B, 0x93, 0xFF, 0xFF);
+
+// The primary action, which is the one place the accent has a label on it. A
+// step darker than the brand, because white on kAccent is 3.85:1 and normal
+// text needs 4.5. Hover and press go down the ramp rather than up for the same
+// reason: a lighter blue would take the label back under, so this button
+// deepens under the pointer instead of brightening.
+inline constexpr ImU32 kAccentFill       = IM_COL32(0x45, 0x70, 0xD7, 0xFF);  // 4.6:1
+inline constexpr ImU32 kAccentFillHover  = IM_COL32(0x3A, 0x63, 0xCC, 0xFF);  // 5.5:1
+inline constexpr ImU32 kAccentFillActive = IM_COL32(0x2F, 0x52, 0xA8, 0xFF);  // 7.3:1
+inline constexpr ImU32 kOnAccent         = IM_COL32(0xFF, 0xFF, 0xFF, 0xFF);
+
+// The mark's second arm. Its counterpart is the accent, so this is the only
+// other colour the application draws — a light slate rather than the dark one
+// the mark was designed against, because here it is seen on near-black and a
+// dark arm on a dark ground is half a logo.
+inline constexpr ImU32 kLogoArm = IM_COL32(0xA9, 0xB3, 0xC9, 0xFF);
 
 // The playback overlay. It sits over the picture rather than over a surface of
 // its own, so it is a ramp into darkness at the bottom of the frame rather
 // than a panel: legible over a bright shot without drawing an edge across it.
-inline constexpr ImU32 kOverlayScrimTop    = IM_COL32(0x02, 0x04, 0x08, 0x00);
-inline constexpr ImU32 kOverlayScrimBottom = IM_COL32(0x02, 0x04, 0x08, 0xDE);
+inline constexpr ImU32 kOverlayScrimTop    = IM_COL32(0x00, 0x00, 0x00, 0x00);
+inline constexpr ImU32 kOverlayScrimBottom = IM_COL32(0x00, 0x00, 0x00, 0xD9);
 
 // Frameless controls. An icon carries its own state — brighter under the
 // pointer, over a wash while it is held — because a filled button behind every
 // glyph is more chrome than the row it controls.
-inline constexpr ImU32 kIcon           = IM_COL32(0xC6, 0xCF, 0xDE, 0xFF);
+inline constexpr ImU32 kIcon           = IM_COL32(0xB4, 0xB4, 0xBC, 0xFF);
 inline constexpr ImU32 kIconHover      = IM_COL32(0xFF, 0xFF, 0xFF, 0xFF);
-inline constexpr ImU32 kIconWash       = IM_COL32(0xFF, 0xFF, 0xFF, 0x14);
-inline constexpr ImU32 kIconWashActive = IM_COL32(0xFF, 0xFF, 0xFF, 0x26);
-inline constexpr ImU32 kTrack          = IM_COL32(0xFF, 0xFF, 0xFF, 0x33);
-inline constexpr ImU32 kTrackMark      = IM_COL32(0xFF, 0xFF, 0xFF, 0x59);
+inline constexpr ImU32 kIconWash       = IM_COL32(0xFF, 0xFF, 0xFF, 0x0F);
+inline constexpr ImU32 kIconWashActive = IM_COL32(0xFF, 0xFF, 0xFF, 0x1F);
+inline constexpr ImU32 kTrack          = IM_COL32(0xFF, 0xFF, 0xFF, 0x26);
+inline constexpr ImU32 kTrackMark      = IM_COL32(0xFF, 0xFF, 0xFF, 0x40);
 
 // The same colour at a fraction of its own opacity. Anything drawn straight
 // into a draw list has to fade itself: the Alpha style variable only reaches
 // widgets, and the overlay is half hand-drawn.
 [[nodiscard]] ImU32 with_alpha(ImU32 color, float multiplier);
 
-// Installs the palette, the spacing and the UI font. Call once, after the
+// ---------------------------------------------------------------------------
+// The spacing scale. Every gap, inset and margin in the application is one of
+// these, in design pixels, before ui_scale is applied.
+//
+// A grid rather than a list of the numbers that were already there. Colour has
+// had one source of truth from the start and spacing did not: it was two dozen
+// literals spread through the draw code, so a rhythm nobody could see was the
+// sum of choices nobody could find. Steps of four, because that is the
+// smallest interval that still looks deliberate once the display scale has
+// multiplied it.
+// ---------------------------------------------------------------------------
+
+inline constexpr float kSpace1 = 4.0f;
+inline constexpr float kSpace2 = 8.0f;
+inline constexpr float kSpace3 = 12.0f;
+inline constexpr float kSpace4 = 16.0f;
+inline constexpr float kSpace5 = 20.0f;
+inline constexpr float kSpace6 = 24.0f;
+inline constexpr float kSpace7 = 32.0f;
+inline constexpr float kSpace8 = 48.0f;
+
+// Stroke weights, which are not spacing: a rule is as thick as it needs to be
+// to survive being drawn, and rounding one to the nearest four would make it a
+// bar. Kept here anyway so that nothing in the draw code is a bare number.
+inline constexpr float kStrokeHairline = 1.0f;
+inline constexpr float kStrokeMarker   = 2.0f;
+inline constexpr float kStrokeTrack    = 3.0f;
+
+// ---------------------------------------------------------------------------
+// Scoped style pushes.
+//
+// ImGui unwinds its style stacks by count, so a Pop that disagrees with its
+// Push does not fail where it was written — it corrupts every surface drawn
+// afterwards. A counted pop also has to be kept in step by hand through every
+// later edit, and a return between a push and its pop leaks in silence. This
+// makes the pairing structural instead: the destructor pops exactly what was
+// pushed, whichever way the function is left.
+// ---------------------------------------------------------------------------
+class ScopedStyle {
+public:
+    ScopedStyle() = default;
+    ~ScopedStyle();
+
+    ScopedStyle(const ScopedStyle&)            = delete;
+    ScopedStyle& operator=(const ScopedStyle&) = delete;
+
+    ScopedStyle& color(ImGuiCol target, ImU32 value);
+    ScopedStyle& var(ImGuiStyleVar target, float value);
+    ScopedStyle& var(ImGuiStyleVar target, ImVec2 value);
+    // The type scale, pushed under the same guard as everything else.
+    ScopedStyle& strong(float multiple = 1.0f);
+    ScopedStyle& micro();
+
+private:
+    int colors_ = 0;
+    int vars_   = 0;
+    int fonts_  = 0;
+};
+
+// Installs the palette, the spacing and the type scale. Call once, after the
 // ImGui context exists and before the backends are initialised.
 void configure_style();
 
@@ -95,10 +185,47 @@ void configure_style();
 // call every time the window reports a change; repeats are ignored.
 void set_dpi_scale(float scale);
 
-// Paints the whole viewport: a vertical gradient with a soft accent glow
-// behind the centre. Opaque, so it is only ever drawn when no video is on
-// screen — the UI layer composites on top of the video visual, and an opaque
-// fill would hide it.
+// ---------------------------------------------------------------------------
+// The type scale. Three faces, not one face at several sizes: weight is what
+// separates a heading from the thing it heads, and a single regular face
+// scaled up only ever produces large body text.
+//
+// A face is loaded per style rather than parameterised because the one thing
+// that cannot be set per draw call is tracking — ImGui bakes it into the
+// glyph advance at load time.
+// ---------------------------------------------------------------------------
+
+// The design size of body text, before any scaling.
+inline constexpr float kFontSizeBase = 15.0f;
+// And of the micro label, which is small enough that it is a texture rather
+// than something anyone reads twice.
+inline constexpr float kMicroSize = 11.0f;
+
+// The regular face is the atlas default, so it needs no accessor: it is what
+// is drawn with unless one of these pushes something else. Both pair with
+// ImGui::PopFont().
+//
+// The semibold face, at `multiple` of the current base text size, for the one
+// thing on a surface that should be read first. Falls back to the regular face
+// where Windows has no semibold to give.
+void push_strong(float multiple = 1.0f);
+// Semibold again, tracked out and at micro size, for uppercase labels.
+void push_micro();
+
+// A section heading: uppercase, tracked, faint, and small enough that it never
+// competes with what it introduces. Pass the text already uppercased — this
+// styles a label, it does not rewrite one. The `separator_` form draws the
+// same label with the rule ImGui::SeparatorText puts beside it.
+void micro_label(const char* text);
+void separator_label(const char* text);
+
+// ---------------------------------------------------------------------------
+// Hand-drawn chrome.
+// ---------------------------------------------------------------------------
+
+// Paints the whole viewport in one flat near-black. Opaque, so it is only ever
+// drawn when no video is on screen — the UI layer composites on top of the
+// video visual, and an opaque fill would hide it.
 void draw_backdrop();
 
 // The ramp the playback overlay sits on: nothing at the top edge, near-black
@@ -106,8 +233,11 @@ void draw_backdrop();
 // behind it — it buys legibility for the row without hiding the picture.
 void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade);
 
-// The coax mark: a connector seen end on. Drawn rather than loaded so it
-// inherits the accent colour and costs no texture.
+// The coax mark: two spiral arms turning about one centre, half a turn apart —
+// a cable seen end on and a signal going round it, depending on how long you
+// look. Drawn rather than loaded so it takes the palette's own colours and
+// costs no texture. It has no tile of its own; it sits on whatever surface it
+// is placed on. `radius` is the mark's outer edge, stroke included.
 void draw_logo(ImDrawList* draw_list, ImVec2 centre, float radius);
 
 // ---------------------------------------------------------------------------

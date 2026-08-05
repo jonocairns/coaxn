@@ -23,6 +23,17 @@ namespace {
 constexpr int kInitialWidth  = 1600;
 constexpr int kInitialHeight = 900;
 
+// Dimensions belonging to one surface each. These are not spacing and so are
+// not on the scale: a login card is as wide as a provider's URL needs, and
+// rounding that to the nearest four would say nothing.
+constexpr float kLoginCardWidth   = 430.0f;
+constexpr float kBrowserMaxWidth  = 430.0f;
+constexpr float kConnectHeight    = 40.0f;
+constexpr float kOverlayRampExtra = 46.0f;
+constexpr float kVolumeWidth      = 124.0f;
+constexpr float kLogWidth         = 560.0f;
+constexpr float kLogHeight        = 200.0f;
+
 // Copies a std::string into a fixed ImGui text buffer and back out again.
 struct TextField {
     char buffer[512]{};
@@ -36,6 +47,63 @@ struct TextField {
 
 template<class... Ts>
 struct Overloaded : Ts... { using Ts::operator()...; };
+
+// The longest prefix of `text` that fits in `width`, with an ellipsis where it
+// had to be cut. ImGui elides its own labels, but only for widgets that own
+// their text; a row drawn by hand has to do it itself, and a name allowed to
+// run into the edge of the panel reads as a rendering fault rather than as a
+// long name.
+std::string elide(const std::string& text, float width) {
+    const float full = ImGui::CalcTextSize(text.c_str()).x;
+    if (full <= width || text.empty()) {
+        return text;
+    }
+
+    static constexpr std::string_view kEllipsis = "\xe2\x80\xa6";  // U+2026
+    const float room =
+        width - ImGui::CalcTextSize(kEllipsis.data(), kEllipsis.data() + kEllipsis.size()).x;
+    if (room <= 0.0f) {
+        return std::string(kEllipsis);
+    }
+
+    // A byte is a cut point unless it is a UTF-8 continuation, all of which
+    // match 10xxxxxx. Handing ImGui half a code point draws a replacement
+    // glyph, so every candidate below lands on a boundary.
+    const auto boundary = [&](std::size_t at) {
+        return at == 0 || at >= text.size() ||
+               (static_cast<unsigned char>(text[at]) & 0xC0) != 0x80;
+    };
+    const auto fits = [&](std::size_t at) {
+        return ImGui::CalcTextSize(text.c_str(), text.c_str() + at).x <= room;
+    };
+
+    // Proportional first guess, then step to the edge of the fit. Measuring
+    // one prefix per character would be a loop over the glyphs of a loop over
+    // the characters, for every overlong name on screen; a name that overflows
+    // is usually close, so this settles in a step or two.
+    std::size_t cut = std::min<std::size_t>(
+        text.size(), static_cast<std::size_t>(static_cast<float>(text.size()) * room / full) + 1);
+    while (cut > 0 && !boundary(cut)) {
+        --cut;
+    }
+
+    if (fits(cut)) {
+        for (std::size_t next = cut + 1; next <= text.size(); ++next) {
+            if (!boundary(next)) continue;
+            if (!fits(next)) break;
+            cut = next;
+        }
+    } else {
+        while (cut > 0) {
+            do {
+                --cut;
+            } while (cut > 0 && !boundary(cut));
+            if (fits(cut)) break;
+        }
+    }
+
+    return text.substr(0, cut) + std::string(kEllipsis);
+}
 
 }  // namespace
 
@@ -271,8 +339,11 @@ void App::load_saved_portal() {
     username_   = stored.substr(first + 1, second - first - 1);
     password_   = stored.substr(second + 1);
     set_status("Saved portal loaded");
-    // A pasted portal link carries the username and password in its query, and
-    // the session log sits next to the executable in plain text.
+    // Redacted even though the field is now only ever a base URL: the session
+    // log sits next to the executable in plain text, and nothing stops someone
+    // pasting a link with credentials in its query into a box that asks for a
+    // URL. Masking a string that turns out to have had no secret in it costs
+    // nothing; the other way round cannot be undone.
     log::info("Restored saved portal for {}", log::redact_portal_url(portal_url_));
 }
 
@@ -285,16 +356,11 @@ void App::begin_connect() {
         return;
     }
 
-    xtream::Credentials credentials;
-    // A pasted player_api.php or get.php link carries everything we need.
-    if (!xtream::parse_portal_url(portal_url_, credentials)) {
-        credentials.base_url = portal_url_;
-        credentials.username = username_;
-        credentials.password = password_;
-    } else {
-        username_ = credentials.username;
-        password_ = credentials.password;
-    }
+    xtream::Credentials credentials{
+        .base_url = portal_url_,
+        .username = username_,
+        .password = password_,
+    };
 
     while (!credentials.base_url.empty() && credentials.base_url.back() == '/') {
         credentials.base_url.pop_back();
@@ -637,39 +703,44 @@ void App::apply_vsr() {
 
 void App::draw_login() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float card_width = std::min(viewport->WorkSize.x - theme::scaled(48.0f),
-                                      theme::scaled(430.0f));
-    const float padding    = theme::scaled(26.0f);
+    const float card_width = std::min(viewport->WorkSize.x - theme::scaled(theme::kSpace8),
+                                      theme::scaled(kLoginCardWidth));
+    const float padding    = theme::scaled(theme::kSpace7);
 
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(card_width, 0.0f), ImGuiCond_Always);
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(padding, padding));
-    ImGui::Begin("##login", nullptr,
-                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
-                     ImGuiWindowFlags_NoScrollbar);
-    ImGui::PopStyleVar();
+    {
+        // Only across Begin: the window reads its padding once, as it opens.
+        theme::ScopedStyle style;
+        style.var(ImGuiStyleVar_WindowPadding, ImVec2(padding, padding));
+        ImGui::Begin("##login", nullptr,
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
+                         ImGuiWindowFlags_NoScrollbar);
+    }
 
     // Mark and wordmark share a line: the mark is sized from the title's own
-    // height, so the two stay aligned whatever the scale is.
-    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.9f);
-    const float  mark   = ImGui::GetFontSize();
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
-    theme::draw_logo(ImGui::GetWindowDrawList(),
-                     ImVec2(origin.x + mark * 0.5f, origin.y + mark * 0.5f), mark * 0.46f);
-    ImGui::Dummy(ImVec2(mark, mark));
-    ImGui::SameLine();
-    ImGui::TextUnformatted("Coax");
-    ImGui::PopFont();
+    // height, so the two stay aligned whatever the scale is. Semibold and set
+    // tight — the one place in the application allowed to be confident, which
+    // is what buys everything below it the right to be quiet.
+    {
+        theme::ScopedStyle style;
+        style.strong(1.9f);
+        const float  mark   = ImGui::GetFontSize();
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        theme::draw_logo(ImGui::GetWindowDrawList(),
+                         ImVec2(origin.x + mark * 0.5f, origin.y + mark * 0.5f),
+                         mark * 0.44f);
+        ImGui::Dummy(ImVec2(mark, mark));
+        ImGui::SameLine(0.0f, theme::scaled(theme::kSpace3));
+        ImGui::TextUnformatted("Coax");
+    }
 
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
-    ImGui::TextWrapped(
-        "Paste a full Xtream portal link (player_api.php or get.php) to fill the "
-        "username and password in automatically, or enter them separately.");
-    ImGui::PopStyleColor();
-
-    ImGui::Dummy(ImVec2(0.0f, theme::scaled(6.0f)));
+    // The wordmark sits straight on the form, so it takes the gap the
+    // explanatory paragraph used to occupy rather than butting against the
+    // first label.
+    ImGui::Dummy(ImVec2(0.0f, theme::scaled(theme::kSpace4)));
 
     // Labels sit above their fields rather than beside them: full-width inputs
     // leave room for the long URLs providers hand out, and the three rows read
@@ -677,9 +748,16 @@ void App::draw_login() {
     bool submit = false;
     auto field  = [&](const char* label, const char* hint, std::string& value,
                      ImGuiInputTextFlags flags) {
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
-        ImGui::TextUnformatted(label);
-        ImGui::PopStyleColor();
+        // The label belongs to the field beneath it, so the gap between the
+        // two is closed to well under the gap between one field and the next.
+        // Proximity is what groups them; without it three labels and three
+        // fields read as six evenly spaced rows.
+        {
+            theme::ScopedStyle style;
+            style.var(ImGuiStyleVar_ItemSpacing,
+                      ImVec2(ImGui::GetStyle().ItemSpacing.x, theme::scaled(theme::kSpace1)));
+            theme::micro_label(label);
+        }
 
         TextField buffer(value);
         ImGui::PushID(label);
@@ -692,23 +770,26 @@ void App::draw_login() {
         value = buffer.buffer;
     };
 
-    field("Portal URL", "https://provider.example.com:8080", portal_url_, 0);
-    field("Username", "", username_, 0);
-    field("Password", "", password_, ImGuiInputTextFlags_Password);
+    field("PORTAL URL", "https://provider.example.com:8080", portal_url_, 0);
+    field("USERNAME", "", username_, 0);
+    field("PASSWORD", "", password_, ImGuiInputTextFlags_Password);
 
-    ImGui::Dummy(ImVec2(0.0f, theme::scaled(6.0f)));
+    ImGui::Dummy(ImVec2(0.0f, theme::scaled(theme::kSpace2)));
 
     const bool connecting = stage_ == Stage::Connecting;
     ImGui::BeginDisabled(connecting);
-    ImGui::PushStyleColor(ImGuiCol_Button, theme::kAccent);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme::kAccentHover);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme::kAccentActive);
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::kOnAccent);
-    if (ImGui::Button(connecting ? "Connecting..." : "Connect",
-                      ImVec2(-FLT_MIN, theme::scaled(38.0f)))) {
-        submit = true;
+    {
+        theme::ScopedStyle style;
+        style.color(ImGuiCol_Button, theme::kAccentFill)
+             .color(ImGuiCol_ButtonHovered, theme::kAccentFillHover)
+             .color(ImGuiCol_ButtonActive, theme::kAccentFillActive)
+             .color(ImGuiCol_Text, theme::kOnAccent)
+             .strong();
+        if (ImGui::Button(connecting ? "Connecting..." : "Connect",
+                          ImVec2(-FLT_MIN, theme::scaled(kConnectHeight)))) {
+            submit = true;
+        }
     }
-    ImGui::PopStyleColor(4);
     ImGui::EndDisabled();
 
     if (submit && !connecting) {
@@ -725,51 +806,56 @@ void App::draw_login() {
         const float phase = static_cast<float>(std::fmod(ImGui::GetTime(), 1.4) / 1.4);
         const float left  = bar_min.x + (width + span) * phase - span;
         ImGui::GetWindowDrawList()->AddRectFilled(
-            ImVec2(std::max(left, bar_min.x), bar_max.y - theme::scaled(3.0f)),
+            ImVec2(std::max(left, bar_min.x), bar_max.y - theme::scaled(theme::kStrokeTrack)),
             ImVec2(std::min(left + span, bar_max.x), bar_max.y),
             theme::kOnAccent);
     }
 
     if (!status_.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, status_error_ ? theme::kError : theme::kTextDim);
+        theme::ScopedStyle style;
+        style.color(ImGuiCol_Text, status_error_ ? theme::kError : theme::kTextDim);
         ImGui::TextWrapped("%s", status_.c_str());
-        ImGui::PopStyleColor();
     }
 
     // Secondary and destructive, so it is a ghost button rather than a peer of
     // Connect: same weight for both would make forgetting the portal as easy
     // to hit as using it.
-    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-    // No horizontal frame padding, so the label starts on the same column as
-    // the labels and the status line above it rather than a few pixels in.
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
-                        ImVec2(0.0f, ImGui::GetStyle().FramePadding.y));
-    if (ImGui::Button("Forget saved portal")) {
-        win::CredentialStore::clear();
-        portal_url_.clear();
-        username_.clear();
-        password_.clear();
-        set_status("Saved portal cleared");
+    {
+        theme::ScopedStyle style;
+        style.color(ImGuiCol_Button, theme::kTransparent)
+             .color(ImGuiCol_Text, theme::kTextDim)
+             .var(ImGuiStyleVar_FrameBorderSize, 0.0f)
+             // No horizontal frame padding, so the label starts on the same
+             // column as the labels and the status line above it rather than
+             // a few pixels in.
+             .var(ImGuiStyleVar_FramePadding,
+                  ImVec2(0.0f, ImGui::GetStyle().FramePadding.y));
+        if (ImGui::Button("Forget saved portal")) {
+            win::CredentialStore::clear();
+            portal_url_.clear();
+            username_.clear();
+            password_.clear();
+            set_status("Saved portal cleared");
+        }
     }
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor(2);
 
     ImGui::SameLine();
     const char* version = "v" COAX_VERSION;
-    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - padding - ImGui::CalcTextSize(version).x);
-    ImGui::AlignTextToFramePadding();
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
-    ImGui::TextUnformatted(version);
-    ImGui::PopStyleColor();
+    {
+        theme::ScopedStyle style;
+        style.micro().color(ImGuiCol_Text, theme::kTextFaint);
+        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - padding -
+                             ImGui::CalcTextSize(version).x);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(version);
+    }
 
     ImGui::End();
 }
 
 float App::browser_width() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    return std::min(viewport->WorkSize.x * 0.34f, theme::scaled(430.0f));
+    return std::min(viewport->WorkSize.x * 0.34f, theme::scaled(kBrowserMaxWidth));
 }
 
 void App::draw_browser() {
@@ -788,9 +874,19 @@ void App::draw_browser() {
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
 
-    ImGui::TextUnformatted("Channels");
+    // Heading and keys on one line, the keys pushed to the far edge: at micro
+    // size and faint they are a footnote to the panel rather than a second
+    // label competing with its name.
+    theme::micro_label("CHANNELS");
     ImGui::SameLine();
-    ImGui::TextDisabled("(Tab hides, F1 diagnostics)");
+    {
+        theme::ScopedStyle style;
+        style.micro().color(ImGuiCol_Text, theme::kTextFaint);
+        const char* keys = "TAB HIDES \xc2\xb7 F1 DIAGNOSTICS";
+        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x -
+                             ImGui::CalcTextSize(keys).x);
+        ImGui::TextUnformatted(keys);
+    }
 
     TextField search(search_);
     ImGui::SetNextItemWidth(-1.0f);
@@ -798,8 +894,6 @@ void App::draw_browser() {
                                  search.buffer, sizeof(search.buffer))) {
         search_ = search.buffer;
     }
-
-    ImGui::Separator();
 
     const auto groups = channels_.filtered(search_);
 
@@ -809,45 +903,186 @@ void App::draw_browser() {
     }
     ImGui::TextDisabled("%zu of %zu channels", shown, channels_.channel_count());
 
+    // Under the count rather than above it: the rule divides the header from
+    // the list, and the count is part of the header — it describes what the
+    // search left, not what the first category holds.
+    ImGui::Separator();
+
     ImGui::BeginChild("channel-scroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
 
-    // Every group holding a match is opened while a search is running, and the
-    // frame the search clears closes them again. Outside those two cases the
-    // open state is left alone. Forcing it unconditionally — which is what
-    // this did — re-closed a header on the frame after the click that opened
-    // it, so the unfiltered list could not be expanded at all.
-    const bool searching   = !search_.empty();
-    const bool force_state = searching || search_was_active_;
-    search_was_active_     = searching;
+    // A list is not a form. The window's row spacing is what separates one
+    // control from the next, and applied to several hundred channels it turns
+    // a column of names into a column of gaps — more scrolling, and no more
+    // legible for it. Zero here: a row carries its own height, so consecutive
+    // rows meet, and the band under the pointer is the row rather than a strip
+    // inside it with a gap above and below.
+    //
+    // Scoped to the child rather than to the function, because ImGui checks
+    // that a window leaves the style stacks as deep as it found them: a guard
+    // still holding a push at EndChild fails that check even when nothing is
+    // drawn between the two.
+    {
+        theme::ScopedStyle rows_style;
+        rows_style.var(ImGuiStyleVar_ItemSpacing,
+                       ImVec2(ImGui::GetStyle().ItemSpacing.x, 0.0f));
 
-    for (const auto& group : groups) {
-        const char* label = group.category ? group.category->name.c_str() : "Uncategorised";
+        // A channel row, laid out once here rather than per row. The row itself
+        // spans the panel, so the band under the pointer is the whole width of the
+        // list; inside it are three columns — a marker for the channel that is
+        // playing, the provider's number, then the name.
+        //
+        // The name column sits where a category's own label sits, so the arrow
+        // that opens a group and the number of a channel share one gutter and
+        // every piece of text in the panel starts on one of two edges. The number
+        // is measured from the widest in the whole catalogue rather than from
+        // what happens to be on screen, so that edge does not move as the list is
+        // scrolled or filtered.
+        const float text_height  = ImGui::GetTextLineHeight();
+        const float row_height   = text_height + theme::scaled(theme::kSpace2);
+        const float marker_width = theme::scaled(theme::kStrokeMarker);
+        const float number_gap   = theme::scaled(theme::kSpace3);
+        const float number_left  = marker_width + theme::scaled(theme::kSpace2);
+        const float label_indent =
+            ImGui::GetTreeNodeToLabelSpacing() + ImGui::GetStyle().FramePadding.x;
 
-        if (force_state) {
-            ImGui::SetNextItemOpen(searching, ImGuiCond_Always);
+        float number_width = 0.0f;
+        if (const int widest = channels_.max_channel_number(); widest > 0) {
+            // Capped at four digits. `num` is nominally the provider's display
+            // position, but some of them fill it with the stream id instead, and
+            // sizing the column from the largest value in the catalogue then
+            // indents all nine hundred names by the width of one eight-digit
+            // outlier. Four is what a channel number plausibly runs to; anything
+            // longer keeps its digits and overhangs the gutter to the left, which
+            // costs that one row rather than the list.
+            //
+            // Zeros rather than the number itself: the digits of a proportional
+            // face are not all one width, and a column sized to "1000" is short of
+            // what "8888" needs.
+            const std::string zeros(std::min<std::size_t>(std::to_string(widest).size(), 4), '0');
+            number_width = ImGui::CalcTextSize(zeros.c_str()).x;
         }
-        if (!ImGui::CollapsingHeader(label)) {
-            continue;
-        }
+        // Wide enough for the numbers, and never narrower than the category labels
+        // above them, so the names keep one edge with the headings they hang from.
+        const float name_left = std::max(label_indent, number_left + number_width + number_gap);
 
-        // Only the visible slice of a category is submitted to ImGui, so a
-        // provider with tens of thousands of channels still scrolls smoothly.
-        ImGuiListClipper clipper;
-        clipper.Begin(static_cast<int>(group.channels.size()));
-        while (clipper.Step()) {
-            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-                const core::Channel* channel = group.channels[static_cast<std::size_t>(i)];
-                const bool           playing = channel->id == playing_channel_id_;
+        // Every group holding a match is opened while a search is running, and the
+        // frame the search clears closes them again. Outside those two cases the
+        // open state is left alone. Forcing it unconditionally — which is what
+        // this did — re-closed a header on the frame after the click that opened
+        // it, so the unfiltered list could not be expanded at all.
+        const bool searching   = !search_.empty();
+        const bool force_state = searching || search_was_active_;
+        search_was_active_     = searching;
 
-                ImGui::PushID(channel->id.c_str());
-                if (ImGui::Selectable(channel->name.c_str(), playing)) {
-                    play(*channel);
+        bool first_group = true;
+        for (const auto& group : groups) {
+            const char* label = group.category ? group.category->name.c_str() : "Uncategorised";
+
+            // Rows inside a category are two pixels apart, so without this the
+            // last channel of one group and the heading of the next are as close
+            // as two channels are, and the grouping stops reading.
+            if (!first_group) {
+                ImGui::Dummy(ImVec2(0.0f, theme::scaled(theme::kSpace2)));
+            }
+            first_group = false;
+
+            if (force_state) {
+                ImGui::SetNextItemOpen(searching, ImGuiCond_Always);
+            }
+            // Semibold, so a category reads as the thing the channels under it
+            // hang from. Same size as the channels themselves: this is a list of
+            // one kind of thing grouped, not two levels of navigation.
+            //
+            // And no fill at rest. ImGui paints one from ImGuiCol_Header
+            // unconditionally, which turned every category into a filled bar and
+            // the list into a stack of buttons. Hover and press keep their own
+            // colours, so the control loses nothing but its weight. Scoped to the
+            // header rather than to the list, because the same colour is what
+            // marks the playing channel in the Selectables below.
+            bool open = false;
+            {
+                theme::ScopedStyle style;
+                style.color(ImGuiCol_Header, theme::kTransparent)
+                     // Tighter than a framed control elsewhere gets. The window's
+                     // frame padding is sized for something you click into and
+                     // type; on a row that is only ever a heading it doubles the
+                     // height of every collapsed category and turns the list into
+                     // a column of headings and air.
+                     .var(ImGuiStyleVar_FramePadding,
+                          ImVec2(ImGui::GetStyle().FramePadding.x,
+                                 theme::scaled(theme::kSpace1)))
+                     .strong();
+                open = ImGui::CollapsingHeader(label);
+            }
+            if (!open) {
+                continue;
+            }
+
+            // Only the visible slice of a category is submitted to ImGui, so a
+            // provider with tens of thousands of channels still scrolls smoothly.
+            // The clipper needs the row height up front, because it decides which
+            // rows to submit before any of them has been measured.
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(group.channels.size()), row_height);
+            while (clipper.Step()) {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                    const core::Channel* channel = group.channels[static_cast<std::size_t>(i)];
+                    const bool           playing = channel->id == playing_channel_id_;
+
+                    // The row is a hit box and a wash; everything in it is drawn
+                    // afterwards, over the top. A Selectable carrying the name
+                    // could not put the number in a column of its own, and the
+                    // playing channel would be marked by a wash so faint that
+                    // finding it meant reading the list.
+                    // Where the columns are measured from. Not the row's own left
+                    // edge: a Selectable widens its box by half the horizontal
+                    // item spacing so that a run of them has no dead gaps to
+                    // click through, and text laid out against that edge sits
+                    // half a spacing to the left of every other column in the
+                    // panel — including the category headings these hang from.
+                    const float text_left = ImGui::GetCursorScreenPos().x;
+
+                    ImGui::PushID(channel->id.c_str());
+                    const bool clicked =
+                        ImGui::Selectable("##row", playing, ImGuiSelectableFlags_None,
+                                          ImVec2(0.0f, row_height));
+                    ImGui::PopID();
+
+                    const ImVec2 row_min = ImGui::GetItemRectMin();
+                    const ImVec2 row_max = ImGui::GetItemRectMax();
+                    const float  base    = row_min.y + (row_height - text_height) * 0.5f;
+                    ImDrawList*  rows    = ImGui::GetWindowDrawList();
+
+                    if (playing) {
+                        // A rule down the leading edge. The selected wash behind
+                        // it is two levels of grey and disappears over a long
+                        // list; this is the only accent in the panel, so it is
+                        // findable at a glance from anywhere in the scroll.
+                        rows->AddRectFilled(row_min, ImVec2(row_min.x + marker_width, row_max.y),
+                                            theme::kAccent);
+                    }
+
+                    if (channel->number > 0) {
+                        const std::string number = std::to_string(channel->number);
+                        const float       width  = ImGui::CalcTextSize(number.c_str()).x;
+                        // Right-aligned against the name column, so the units line
+                        // up as the numbers grow a digit rather than the leading
+                        // edge staying put and the gap to the name closing.
+                        rows->AddText(ImVec2(text_left + name_left - number_gap - width, base),
+                                      theme::kTextFaint, number.c_str());
+                    }
+
+                    const float room = row_max.x - (text_left + name_left) - theme::scaled(theme::kSpace2);
+                    rows->AddText(ImVec2(text_left + name_left, base), theme::kText,
+                                  elide(channel->name, room).c_str());
+
+                    if (clicked) {
+                        play(*channel);
+                    }
                 }
-                ImGui::PopID();
             }
         }
     }
-
     ImGui::EndChild();
     ImGui::End();
 }
@@ -868,14 +1103,14 @@ void App::draw_status_bar() {
     // The row of controls, and the margin around it. Everything in the bar is
     // placed against these three rather than against the style's spacing: it
     // is one hand-laid row, not a stack of framed widgets.
-    const float pad = theme::scaled(18.0f);
-    const float row = theme::scaled(30.0f);
-    const float gap = theme::scaled(10.0f);
+    const float pad = theme::scaled(theme::kSpace5);
+    const float row = theme::scaled(theme::kSpace7);
+    const float gap = theme::scaled(theme::kSpace3);
 
     // Taller than the row it carries, because the scrim has to reach nothing
     // at its top edge. A short ramp reads as a band drawn across the picture,
     // which is the boxed-in look this replaced.
-    const float height = row + pad + theme::scaled(46.0f);
+    const float height = row + pad + theme::scaled(kOverlayRampExtra);
     const float top    = viewport->WorkPos.y + viewport->WorkSize.y - height;
 
     // The channel list owns its column for its whole height, so the playback
@@ -913,9 +1148,10 @@ void App::draw_status_bar() {
     // window's clip rectangle is still inset by its width, which clipped the
     // scrim a pixel short and left a bright rule of unscrimmed video down
     // three of its edges.
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, fade);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    theme::ScopedStyle bar_style;
+    bar_style.var(ImGuiStyleVar_Alpha, fade)
+             .var(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f))
+             .var(ImGuiStyleVar_WindowBorderSize, 0.0f);
 
     ImGui::Begin("##status", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
@@ -938,7 +1174,7 @@ void App::draw_status_bar() {
     // The right-hand group is measured before anything is drawn, so the
     // channel name can be clipped where the controls begin rather than run
     // underneath them.
-    const float volume_width = theme::scaled(124.0f);
+    const float volume_width = theme::scaled(kVolumeWidth);
     const float group_width  = row + gap * 0.5f + volume_width + gap + row;
     const float group_left   = corner.x - pad - group_width;
 
@@ -960,6 +1196,10 @@ void App::draw_status_bar() {
 
     if (!playing_channel_name_.empty()) {
         place(cursor, text_height);
+        // The one piece of primary information over the picture, so it is the
+        // one thing in the row set in the semibold face.
+        theme::ScopedStyle style;
+        style.strong();
         ImGui::TextUnformatted(playing_channel_name_.c_str());
         cursor += ImGui::GetItemRectSize().x + gap;
     }
@@ -969,9 +1209,9 @@ void App::draw_status_bar() {
     const auto& diagnostics = player_.diagnostics();
     place(cursor, text_height);
     if (status_error_) {
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::kError);
+        theme::ScopedStyle style;
+        style.color(ImGuiCol_Text, theme::kError);
         ImGui::TextUnformatted(status_.c_str());
-        ImGui::PopStyleColor();
     } else if (diagnostics.paused_for_cache) {
         ImGui::TextDisabled("Buffering");
     } else if (paused_) {
@@ -1016,22 +1256,22 @@ void App::draw_status_bar() {
     // over the picture costs more attention than it is worth. The menu is a
     // surface of its own, so it opens at full opacity whatever the overlay is
     // fading towards.
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, panel_padding);
-    if (ImGui::BeginPopup("##overlay-settings")) {
+    {
+        theme::ScopedStyle style;
+        style.var(ImGuiStyleVar_Alpha, 1.0f).var(ImGuiStyleVar_WindowPadding, panel_padding);
+        if (ImGui::BeginPopup("##overlay-settings")) {
         if (ImGui::Checkbox("Super resolution", &vsr_enabled_)) {
             apply_vsr();
         }
         ImGui::TextDisabled("Upscales sources smaller than the window");
         ImGui::Separator();
-        ImGui::MenuItem("Diagnostics", "F1", &show_diagnostics_);
-        ImGui::EndPopup();
+            ImGui::MenuItem("Diagnostics", "F1", &show_diagnostics_);
+            ImGui::EndPopup();
+        }
     }
-    ImGui::PopStyleVar(2);
     overlay_menu_open_ = ImGui::IsPopupOpen("##overlay-settings");
 
     ImGui::End();
-    ImGui::PopStyleVar(3);
 }
 
 void App::draw_update_banner() {
@@ -1044,8 +1284,8 @@ void App::draw_update_banner() {
     // nothing blocks playback.
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(
-        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - theme::scaled(16.0f),
-               viewport->WorkPos.y + theme::scaled(16.0f)),
+        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - theme::scaled(theme::kSpace4),
+               viewport->WorkPos.y + theme::scaled(theme::kSpace4)),
         ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.85f);
 
@@ -1077,15 +1317,17 @@ void App::draw_diagnostics() {
     // readings, and the default row spacing turns it into a page of scrolling.
     // Spacing only — the panel is drawn at the same scale as everything else,
     // because a surface that sizes itself is how a scale system comes apart.
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
-                        ImVec2(ImGui::GetStyle().ItemSpacing.x, theme::scaled(3.0f)));
-    // The gutter between the two columns of sections.
-    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(theme::scaled(14.0f), 0.0f));
+    theme::ScopedStyle panel_style;
+    panel_style.var(ImGuiStyleVar_ItemSpacing,
+                    ImVec2(ImGui::GetStyle().ItemSpacing.x,
+                           theme::scaled(theme::kStrokeTrack)))
+               // The gutter between the two columns of sections.
+               .var(ImGuiStyleVar_CellPadding, ImVec2(theme::scaled(theme::kSpace4), 0.0f));
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(
-        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - theme::scaled(20.0f),
-               viewport->WorkPos.y + theme::scaled(20.0f)),
+        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - theme::scaled(theme::kSpace5),
+               viewport->WorkPos.y + theme::scaled(theme::kSpace5)),
         ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     // Nearly opaque. It reads over whatever the video happens to be showing,
     // and it is only on screen while somebody is deliberately looking at it.
@@ -1111,26 +1353,26 @@ void App::draw_diagnostics() {
     const float label_column = std::max({ImGui::CalcTextSize("Presentation rebuilds").x,
                                          ImGui::CalcTextSize("Hardware decode wanted").x,
                                          ImGui::CalcTextSize("Rebuffers this channel").x});
-    const float column_gap   = theme::scaled(18.0f);
+    const float column_gap   = theme::scaled(theme::kSpace5);
 
     // Label dim, value bright: the reading is what is being looked for, and
     // the two columns separate without a rule between them.
     auto field = [label_column, column_gap](const char* label, std::string_view value,
                                             bool dim = false) {
-        ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
-        ImGui::TextUnformatted(label);
-        ImGui::PopStyleColor();
+        {
+            theme::ScopedStyle style;
+            style.color(ImGuiCol_Text, theme::kTextDim);
+            ImGui::TextUnformatted(label);
+        }
         // A label wider than the measured maximum keeps the gap and loses the
         // alignment, which is the harmless way round.
         ImGui::SameLine(0.0f, std::max(label_column - ImGui::CalcTextSize(label).x, 0.0f) +
                                   column_gap);
+        theme::ScopedStyle value_style;
         if (dim) {
-            ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
+            value_style.color(ImGuiCol_Text, theme::kTextDim);
         }
         ImGui::TextUnformatted(value.data(), value.data() + value.size());
-        if (dim) {
-            ImGui::PopStyleColor();
-        }
     };
 
     // Two columns of whole sections. Stacked, the readings run to about a
@@ -1138,7 +1380,6 @@ void App::draw_diagnostics() {
     // are self-contained, so splitting them costs nothing.
     if (!ImGui::BeginTable("##readings", 2, ImGuiTableFlags_SizingFixedFit)) {
         ImGui::End();
-        ImGui::PopStyleVar(2);
         return;
     }
     ImGui::TableNextRow();
@@ -1150,7 +1391,7 @@ void App::draw_diagnostics() {
     // attached object belongs to, and the acquisition path says whether
     // property observation is really carrying the contract or the
     // reconfiguration fallback is doing the work.
-    ImGui::SeparatorText("Presentation");
+    theme::separator_label("PRESENTATION");
     field("Swap chain attached", d.swapchain_attached ? "yes" : "no");
     field("Swap chain epoch", std::format("{}", d.swapchain_epoch));
     field("Acquired via", player::to_string(d.swapchain_acquisition));
@@ -1180,13 +1421,13 @@ void App::draw_diagnostics() {
     ImGui::SameLine();
     ImGui::TextDisabled("(exercises the device-loss recovery path)");
 
-    ImGui::SeparatorText("Decode");
+    theme::separator_label("DECODE");
     field("Codec", d.video_codec.empty() ? "-" : d.video_codec);
     field("Source", std::format("{}x{}", d.video_width, d.video_height));
     field("Hardware decode wanted", d.hwdec_requested);
     field("Hardware decode active", d.hwdec_active.empty() ? "-" : d.hwdec_active);
 
-    ImGui::SeparatorText("Super resolution");
+    theme::separator_label("SUPER RESOLUTION");
     // Requested, attached and confirmed are distinct on purpose. There is no
     // reliable signal that the driver actually ran RTX VSR on a frame, so this
     // never claims it did.
@@ -1194,7 +1435,7 @@ void App::draw_diagnostics() {
     field("Filter attached", d.vsr_filter_attached ? "yes" : "no");
     field("Confirmed", "unavailable (no signal exposed)", true);
 
-    ImGui::SeparatorText("Stream");
+    theme::separator_label("STREAM");
     field("Core idle", d.core_idle ? "yes" : "no");
     field("Paused for cache", d.paused_for_cache ? "yes" : "no");
     field("Demuxer cache", std::format("{:.1f}s", d.cache_seconds));
@@ -1213,7 +1454,7 @@ void App::draw_diagnostics() {
 
     const auto supervisor_stats = core::project_supervisor_stats(
         supervisor_.current(), supervisor_clock_.now());
-    ImGui::SeparatorText("Playback health");
+    theme::separator_label("PLAYBACK HEALTH");
     field("Verdict", core::to_string(health_snapshot_.verdict));
     field("Degraded reason", health_snapshot_.degraded_reason
                                  ? core::to_string(*health_snapshot_.degraded_reason) : "-");
@@ -1222,7 +1463,7 @@ void App::draw_diagnostics() {
     field("Input advancing", !health_snapshot_.input_advancing ? "unknown"
                                  : (*health_snapshot_.input_advancing ? "yes" : "no"));
 
-    ImGui::SeparatorText("Supervisor");
+    theme::separator_label("SUPERVISOR");
     field("State", core::to_string(supervisor_stats.state));
     field("Transport",
           supervisor_stats.transport ? core::to_string(*supervisor_stats.transport) : "-");
@@ -1235,13 +1476,15 @@ void App::draw_diagnostics() {
               : std::string("-"));
     field("Policy", supervisor_stats.policy_version);
 
-    ImGui::SeparatorText("Live sync");
+    theme::separator_label("LIVE SYNC");
     field("Target offset", std::format("{:.1f}s", d.live_target_seconds));
     field("Playback speed", std::format("{:.3f}x", d.playback_speed));
     field("Rebuffers this channel", std::format("{}", d.rebuffer_count));
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
-    ImGui::TextUnformatted("Offset is estimated from buffer depth (no manifest)");
-    ImGui::PopStyleColor();
+    {
+        theme::ScopedStyle style;
+        style.color(ImGuiCol_Text, theme::kTextDim);
+        ImGui::TextUnformatted("Offset is estimated from buffer depth (no manifest)");
+    }
 
     ImGui::EndTable();
 
@@ -1249,7 +1492,7 @@ void App::draw_diagnostics() {
     // into a column would wrap every one of them.
     if (ImGui::CollapsingHeader("Log")) {
         ImGui::BeginChild("log-scroll",
-                          ImVec2(theme::scaled(560.0f), theme::scaled(200.0f)));
+                          ImVec2(theme::scaled(kLogWidth), theme::scaled(kLogHeight)));
         for (const auto& line : log::recent()) {
             ImGui::TextUnformatted(line.c_str());
         }
@@ -1260,7 +1503,6 @@ void App::draw_diagnostics() {
     }
 
     ImGui::End();
-    ImGui::PopStyleVar(2);
 }
 
 void App::draw_frame() {

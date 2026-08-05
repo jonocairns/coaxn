@@ -27,8 +27,11 @@ short version.
   them to compute every version. The prefix is not a label.
 - `fix:` → patch. `feat:` → minor. `feat!:`, `fix!:` or a `BREAKING CHANGE:`
   footer → major.
-- `docs:`, `ci:`, `chore:`, `refactor:`, `build:`, `test:` → changelog entry, no
-  version change.
+- `docs:`, `ci:`, `chore:`, `refactor:`, `build:`, `test:` → no version change
+  **and no changelog entry**. release-please marks those sections hidden by
+  default and `release-please-config.json` sets no `changelog-types` override,
+  so they are dropped silently. Any other prefix is treated the same way. If a
+  change should be visible to users, it has to be `feat:` or `fix:`.
 - Choose the prefix for the effect on users, not the size of the diff. A
   one-line behaviour change is `fix:`; a thousand-line rename is `refactor:`.
 
@@ -39,7 +42,14 @@ short version.
   `project()` line**. The updater matches per line, so a marker on its own line
   above `project()` matches nothing and silently stops bumping the version.
 - `CHANGELOG.md`, `version.txt`, `.release-please-manifest.json` — bot-owned.
-- `assets/coax.ico` — generated; rerun `python3 scripts/make-icon.py` instead.
+- Everything in `assets/` — `coax.ico` and the two `coax-mark-*.svg` files are
+  all generated from one geometry; rerun `python3 scripts/make-icon.py` instead.
+  The mark is also drawn a third time, in `theme::draw_logo`, and the constants
+  there and in the script are meant to agree.
+- Changing `assets/coax.ico` does not rebuild the resource on its own: ninja
+  does not track it as an input to the RC step, so `rm -f
+  build/CMakeFiles/coax.dir/coax.rc.res` before rebuilding or the executable
+  keeps the old icon and the build still looks green.
 - Never create a tag or a GitHub release by hand. Releasing is merging the
   release PR, then publishing the draft it stages.
 

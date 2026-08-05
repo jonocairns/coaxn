@@ -19,11 +19,6 @@ struct Catalog {
     std::vector<core::Channel>  channels;
 };
 
-// Pulls the base URL and credentials out of a pasted portal link, accepting
-// both the player_api.php and get.php forms. Returns false when the link
-// carries no username/password pair.
-bool parse_portal_url(std::string_view url, Credentials& out);
-
 // Blocking Xtream Codes client. Callers run it off the UI thread.
 class Client {
 public:
