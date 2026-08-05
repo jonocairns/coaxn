@@ -45,6 +45,9 @@
             cmake
             ninja
             gcc
+            # Same reason as the cross shell above. This is the shell .envrc
+            # loads, so it is the one that needs it to hand day to day.
+            gh
           ];
         };
       };
