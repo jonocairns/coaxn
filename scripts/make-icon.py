@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Generate assets/coax.ico.
+"""Generate the mark: assets/coax.ico and the two assets/coax-mark-*.svg files.
 
-The icon is drawn procedurally rather than committed as an opaque binary so it
-can be re-derived and adjusted. The mark is two spiral arms turning about one
-centre, half a turn apart, on a transparent ground. It is the same mark
+The assets are drawn procedurally rather than committed as opaque binaries so
+they can be re-derived and adjusted. The mark is two spiral arms turning about
+one centre, half a turn apart, on a transparent ground. It is the same mark
 theme::draw_logo draws in the application, at the same proportions, and the two
 are meant to stay that way.
 
-Usage: python3 scripts/make-icon.py [output.ico]
+Usage: python3 scripts/make-icon.py [assets-dir]
+
+The argument is the directory the three files are written to, not a file path;
+it defaults to assets/ beside this script's parent and is created if missing.
 """
 
 import binascii
@@ -60,9 +63,15 @@ def arm_distance(dx, dy, radius, stroke):
 
     The arm is r(phi) = outer -> inner over phi in [0, SWEEP], so a point at
     polar angle theta can only be near it where phi is theta plus some whole
-    number of turns. Each candidate contributes |r - r(phi)|, which is the
-    radial distance rather than the true perpendicular one; over this shallow a
-    spiral the two differ by about three percent, which is well inside a pixel.
+    number of turns. Each candidate contributes |r - r(phi)| scaled to the
+    perpendicular: the radial error alone overstates the distance by the angle
+    between the radius and the curve's normal, and correcting it is what keeps
+    this in step with the two renderings that stroke a path. Both ImGui's
+    PathStroke in theme::draw_spiral_arm and the SVG stroke-width below lay
+    their width down normal to the centreline, so measuring radially here would
+    draw the same geometry thinner. The gap is only about 1% at ARM_OUTER, but
+    it reaches 16% by ARM_INNER, where the arm is tightest and the turn
+    sharpest.
     """
     dist = math.hypot(dx, dy)
     if dist <= 0.0:
@@ -72,6 +81,9 @@ def arm_distance(dx, dy, radius, stroke):
 
     outer = ARM_OUTER * radius
     inner = ARM_INNER * radius
+    # dr/dphi is constant along the sweep, so the radial-to-normal correction
+    # depends only on how far out the candidate sits.
+    slope = (inner - outer) / SWEEP
     best = float("inf")
 
     # theta is in (-pi, pi]; the arm spans SWEEP radians from its start, so at
@@ -82,7 +94,8 @@ def arm_distance(dx, dy, radius, stroke):
     while turn <= SWEEP:
         if turn >= 0.0:
             reach = outer + (inner - outer) * (turn / SWEEP)
-            best = min(best, abs(dist - reach))
+            normal = reach / math.hypot(reach, slope)
+            best = min(best, abs(dist - reach) * normal)
         turn += 2.0 * math.pi
 
     # The round caps at each end, which are discs rather than part of the sweep.

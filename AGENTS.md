@@ -27,8 +27,11 @@ short version.
   them to compute every version. The prefix is not a label.
 - `fix:` → patch. `feat:` → minor. `feat!:`, `fix!:` or a `BREAKING CHANGE:`
   footer → major.
-- `docs:`, `ci:`, `chore:`, `refactor:`, `build:`, `test:` → changelog entry, no
-  version change.
+- `docs:`, `ci:`, `chore:`, `refactor:`, `build:`, `test:` → no version change
+  **and no changelog entry**. release-please marks those sections hidden by
+  default and `release-please-config.json` sets no `changelog-types` override,
+  so they are dropped silently. Any other prefix is treated the same way. If a
+  change should be visible to users, it has to be `feat:` or `fix:`.
 - Choose the prefix for the effect on users, not the size of the diff. A
   one-line behaviour change is `fix:`; a thousand-line rename is `refactor:`.
 
