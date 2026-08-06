@@ -249,9 +249,9 @@ permanent and the rules that answer it are only obvious once the trap is stated.
 
 Both fixed rules live in `player::LiveSyncGate`, beside the controller they
 guard rather than inside `App`'s frame tick. They are playback protocol, not
-view state, and in `App` nothing could reach them — which is why they went
-unnoticed and untested. `LiveSync` and the gate now have 16 cases in the
-portable player suite that CI runs.
+view state, and while they sat in `App` no test could reach them — which is why
+they went unnoticed. `LiveSync` and the gate now have 16 cases in the portable
+player suite that CI runs.
 
 ### Supervisor
 

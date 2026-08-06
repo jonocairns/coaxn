@@ -27,8 +27,10 @@ jobs:
           extra_nix_config: "experimental-features = nix-command flakes"
 
       # Needs neither Windows nor libmpv, so it finishes long before the
-      # cross-build and fails fast on anything in core/, util/, or the portable
-      # half of player/.
+      # cross-build and fails fast on anything in coax_core or
+      # coax_player_core: core/, the portable half of player/, and
+      # src/util/redact.cpp. The rest of util/ is Windows-only and is reached
+      # only by the cross-build below.
       - name: Test the portable core
         run: |
           nix develop .#core --command cmake -S . -B build-core -G Ninja \
