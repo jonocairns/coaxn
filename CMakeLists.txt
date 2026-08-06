@@ -32,9 +32,10 @@ target_compile_options(coax_core PRIVATE -Wall -Wextra -Wpedantic)
 # The half of the player layer that has no engine in it: event correlation,
 # load diagnostics, the live-offset control law and the log classifier. It sits
 # above coax_core because it speaks the player's vocabulary -- which coax_core
-# must not -- but it links nothing, so the native shell configures and tests it
-# exactly as it does the core. Only src/player/mpv_player.cpp needs libmpv, and
-# that is the whole reason this is a separate target.
+# must not -- but it links only that portable core, so the native shell
+# configures and tests it exactly as it does the core. Only
+# src/player/mpv_player.cpp needs libmpv, and that is the whole reason this is a
+# separate target.
 add_library(coax_player_core
     src/player/live_sync.cpp
     src/player/load_diagnostics.cpp

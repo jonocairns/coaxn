@@ -374,9 +374,10 @@ event correlation and buffer-command gate. They did not cover the `LiveSync`
 control law or `App::update_live_sync`, which is where the highest-impact gaps
 sat and why both P1 defects survived that long.
 
-Since `5388982` the native suite runs 97 cases, including the 15 that were
-previously built as a Windows binary and never executed, and 16 new ones over
-the control law and its gate. The two P1 defects are fixed and pinned by tests.
+The native suite now runs 98 cases: the 66 core cases, the 15 that were
+previously built as a Windows binary and never executed, 16 new ones over the
+control law and its gate, and one over a late first-start edge from a superseded
+load. The two P1 defects are fixed and pinned by tests.
 
 Primary-source web and code fact-check refreshed on the same date:
 

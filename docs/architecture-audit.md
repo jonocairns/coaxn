@@ -73,7 +73,7 @@ authenticated URL is safe.
 | P0 — release blocker, already tracked | Verify the fetched libmpv archive and satisfy the libmpv/FFmpeg redistribution obligations ([PRD.md §8.2](../PRD.md#82-runtime-provenance-and-licensing)) | The shipped runtime is neither content-verified nor legally complete. This is not newly discovered by this audit, so it is cross-referenced rather than counted as another finding. |
 | P1 | Fix the log snapshot race (finding 2) and stop logging arbitrary authenticated URLs (finding 8) | One is undefined behaviour on ordinary worker/UI overlap; the other can persist credentials. Both fixes are small. |
 | P1 | Make presentation failure terminal without becoming an infinite spin, and propagate render-target recreation failure (findings 7 and 9) | A device-loss path can consume a core indefinitely or leave the application blank with no recovery signal. |
-| ~~P1~~ Fixed at `5388982` | ~~Run the already-portable player suite in native CI and add `LiveSync` coverage (finding 1)~~ | The target split landed and the suite runs on every push. Native CTest went from 66 cases to 97. |
+| ~~P1~~ Fixed at `5388982` | ~~Run the already-portable player suite in native CI and add `LiveSync` coverage (finding 1)~~ | The target split landed and the suite runs on every push. Native CTest went from 66 cases to 98. |
 | P2 | Put `ChannelIndex` in the portable target and cache its derived view (findings 5 and 6) | This restores the documented boundary and removes full-catalogue work at frame rate. |
 | P2 | Move the complete service tick out of `run()` and give deadlines a reliable wakeup (finding 3) | Resize/move modal loops currently starve recovery and health work. |
 | P2 | Extract provider parsing/normalisation, then split playback orchestration from `App` behind a test seam (findings 11 and 4) | These are the largest remaining bodies of Coax-owned protocol logic with no runnable tests. |
@@ -108,10 +108,11 @@ the buffer-phase gate, `reset_load_observations`, `execute_recovery_effect` and
 physical failure spends one recovery attempt or two, and nothing verified it on
 any push.
 
-**What landed.** `coax_player_core` holds the five portable units and links
-nothing, so the `.#core` shell configures and tests it exactly as it does
-`coax_core`; `coax_mpv` is `mpv_player.cpp` alone. There were no logic changes
-and no porting — the code was already portable, as the compile matrix showed.
+**What landed.** `coax_player_core` holds the five portable units and links only
+`coax_core`, with no platform or engine library, so the `.#core` shell configures
+and tests it exactly as it does `coax_core`; `coax_mpv` is `mpv_player.cpp`
+alone. There were no logic changes and no porting — the code was already
+portable, as the compile matrix showed.
 The test file is now `test/player/player_core_tests.cpp`, named for what it
 covers. `Diagnostics` and `reset_load_observations` moved to
 `player/load_diagnostics.hpp`: the portable half reads and resets them, and
@@ -122,7 +123,7 @@ translation unit.
 `LiveSync` was the one unit here with no test at all. It is a reduced version of
 ExoPlayer's `DefaultLivePlaybackSpeedControl` — a control loop with six tuning
 constants — and exactly the shape that wants a table test. It has 16 cases now,
-added with the live-sync fixes in `5388982`. Native CTest runs 97 cases where it
+added with the live-sync fixes in `5388982`. Native CTest runs 98 cases where it
 ran 66.
 
 ### 2. [P1] `log::recent()` hands the UI thread a vector the workers are mutating
@@ -393,7 +394,7 @@ there is no longer any reason to run it by hand.
 discovered tests, and the mingw configuration completed a clean Windows
 cross-build at `f8a77d8`. These did not close finding 1 — the 15 player cases
 were absent from native CTest — but they established that the findings were not
-artifacts of an already-broken tree. Since `5388982` the same command runs 97
+artifacts of an already-broken tree. The same command now runs 98
 cases, and the cross-build still produces `coax.exe`.
 
 **External behaviour** was checked against primary sources rather than memory:
