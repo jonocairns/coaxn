@@ -237,7 +237,7 @@ permanent and the rules that answer it are only obvious once the trap is stated.
 2. **Fixed.** `cache-pause-initial=yes` makes mpv enter the same
    `paused-for-cache` state used for an actual underrun. The application counted
    every rising edge as a rebuffer, so a normal initial fill added 500ms to the
-   target before a frame had been shown, and each recovery load added another —
+   target before a frame had been shown, and each recovery reopen added another —
    recovery retains the controller by design, so those concessions accumulated
    across an episode. Rebuffer learning is now gated on the load having produced
    a first frame.
@@ -395,7 +395,7 @@ Primary-source web and code fact-check refreshed on the same date:
 | Priority | Finding | Practical effect |
 |---|---|---|
 | ~~P1~~ Fixed at `5388982` | ~~Preserve unavailable cache duration and hold `1.0x` until valid telemetry arrives~~ | Done. The flattened copy is gone, so an unavailable mpv property can no longer install `0.97x` and accumulate live latency |
-| ~~P1~~ Fixed at `5388982` | ~~Count rebuffer only after first playback has started~~ | Done, in `LiveSyncGate`. Normal initial fill and recovery opens no longer add 500ms to the target |
+| ~~P1~~ Fixed at `5388982` | ~~Count rebuffer only after first playback has started~~ | Done, in `LiveSyncGate`. Neither a normal initial fill nor a recovery reopen adds 500ms to the target now |
 | ~~P1~~ Fixed at `5388982` | ~~Add direct `LiveSync` and application-integration tests~~ | 16 cases in the portable player suite, run by CI: telemetry loss and recovery, initial buffering, stall entry/exit, rate limiting, target bounds and reset. The integration half covers the extracted `LiveSyncGate`; `App` itself is still not reachable by a test (architecture audit finding 4) |
 | P2 | Decide and document target decay semantics | The present controller intentionally or accidentally retains every 500ms concession until reset; it does not reproduce ExoPlayer's adaptive target |
 | P2 now; P1 before HLS support | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Avoids standards-disfavored edge startup and makes the currently unreachable recovery branch real |
