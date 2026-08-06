@@ -40,6 +40,33 @@ TEST_CASE("adapter drains every edge once in mpv order with issue-time generatio
     CHECK(adapter.drain().empty());
 }
 
+TEST_CASE("a superseded load cannot publish a late first playback start") {
+    player::PlayerEventAdapter adapter;
+    adapter.track_load(10, core::Generation{4});
+    adapter.command_result(10, 0);
+    adapter.start_file(100);
+    REQUIRE(adapter.drain().size() == 1);
+
+    // Recovery retains the generation. Until its START_FILE arrives, the old
+    // entry is still active and may publish a delayed restart; that edge belongs
+    // to the load being replaced and must not arm the new load's rebuffer gate.
+    adapter.track_load(11, core::Generation{4});
+    adapter.command_result(11, 0);
+    REQUIRE(adapter.drain().size() == 1);
+    adapter.playback_restart(100);
+    CHECK(adapter.drain().empty());
+
+    adapter.start_file(101);
+    adapter.end_file(100, player::PlayerEndReason::Stop, 0);
+    adapter.playback_restart(101);
+    const auto events = adapter.drain();
+    REQUIRE(events.size() == 2);
+    CHECK(std::get<player::PlaybackStopped>(events[0].payload).kind ==
+          player::IntentionalStopKind::Replaced);
+    CHECK(std::holds_alternative<player::FirstPlaybackStart>(events[1].payload));
+    CHECK(events[1].generation == core::Generation{4});
+}
+
 TEST_CASE("structured end reason stays attached to its load generation") {
     player::PlayerEventAdapter adapter;
     adapter.track_load(10, core::Generation{7});
