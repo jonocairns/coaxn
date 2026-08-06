@@ -27,7 +27,7 @@ rectangle where the picture should be.
 - **Bounded recovery.** A generation-scoped supervisor wraps the libmpv owner:
   five attempts inside one 30-second episode, with buffer targets growing from
   1 second while tuning to 10 seconds once playback has been healthy for five
-- **Credentials encrypted at rest** with DPAPI, and redacted from logs
+- **Credentials encrypted at rest** with DPAPI
 - **A quiet update check** against GitHub releases at startup, silent on every
   uninteresting answer — someone trying to watch television does not need to
   hear about a failed update check

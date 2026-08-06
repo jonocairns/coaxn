@@ -155,11 +155,11 @@ mpv option values instead of repeating them. `cache-pause` and
 `cache-pause-initial` are behavioural switches rather than tuning values and can
 stay as they are. Where initialisation grows, build the option set in a small
 function returning name/value pairs and assert on the result, which needs no
-live mpv. That function belongs in the player layer, not in `policy.hpp`: a byte
-count and a number of seconds are vendor-neutral and belong to the core, but
-`demuxer-max-bytes` is mpv vocabulary and `coax_core` must not carry it. The
-portable half of `coax_player` is the right home, which makes this and the
-player-target split the same piece of work.
+live mpv. The option-set builder belongs in the player layer. Numeric byte
+counts and durations remain vendor-neutral policy in `policy.hpp`; only mpv
+option names such as `demuxer-max-bytes` stay out of `coax_core`. The portable
+half of `coax_player` is the right home for that mapping, which makes this and
+the player-target split the same piece of work.
 
 Socket timing and probing remain separate from buffer policy. Coax does not set
 `network-timeout`, `demuxer-lavf-analyzeduration`, or
@@ -174,7 +174,7 @@ by nudging playback speed. It is a reduced controller inspired by ExoPlayer's
 `DefaultLivePlaybackSpeedControl`, implemented in
 [live_sync.hpp](../../src/player/live_sync.hpp).
 
-```
+```text
 error = buffered - target
 speed = clamp(1.0 + 0.1 * error, 0.97, 1.03)
 ```
@@ -248,10 +248,15 @@ Network retry guidance recommends adding jitter so many clients do not retry a
 broadcast outage in lockstep, retrying only idempotent requests after plausibly
 transient failures, and honoring `Retry-After` where the transport exposes it.
 Fresh stream GETs are idempotent at the HTTP layer, but classification still
-needs transport context: timeouts, disconnects, 408, 429 and 5xx responses are
-normally retry candidates; credential or configuration failures are not. A 404
-for a just-advertised HLS segment can be transient and must not be made terminal
-without distinguishing it from a missing channel endpoint.
+needs transport and request context: timeouts, disconnects, 408, 429 and 5xx
+responses are normally retry candidates; known credential or configuration
+failures are not. HTTP status alone cannot provide every distinction. RFC 9110
+allows a 403 for reasons unrelated to credentials and says a 404 does not reveal
+whether absence is temporary or permanent. A future context-aware classifier
+should treat failure of a just-advertised HLS segment as transient within the
+combined demuxer/supervisor error budget. A missing initial channel endpoint can
+be terminal only when the request role or provider contract establishes that
+meaning; unknown cases retain bounded generic recovery.
 
 The host queues emitted effects and drains them from the outermost dispatch
 frame. A synchronous load result therefore becomes a later reducer event rather
@@ -288,9 +293,13 @@ test must make that branch reachable.
 
 A classified format-probe failure spends one normal attempt on a reopen with an
 explicit demuxer format. Exact HTTP 401 log patterns are terminal authentication
-failures. Other responses such as 403 or 404 are not classified as terminal.
-An unavailable recovery target or rejected local load effect is terminal as
-`SourceUnavailable`.
+failures. The current classifier intentionally does not classify a 403 or a
+status-only 404 as terminal. If mpv subsequently emits a structured end, the
+application dispatches a generic `StreamEnded` after its log-correlation window,
+and the failure consumes the normal attempt schedule and wall-clock budget; it
+is not retried indefinitely. HLS segment-specific failure wording can instead
+be classified as `HlsSegmentUnavailable`. An unavailable recovery target or
+rejected local load effect is terminal as `SourceUnavailable`.
 
 A libmpv shutdown or event-queue failure emits one `recreate-player` effect.
 That effect destroys and initializes the in-process libmpv owner, then reloads
@@ -310,7 +319,7 @@ after six seconds and at least eight observations. A single mpv level never
 starts recovery. Timeline discontinuities compare media movement with elapsed
 monotonic time:
 
-```
+```text
 abs((currentPlayback - previousPlayback) - elapsed) > 1 second
 ```
 
@@ -462,21 +471,28 @@ project exists.
 
 ## Upstream references
 
-- [mpv cache options and playback properties](https://mpv.io/manual/master/)
+- [Pinned mpv cache options](https://github.com/mpv-player/mpv/blob/304426c390901436fb1d4a63efbd582ae80c88f4/DOCS/man/options.rst)
+- [Pinned mpv playback properties](https://github.com/mpv-player/mpv/blob/304426c390901436fb1d4a63efbd582ae80c88f4/DOCS/man/input.rst)
 - [Pinned mpv cache-pause implementation](https://github.com/mpv-player/mpv/blob/304426c390901436fb1d4a63efbd582ae80c88f4/player/playloop.c)
-- [FFmpeg HTTP reconnect options](https://ffmpeg.org/ffmpeg-protocols.html)
-- [FFmpeg HLS demuxer options](https://ffmpeg.org/ffmpeg-formats.html#hls-1)
-- [FFmpeg HLS implementation defaults](https://ffmpeg.org/doxygen/trunk/hls_8c_source.html)
+- [FFmpeg HTTP reconnect documentation at the revision checked on 2026-08-05](https://github.com/FFmpeg/FFmpeg/blob/d295add2225e1ad9ba9d55cb612cce50072dc45d/doc/protocols.texi)
+- [FFmpeg HLS demuxer documentation at the revision checked on 2026-08-05](https://github.com/FFmpeg/FFmpeg/blob/d295add2225e1ad9ba9d55cb612cce50072dc45d/doc/demuxers.texi)
+- [FFmpeg HLS implementation defaults at the revision checked on 2026-08-05](https://github.com/FFmpeg/FFmpeg/blob/d295add2225e1ad9ba9d55cb612cce50072dc45d/libavformat/hls.c)
 - [RFC 8216 HLS client responsibilities](https://datatracker.ietf.org/doc/html/rfc8216#section-6.3.3)
-- [Android Media3 live-streaming guidance](https://developer.android.com/media/media3/exoplayer/live-streaming)
-- [AndroidX `LivePlaybackSpeedControl`](https://developer.android.com/reference/androidx/media3/exoplayer/LivePlaybackSpeedControl)
-- [AndroidX `DefaultLoadControl`](https://github.com/androidx/media/blob/release/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultLoadControl.java)
-- [AndroidX `DefaultLivePlaybackSpeedControl`](https://github.com/androidx/media/blob/release/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultLivePlaybackSpeedControl.java)
-- [Google Cloud retry strategy](https://docs.cloud.google.com/storage/docs/retry-strategy)
+- [Android Media3 live-streaming guidance (retrieved 2026-08-05)](https://developer.android.com/media/media3/exoplayer/live-streaming)
+- [AndroidX `LivePlaybackSpeedControl` API (retrieved 2026-08-05)](https://developer.android.com/reference/androidx/media3/exoplayer/LivePlaybackSpeedControl)
+- [AndroidX `DefaultLoadControl` at the revision checked on 2026-08-05](https://github.com/androidx/media/blob/5fb306449733dd71595700c1227ad6087578c559/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultLoadControl.java)
+- [AndroidX `DefaultLivePlaybackSpeedControl` at the revision checked on 2026-08-05](https://github.com/androidx/media/blob/5fb306449733dd71595700c1227ad6087578c559/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultLivePlaybackSpeedControl.java)
+- [Google Cloud retry strategy (retrieved 2026-08-05)](https://docs.cloud.google.com/storage/docs/retry-strategy)
 - [RFC 9110 idempotent methods](https://datatracker.ietf.org/doc/html/rfc9110#section-9.2.2)
+- [RFC 9110 `403 Forbidden`](https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.4)
+- [RFC 9110 `404 Not Found`](https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.5)
 - [RFC 9110 `Retry-After`](https://datatracker.ietf.org/doc/html/rfc9110#section-10.2.3)
 
-The web sources describe current upstream behavior and recommended protocol
-semantics. They do not replace runtime validation against Coax's bundled mpv
-artifact and its embedded dependencies; that is why runtime version and build
-configuration logging is part of the recommended work.
+The implementation links are immutable snapshots: mpv uses Coax's exact pin;
+the FFmpeg and AndroidX revisions are the upstream sources consulted on
+2026-08-05. The FFmpeg revision is evidence for upstream behavior, not a claim
+that it matches the unreported FFmpeg revision inside Coax's bundled artifact.
+The dated guidance pages and protocol standards supply recommended semantics.
+None replaces runtime validation against the bundled mpv artifact and its
+embedded dependencies; that is why runtime version and build-configuration
+logging is part of the recommended work.

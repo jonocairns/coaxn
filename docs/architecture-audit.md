@@ -92,7 +92,7 @@ comment both say so, so this is a known limitation rather than an oversight.
 What the audit adds is that the limitation is unnecessary: the suite builds and
 passes natively today, unmodified, in about a second.
 
-```
+```text
 All tests passed (120 assertions in 15 test cases)
 ```
 
@@ -388,11 +388,11 @@ artifacts of an already-broken tree.
 | Claim | Source |
 |---|---|
 | mpv coalesces property-change events | [`client.h:1185`](../third_party/mpv/include/mpv/client.h) in the pinned runtime — the same range PRD.md already cites |
-| mpv's event ring is 1000 entries; async replies are reserved | [mpv `player/client.c`](https://github.com/mpv-player/mpv/blob/master/player/client.c) |
+| mpv's event ring is 1000 entries; async replies are reserved | [mpv `player/client.c` at the pinned commit](https://github.com/mpv-player/mpv/blob/304426c390901436fb1d4a63efbd582ae80c88f4/player/client.c) |
 | A sizing drag runs a modal loop the application's pump does not | [WM_ENTERSIZEMOVE](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-entersizemove) |
 | Program Files writes are not virtualised for a native 64-bit application | [UAC architecture](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/architecture#virtualization) |
 | DPAPI optional entropy has to be supplied again to decrypt | [`CryptProtectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata) and [`CryptUnprotectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata) |
-| The six `LiveSyncConfig` defaults | [DefaultLivePlaybackSpeedControl](https://github.com/androidx/media/blob/release/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultLivePlaybackSpeedControl.java) |
+| The six `LiveSyncConfig` defaults | [AndroidX `DefaultLivePlaybackSpeedControl` at the revision checked on 2026-08-05](https://github.com/androidx/media/blob/5fb306449733dd71595700c1227ad6087578c559/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultLivePlaybackSpeedControl.java) |
 | nlohmann parse errors echo only a short `last read` token | [Parsing and exceptions](https://json.nlohmann.me/features/parsing/parse_exceptions/) |
 
 ## Checked and clean
