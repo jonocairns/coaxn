@@ -14,6 +14,7 @@
 #include "core/presentation.hpp"
 #include "core/supervisor_host.hpp"
 #include "player/live_sync.hpp"
+#include "player/live_sync_gate.hpp"
 #include "player/mpv_player.hpp"
 #include "win/app_window.hpp"
 #include "win/composition.hpp"
@@ -158,11 +159,11 @@ private:
     int         last_video_width_  = 0;
     int         last_video_height_ = 0;
 
-    // Live-offset control. The rising edge of paused-for-cache is what counts
-    // as a rebuffer; the flag stays true for the whole stall.
-    player::LiveSync live_sync_;
-    bool             was_paused_for_cache_ = false;
-    int              rebuffer_count_       = 0;
+    // Live-offset control. The gate decides what each turn is allowed to learn
+    // from mpv's cache signalling; the controller decides the speed.
+    player::LiveSync     live_sync_;
+    player::LiveSyncGate live_sync_gate_;
+    int                  rebuffer_count_ = 0;
 
     // Presentation lifetime. The budget bounds and paces rebuilds; the rest is
     // what F1 reports, kept here rather than in the player's diagnostics

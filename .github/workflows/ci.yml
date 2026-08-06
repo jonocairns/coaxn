@@ -27,7 +27,10 @@ jobs:
           extra_nix_config: "experimental-features = nix-command flakes"
 
       # Needs neither Windows nor libmpv, so it finishes long before the
-      # cross-build and fails fast on anything in core/ or util/.
+      # cross-build and fails fast on anything in coax_core or
+      # coax_player_core: core/, the portable half of player/, and
+      # src/util/redact.cpp. The rest of util/ is Windows-only and is reached
+      # only by the cross-build below.
       - name: Test the portable core
         run: |
           nix develop .#core --command cmake -S . -B build-core -G Ninja \
@@ -58,10 +61,11 @@ jobs:
       - name: Fetch pinned libmpv
         run: nix develop --command ./scripts/fetch-libmpv.sh
 
-      # The app and player targets are where most of the code lives and none of
-      # it is reachable from the core tests, so without this a green PR could
-      # still fail to produce a coax.exe. The player test binary is built here
-      # but not run: it is a Windows executable and this runner is Linux.
+      # The app and mpv adapter are where most of the remaining code lives and
+      # none of it is reachable from the native tests, so without this a green
+      # PR could still fail to produce a coax.exe. The test binaries are built
+      # here too and not run -- they are Windows executables and this runner is
+      # Linux -- but the same cases already ran natively in the job above.
       - name: Cross-compile
         run: |
           nix develop --command cmake -B build -G Ninja \

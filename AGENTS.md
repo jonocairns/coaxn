@@ -57,8 +57,14 @@ short version.
 
 - `coax_core` is `src/core/*.cpp` plus `src/util/redact.cpp`. It must not
   reference Windows, libmpv, ImGui or any UI type.
-- It is compiled by a native GCC in the `.#core` shell, so a Windows include
-  breaks that build even when the cross-build is still green.
-- The core tests are the only tests CI actually executes — the player test
-  binary is built on Linux but never run. Anything added to `coax_core` needs a
-  test under `test/`.
+- `coax_player_core` sits above it: the half of `src/player/` that links only
+  `coax_core`, with no platform or engine library. It may name player concepts
+  `coax_core` must not, but it is built by the same native GCC and the same rule
+  applies — a Windows or libmpv include breaks that build even when the
+  cross-build is still green.
+- Only `src/player/mpv_player.cpp` needs libmpv, and it is the whole of
+  `coax_mpv`. A new file under `src/player/` belongs in `coax_player_core`
+  unless it genuinely cannot.
+- CI executes everything both native targets build: `coax_core_tests` and
+  `coax_player_core_tests`. Anything added to either library needs a test under
+  `test/`.

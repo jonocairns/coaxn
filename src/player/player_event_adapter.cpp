@@ -58,6 +58,15 @@ void PlayerEventAdapter::start_file(std::int64_t playlist_entry_id) {
 void PlayerEventAdapter::playback_restart(std::int64_t playlist_entry_id) {
     const auto entry = entries_.find(playlist_entry_id);
     if (entry == entries_.end() || first_started_[playlist_entry_id]) return;
+
+    // A queued replacement owns the next first-start edge, even when recovery
+    // keeps the same generation. mpv can publish a late restart for the entry
+    // being replaced after loadfile has been issued but before START_FILE for
+    // the replacement. Letting that edge through would make the new load look
+    // as though it had already produced a frame and turn its initial cache fill
+    // into a learned rebuffer.
+    if (!pending_loads_.empty()) return;
+
     first_started_[playlist_entry_id] = true;
     events_.push_back({entry->second, FirstPlaybackStart{}});
 }

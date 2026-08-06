@@ -9,6 +9,12 @@ Audited at `f8a77d8`. Every finding below was read against the tree at
 `5c1e05f` and re-checked at `f8a77d8`; nothing under `src/` changed between the
 two, so the line references hold.
 
+Findings 1 and the two live-sync defects it enabled testing for have since been
+fixed, at `41843f9` and `5388982`. Those entries are kept rather than deleted,
+marked with the commit that closed them, so the reasoning stays readable and the
+same ground is not re-audited. Every other finding is still open, and its line
+references are still as of `f8a77d8`.
+
 The detailed findings retain their discovery order. The priority table below is
 the execution order: it balances impact, likelihood and cost rather than treating
 source-file size or architectural neatness as severity.
@@ -67,7 +73,7 @@ authenticated URL is safe.
 | P0 — release blocker, already tracked | Verify the fetched libmpv archive and satisfy the libmpv/FFmpeg redistribution obligations ([PRD.md §8.2](../PRD.md#82-runtime-provenance-and-licensing)) | The shipped runtime is neither content-verified nor legally complete. This is not newly discovered by this audit, so it is cross-referenced rather than counted as another finding. |
 | P1 | Fix the log snapshot race (finding 2) and stop logging arbitrary authenticated URLs (finding 8) | One is undefined behaviour on ordinary worker/UI overlap; the other can persist credentials. Both fixes are small. |
 | P1 | Make presentation failure terminal without becoming an infinite spin, and propagate render-target recreation failure (findings 7 and 9) | A device-loss path can consume a core indefinitely or leave the application blank with no recovery signal. |
-| P1 | Run the already-portable player suite in native CI and add `LiveSync` coverage (finding 1) | It immediately turns 120 existing assertions over recovery correlation into push coverage. |
+| ~~P1~~ Fixed at `5388982` | ~~Run the already-portable player suite in native CI and add `LiveSync` coverage (finding 1)~~ | The target split landed and the suite runs on every push. Native CTest went from 66 cases to 98. |
 | P2 | Put `ChannelIndex` in the portable target and cache its derived view (findings 5 and 6) | This restores the documented boundary and removes full-catalogue work at frame rate. |
 | P2 | Move the complete service tick out of `run()` and give deadlines a reliable wakeup (finding 3) | Resize/move modal loops currently starve recovery and health work. |
 | P2 | Extract provider parsing/normalisation, then split playback orchestration from `App` behind a test seam (findings 11 and 4) | These are the largest remaining bodies of Coax-owned protocol logic with no runnable tests. |
@@ -75,46 +81,50 @@ authenticated URL is safe.
 
 ## Findings
 
-### 1. [P1] Five of six `coax_player` units are portable, and their tests never run
+### 1. [Fixed at `41843f9` and `5388982`] Five of six `coax_player` units are portable, and their tests never ran
 
-`coax_player` compiles the mpv adapter and the portable logic around it into
-one target that links libmpv. Only `mpv_player.cpp` actually needs Windows or
+`coax_player` compiled the mpv adapter and the portable logic around it into
+one target that linked libmpv. Only `mpv_player.cpp` actually needs Windows or
 mpv. The other five — `live_sync.cpp`, `player_event_adapter.cpp`,
 `recovery_effect_executor.cpp`, `transport_log_classifier.cpp` and
-`load_diagnostics.cpp` — compile clean under a native GCC with `-Wall -Wextra
--Wpedantic`. `load_diagnostics.cpp` qualifies because `win/com_ptr.hpp`
+`load_diagnostics.cpp` — compiled clean under a native GCC with `-Wall -Wextra
+-Wpedantic`. `load_diagnostics.cpp` qualified because `win/com_ptr.hpp`
 includes only `<utility>`: it is a pure template over a forward-declared
 `IUnknown`, and nothing in it touches a Windows header.
 
-Because the target links libmpv, `coax_player_adapter_tests` is built as a
+Because the target linked libmpv, `coax_player_adapter_tests` was built as a
 Windows binary on a Linux runner and never executed. AGENTS.md and the CI
-comment both say so, so this is a known limitation rather than an oversight.
-What the audit adds is that the limitation is unnecessary: the suite builds and
-passes natively today, unmodified, in about a second.
+comment both said so, so this was a known limitation rather than an oversight.
+What the audit added is that the limitation was unnecessary: the suite built and
+passed natively, unmodified, in about a second.
 
 ```text
 All tests passed (120 assertions in 15 test cases)
 ```
 
-The file is named for the event adapter but covers five units — the adapter,
+The file was named for the event adapter but covers five units — the adapter,
 the buffer-phase gate, `reset_load_observations`, `execute_recovery_effect` and
 `classify_transport_log`. That is the correlation model that decides whether one
-physical failure spends one recovery attempt or two, and it is currently
-verified by nothing on any push.
+physical failure spends one recovery attempt or two, and nothing verified it on
+any push.
 
-Split `coax_player_core` (the five portable units) from `coax_mpv`
-(`mpv_player.cpp`), and add the portable half to the `.#core` test binary. No
-logic changes, no porting — the code is already portable, as the compile matrix
-shows. Renaming the test file to match what it covers is worth doing at the
-same time. For a clean conceptual boundary, move `Diagnostics` and
-`reset_load_observations` out of `mpv_player.hpp` too: that header compiles
-natively only because `IUnknown` is forward-declared and `win::ComPtr` does not
-instantiate a Windows call in this translation unit.
+**What landed.** `coax_player_core` holds the five portable units and links only
+`coax_core`, with no platform or engine library, so the `.#core` shell configures
+and tests it exactly as it does `coax_core`; `coax_mpv` is `mpv_player.cpp`
+alone. There were no logic changes and no porting — the code was already
+portable, as the compile matrix showed.
+The test file is now `test/player/player_core_tests.cpp`, named for what it
+covers. `Diagnostics` and `reset_load_observations` moved to
+`player/load_diagnostics.hpp`: the portable half reads and resets them, and
+resting that on `mpv_player.hpp` meant resting it on `IUnknown` being
+forward-declared and `win::ComPtr` not instantiating a Windows call in that
+translation unit.
 
-`LiveSync` is the one unit here with no test at all. It is a port of ExoPlayer's
-`DefaultLivePlaybackSpeedControl` — a control loop with six tuning constants —
-and is exactly the shape that wants a table test. Once the target is split,
-there is somewhere for one to live.
+`LiveSync` was the one unit here with no test at all. It is a reduced version of
+ExoPlayer's `DefaultLivePlaybackSpeedControl` — a control loop with six tuning
+constants — and exactly the shape that wants a table test. It has 16 cases now,
+added with the live-sync fixes in `5388982`. Native CTest runs 98 cases where it
+ran 66.
 
 ### 2. [P1] `log::recent()` hands the UI thread a vector the workers are mutating
 
@@ -375,13 +385,17 @@ All six compile clean. As a negative control, `mpv_player.cpp` fails on
 g++ -std=c++20 -I src -I build-core/_deps/catch2-src/src -I build-core/_deps/catch2-build/generated-includes test/player/player_event_adapter_tests.cpp src/player/player_event_adapter.cpp src/player/load_diagnostics.cpp src/player/recovery_effect_executor.cpp src/player/transport_log_classifier.cpp src/player/live_sync.cpp src/core/supervisor.cpp src/core/playback_health.cpp src/core/presentation.cpp src/core/supervisor_host.cpp src/core/version.cpp src/util/redact.cpp build-core/_deps/catch2-build/src/libCatch2Main.a build-core/_deps/catch2-build/src/libCatch2.a -o /tmp/adapter_tests && /tmp/adapter_tests
 ```
 
-15 test cases, 120 assertions, all passing.
+15 test cases, 120 assertions, all passing. Both this and the portability matrix
+above were re-run before the split and reproduced exactly. The command is kept
+as the evidence that led to finding 1; the ordinary build now does this, so
+there is no longer any reason to run it by hand.
 
 **The ordinary build paths.** The native `.#core` configuration passed all 66
 discovered tests, and the mingw configuration completed a clean Windows
-cross-build at `f8a77d8`. These do not close finding 1 — the 15 player cases are
-still absent from native CTest — but they establish that the findings are not
-artifacts of an already-broken tree.
+cross-build at `f8a77d8`. These did not close finding 1 — the 15 player cases
+were absent from native CTest — but they established that the findings were not
+artifacts of an already-broken tree. The same command now runs 98
+cases, and the cross-build still produces `coax.exe`.
 
 **External behaviour** was checked against primary sources rather than memory:
 
@@ -430,9 +444,11 @@ so they are not raised again:
   supervisor starvation and elapsed wall-clock budget instead; its exact
   post-drag transition is state-dependent as that finding now records.
 - **`transport_log_classifier` and `recovery_effect_executor` are untested.**
-  Both are tested, in the suite that never runs — test cases at lines 233, 270,
-  291, 309 and 363 of `test/player/player_event_adapter_tests.cpp`. The
-  `RecoveryExecutor` struct-of-functions seam is used by two of them.
+  Both were tested, in the suite that never ran — test cases at lines 233, 270,
+  291, 309 and 363 of what was then
+  `test/player/player_event_adapter_tests.cpp`, now
+  `test/player/player_core_tests.cpp`. The `RecoveryExecutor`
+  struct-of-functions seam is used by two of them.
 - **`App` holds `client_` and `credentials_` redundantly.** It does not.
   `credentials_` carries the portal across the asynchronous gap between
   `begin_connect` (line 375) and `finish_connect` (line 422), where `client_`
