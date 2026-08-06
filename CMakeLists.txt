@@ -29,6 +29,22 @@ add_library(coax_core
 target_include_directories(coax_core PUBLIC src)
 target_compile_options(coax_core PRIVATE -Wall -Wextra -Wpedantic)
 
+# The half of the player layer that has no engine in it: event correlation,
+# load diagnostics, the live-offset control law and the log classifier. It sits
+# above coax_core because it speaks the player's vocabulary -- which coax_core
+# must not -- but it links nothing, so the native shell configures and tests it
+# exactly as it does the core. Only src/player/mpv_player.cpp needs libmpv, and
+# that is the whole reason this is a separate target.
+add_library(coax_player_core
+    src/player/live_sync.cpp
+    src/player/load_diagnostics.cpp
+    src/player/player_event_adapter.cpp
+    src/player/recovery_effect_executor.cpp
+    src/player/transport_log_classifier.cpp)
+target_include_directories(coax_player_core PUBLIC src)
+target_link_libraries(coax_player_core PUBLIC coax_core)
+target_compile_options(coax_player_core PRIVATE -Wall -Wextra -Wpedantic)
+
 if(BUILD_TESTING)
     # Immutable Catch2 v3 release used by both native and cross builds.
     FetchContent_Declare(Catch2
@@ -53,6 +69,19 @@ if(BUILD_TESTING)
         target_link_options(coax_core_tests PRIVATE -static)
     endif()
     catch_discover_tests(coax_core_tests DISCOVERY_MODE PRE_TEST)
+
+    # Built and run by the same native configuration as the core suite. These
+    # cases predate the target split and passed the whole time -- they were
+    # simply linked into a Windows executable no runner could execute.
+    add_executable(coax_player_core_tests
+        test/player/player_core_tests.cpp)
+    target_link_libraries(coax_player_core_tests PRIVATE
+        Catch2::Catch2WithMain coax_player_core)
+    target_compile_options(coax_player_core_tests PRIVATE -Wall -Wextra -Wpedantic)
+    if(WIN32)
+        target_link_options(coax_player_core_tests PRIVATE -static)
+    endif()
+    catch_discover_tests(coax_player_core_tests DISCOVERY_MODE PRE_TEST)
 endif()
 
 if(COAX_BUILD_APP)
@@ -104,29 +133,16 @@ if(COAX_BUILD_APP)
         "${imgui_SOURCE_DIR}" "${imgui_SOURCE_DIR}/backends")
     target_link_libraries(imgui PUBLIC d3d11 dxgi dxguid d3dcompiler dwmapi)
 
-    add_library(coax_player
-        src/player/live_sync.cpp
-        src/player/load_diagnostics.cpp
-        src/player/player_event_adapter.cpp
-        src/player/recovery_effect_executor.cpp
-        src/player/transport_log_classifier.cpp
-        src/player/mpv_player.cpp)
-    target_include_directories(coax_player PUBLIC src)
-    target_link_libraries(coax_player PUBLIC coax_core PRIVATE libmpv)
+    # The engine adapter, and the only translation unit under src/player/ that
+    # needs libmpv or Windows. Everything portable is in coax_player_core.
+    add_library(coax_mpv src/player/mpv_player.cpp)
+    target_include_directories(coax_mpv PUBLIC src)
+    target_link_libraries(coax_mpv PUBLIC coax_player_core PRIVATE libmpv)
     # The swap chain is a COM object, so the adapter that owns its reference
     # pulls in <unknwn.h>. These keep that from dragging in the rest of Win32
     # and its min/max macros along with it.
-    target_compile_definitions(coax_player PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_compile_options(coax_player PRIVATE -Wall -Wextra -Wpedantic)
-
-    if(BUILD_TESTING)
-        add_executable(coax_player_adapter_tests test/player/player_event_adapter_tests.cpp)
-        target_link_libraries(coax_player_adapter_tests PRIVATE
-            Catch2::Catch2WithMain coax_player)
-        target_compile_options(coax_player_adapter_tests PRIVATE -Wall -Wextra -Wpedantic)
-        target_link_options(coax_player_adapter_tests PRIVATE -static)
-        catch_discover_tests(coax_player_adapter_tests DISCOVERY_MODE PRE_TEST)
-    endif()
+    target_compile_definitions(coax_mpv PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(coax_mpv PRIVATE -Wall -Wextra -Wpedantic)
 
     # Icon and version metadata. Generated into the build tree so the version
     # has exactly one source of truth: the project() call above.
@@ -152,7 +168,7 @@ if(COAX_BUILD_APP)
 
     target_include_directories(coax PRIVATE src)
     target_link_libraries(coax PRIVATE
-        coax_player imgui nlohmann_json
+        coax_mpv imgui nlohmann_json
         d3d11 dxgi dxguid dcomp dwmapi winhttp crypt32 shell32 ole32 uuid)
     target_compile_definitions(coax PRIVATE
         UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN

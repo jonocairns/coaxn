@@ -1,6 +1,15 @@
-#include "player/mpv_player.hpp"
+#include "player/load_diagnostics.hpp"
 
 namespace coax::player {
+
+const char* to_string(SwapchainAcquisition value) {
+    switch (value) {
+        case SwapchainAcquisition::None: return "none";
+        case SwapchainAcquisition::PropertyObservation: return "property observation";
+        case SwapchainAcquisition::VideoReconfig: return "video-reconfig read";
+    }
+    return "none";
+}
 
 void reset_load_observations(Diagnostics& diagnostics) {
     diagnostics.video_codec.clear();

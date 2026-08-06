@@ -66,15 +66,6 @@ std::uint64_t swapchain_address(void* pointer) {
 
 }  // namespace
 
-const char* to_string(SwapchainAcquisition value) {
-    switch (value) {
-        case SwapchainAcquisition::None: return "none";
-        case SwapchainAcquisition::PropertyObservation: return "property observation";
-        case SwapchainAcquisition::VideoReconfig: return "video-reconfig read";
-    }
-    return "none";
-}
-
 MpvPlayer::~MpvPlayer() {
     events_.dispose();
     destroy_backend();

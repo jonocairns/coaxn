@@ -4,9 +4,9 @@
 #include <string>
 #include <vector>
 
-#include "player/player_event_adapter.hpp"
 #include "player/buffer_phase_gate.hpp"
-#include "player/mpv_player.hpp"
+#include "player/load_diagnostics.hpp"
+#include "player/player_event_adapter.hpp"
 #include "player/recovery_effect_executor.hpp"
 #include "player/transport_log_classifier.hpp"
 
