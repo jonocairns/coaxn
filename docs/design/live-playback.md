@@ -158,8 +158,10 @@ function returning name/value pairs and assert on the result, which needs no
 live mpv. The option-set builder belongs in the player layer. Numeric byte
 counts and durations remain vendor-neutral policy in `policy.hpp`; only mpv
 option names such as `demuxer-max-bytes` stay out of `coax_core`. The portable
-half of `coax_player` is the right home for that mapping, which makes this and
-the player-target split the same piece of work.
+half of `coax_player` is the right home for that mapping. That half now exists
+as `coax_player_core` and is covered by CI, so this work no longer has to carry
+the target split with it — the option-set builder has somewhere to live and
+somewhere to be tested.
 
 Socket timing and probing remain separate from buffer policy. Coax does not set
 `network-timeout`, `demuxer-lavf-analyzeduration`, or
@@ -194,8 +196,11 @@ from ExoPlayer, which also smooths the minimum possible live offset and adjusts
 its current target back toward a safe ideal.
 
 `LiveSync` is free of Windows, mpv and UI types, so the control law is testable
-in isolation and portable to another platform. It does not currently have a
-direct test suite; the application integration is also untested.
+in isolation and portable to another platform. It is now built into
+`coax_player_core` and has a direct test suite that CI runs. The gating around
+it — what a turn may learn from mpv's cache signalling — is `LiveSyncGate` and
+is tested with it. What remains untested is `App`'s wiring of the two, which is
+a few lines and blocked on the same seam as architecture audit finding 4.
 
 #### The proxy, and why it is one
 
@@ -216,22 +221,37 @@ extract one: HLS would still feed demuxer buffered duration to this controller.
 
 #### Known live-sync correctness gaps
 
-These are implementation defects, rather than accepted trade-offs:
+Two of the three defects recorded here were fixed at `5388982`. They are kept,
+marked with what landed, because the engine behaviour that caused them is
+permanent and the rules that answer it are only obvious once the trap is stated.
 
-1. When `demuxer-cache-duration` is unavailable, the adapter preserves an
-   optional value for health but separately converts it to `0.0` for
-   `LiveSync`. Against a positive target this installs `0.97x`, which can add
-   roughly 108 seconds of latency per hour if telemetry remains unavailable.
-   The safe state is `1.0x` with no controller update until a valid measurement
-   arrives.
-2. `cache-pause-initial=yes` makes mpv enter the same `paused-for-cache` state
-   used for an actual underrun. The application counts every rising edge as a
-   rebuffer, so a normal initial fill and each recovery load can add 500ms to
-   the target before playback has been interrupted. Rebuffer learning must be
-   gated on first playback having started.
-3. While `paused-for-cache` or `core-idle` is true, the application returns
-   without setting speed. It therefore retains the previously installed
-   `0.97x` or `1.03x`; it is not literally held at `1.0x` as previously stated.
+1. **Fixed.** When `demuxer-cache-duration` was unavailable, the adapter
+   preserved an optional value for health but separately converted it to `0.0`
+   for `LiveSync`. Against a positive target that installs `0.97x`, which adds
+   roughly 108 seconds of latency per hour for as long as telemetry stays
+   unavailable. The adapter no longer keeps a flattened copy — the optional is
+   the only reading — and an absent measurement now holds `1.0x` and runs no
+   controller update until a valid one arrives. A real `0.0` is still a
+   measurement and is still controlled on. The diagnostics overlay distinguishes
+   the two rather than reporting `0.0s` for both.
+2. **Fixed.** `cache-pause-initial=yes` makes mpv enter the same
+   `paused-for-cache` state used for an actual underrun. The application counted
+   every rising edge as a rebuffer, so a normal initial fill added 500ms to the
+   target before a frame had been shown, and each recovery load added another —
+   recovery retains the controller by design, so those concessions accumulated
+   across an episode. Rebuffer learning is now gated on the load having produced
+   a first frame.
+3. **Open, P2.** While `paused-for-cache` or `core-idle` is true, the
+   application still returns without setting speed. It therefore retains the
+   previously installed `0.97x` or `1.03x`; it is not literally held at `1.0x`.
+   This is unchanged by the fixes above, which act on the telemetry and
+   first-frame conditions rather than on the stall branch.
+
+Both fixed rules live in `player::LiveSyncGate`, beside the controller they
+guard rather than inside `App`'s frame tick. They are playback protocol, not
+view state, and in `App` nothing could reach them — which is why they went
+unnoticed and untested. `LiveSync` and the gate now have 16 cases in the
+portable player suite that CI runs.
 
 ### Supervisor
 
@@ -350,15 +370,20 @@ but resets `LiveSync` target state and the displayed rebuffer count.
 Validated against commit `f8a77d8` on 2026-08-05. The native core suite passed
 66 tests and the Windows adapter executable passed 120 assertions in 15 test
 cases. These results strongly cover the supervisor, health fold, generations,
-event correlation and buffer-command gate. They do not cover the `LiveSync`
-control law or `App::update_live_sync`, where the highest-impact gaps sit.
+event correlation and buffer-command gate. They did not cover the `LiveSync`
+control law or `App::update_live_sync`, which is where the highest-impact gaps
+sat and why both P1 defects survived that long.
+
+Since `5388982` the native suite runs 97 cases, including the 15 that were
+previously built as a Windows binary and never executed, and 16 new ones over
+the control law and its gate. The two P1 defects are fixed and pinned by tests.
 
 Primary-source web and code fact-check refreshed on the same date:
 
 | Area | Result | Best-practice alignment |
 |---|---|---|
-| mpv buffered-duration telemetry | Confirmed: `demuxer-cache-duration` is approximate, very unreliable and often unavailable | Preserve validity and fail safe at `1.0x`; never reinterpret missing telemetry as zero |
-| Initial buffering versus rebuffer | Confirmed against the pinned mpv source: initial fill and later underruns share the `cache-pause-wait` threshold and `paused-for-cache` state, though later underruns have additional trigger conditions; Media3 excludes initial buffering and seeks from `notifyRebuffer` | Gate rebuffer learning on first playback start |
+| mpv buffered-duration telemetry | Confirmed: `demuxer-cache-duration` is approximate, very unreliable and often unavailable | Preserve validity and fail safe at `1.0x`; never reinterpret missing telemetry as zero — **done at `5388982`** |
+| Initial buffering versus rebuffer | Confirmed against the pinned mpv source: initial fill and later underruns share the `cache-pause-wait` threshold and `paused-for-cache` state, though later underruns have additional trigger conditions; Media3 excludes initial buffering and seeks from `notifyRebuffer` | Gate rebuffer learning on first playback start — **done at `5388982`** |
 | ExoPlayer comparison | Constants and proportional term confirmed; full controller also consumes live offset and buffered duration, smooths feasibility and adapts its target | Describe Coax as inspired by, not a port; do not claim manifest live offset unless it is actually available |
 | HLS start position | Contradicted: `-1` selects the last segment, while RFC 8216 recommends at least three target durations from the end for normal playback | Honor valid `EXT-X-START` or use a conservative demuxer default; do not equate the last segment with a robust live start |
 | HLS retry and connection options | Confirmed: `seg_max_retry=0` is the default; persistent/multiple HTTP settings are not retry controls; normal playlist refresh is required | Keep normal refresh below Coax, bound error retries across layers, and leave connection defaults alone without provider evidence |
@@ -368,9 +393,9 @@ Primary-source web and code fact-check refreshed on the same date:
 
 | Priority | Finding | Practical effect |
 |---|---|---|
-| P1 | Preserve unavailable cache duration and hold `1.0x` until valid telemetry arrives | Prevents an unavailable mpv property from installing `0.97x` and continuously accumulating live latency |
-| P1 | Count rebuffer only after first playback has started | Prevents normal initial fill and recovery opens from adding 500ms to the target |
-| P1 | Add direct `LiveSync` and application-integration tests | Covers telemetry loss, initial buffering, stall entry/exit, rate limiting, target bounds and reset behavior |
+| ~~P1~~ Fixed at `5388982` | ~~Preserve unavailable cache duration and hold `1.0x` until valid telemetry arrives~~ | Done. The flattened copy is gone, so an unavailable mpv property can no longer install `0.97x` and accumulate live latency |
+| ~~P1~~ Fixed at `5388982` | ~~Count rebuffer only after first playback has started~~ | Done, in `LiveSyncGate`. Normal initial fill and recovery opens no longer add 500ms to the target |
+| ~~P1~~ Fixed at `5388982` | ~~Add direct `LiveSync` and application-integration tests~~ | 16 cases in the portable player suite, run by CI: telemetry loss and recovery, initial buffering, stall entry/exit, rate limiting, target bounds and reset. The integration half covers the extracted `LiveSyncGate`; `App` itself is still not reachable by a test (architecture audit finding 4) |
 | P2 | Decide and document target decay semantics | The present controller intentionally or accidentally retains every 500ms concession until reset; it does not reproduce ExoPlayer's adaptive target |
 | P2 now; P1 before HLS support | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Avoids standards-disfavored edge startup and makes the currently unreachable recovery branch real |
 | P2 | Remove HLS connection overrides unless reproduced provider evidence requires them; define one error-retry budget across FFmpeg and Coax | Preserves normal playlist refresh and avoids mistaking connection strategy for retry control |
@@ -406,12 +431,13 @@ which unit tests cannot reproduce from mpv properties alone.
 
 ## Trade-offs
 
-**Latency for stability.** Each rebuffer concedes 500ms. On a persistently bad
-channel the controller settles further behind live rather than fighting a
-losing battle, up to the 30s ceiling. For live sport this is a real cost — a
-phone notification can arrive before the picture — which is why the increment
-is small. The current controller retains each increment and claws back only
-additional buffered duration above the raised target.
+**Latency for stability.** Each rebuffer concedes 500ms — counting only
+underruns after playback has started, not the opening fill or a recovery
+reopen. On a persistently bad channel the controller settles further behind live
+rather than fighting a losing battle, up to the 30s ceiling. For live sport this
+is a real cost — a phone notification can arrive before the picture — which is
+why the increment is small. The current controller retains each increment and
+claws back only additional buffered duration above the raised target.
 
 **Buffer memory for absorption.** The 64 MiB cache ceiling is a ceiling, not an
 allocation, and remains a tuning value rather than a measured optimum.
@@ -456,8 +482,8 @@ project exists.
 
 | Risk | Mitigation |
 |---|---|
-| Buffered duration is a poor or unavailable proxy for live offset | Diagnostics state the offset is estimated; required fix is to hold `1.0x` whenever the property is unavailable |
-| Initial buffering is mistaken for a rebuffer | Required fix is to gate learning on first playback start |
+| Buffered duration is a poor or unavailable proxy for live offset | Diagnostics state the offset is estimated and report the property as unavailable rather than `0.0s`; the controller holds `1.0x` whenever it is unavailable |
+| Initial buffering is mistaken for a rebuffer | Learning is gated on first playback start, in `LiveSyncGate` |
 | Speed changes become audible | Pitch correction enabled and range capped at ±3%, matching ExoPlayer's defaults; representative listening tests remain outstanding |
 | Reconnect options silently rejected by a future libmpv | The wrapper logs every rejected option at startup |
 | Controller fights a stall instead of riding it out | Updates are suspended during `paused-for-cache` or `core-idle`; required fix is to actively install `1.0x` on entry and recompute on exit |

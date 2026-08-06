@@ -114,7 +114,9 @@ src/
 ```
 
 `core/` is kept free of Windows and UI types on purpose: it is the part a second
-platform would reuse unchanged, and it is the part covered by tests that run
+platform would reuse unchanged. Most of `player/` is portable too — only the
+libmpv adapter itself is not — so the event correlation, the live-offset
+controller and the log classifier are covered by the same tests, which run
 without Windows or libmpv.
 
 ### How the single surface works
