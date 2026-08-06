@@ -27,7 +27,7 @@ rectangle where the picture should be.
 - **Bounded recovery.** A generation-scoped supervisor wraps the libmpv owner:
   five attempts inside one 30-second episode, with buffer targets growing from
   1 second while tuning to 10 seconds once playback has been healthy for five
-- **Credentials encrypted at rest** with DPAPI, and redacted from logs
+- **Credentials encrypted at rest** with DPAPI
 - **A quiet update check** against GitHub releases at startup, silent on every
   uninteresting answer — someone trying to watch television does not need to
   hear about a failed update check
@@ -155,6 +155,7 @@ The Electron implementation is frozen. This is the version under development.
 | [PRD.md](PRD.md) | Product requirements and the rationale for the native rewrite |
 | [docs/design/live-playback.md](docs/design/live-playback.md) | Live playback, recovery and buffering design |
 | [docs/packaging.md](docs/packaging.md) | Packaging, releases, debug symbols, pinned libmpv |
+| [docs/architecture-audit.md](docs/architecture-audit.md) | What the structure gets right, where it does not hold, and the evidence for each |
 | [AGENTS.md](AGENTS.md) | Build commands, commit-prefix rules, generated files — the short version |
 
 ## Licence

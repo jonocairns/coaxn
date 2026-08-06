@@ -1,0 +1,454 @@
+---
+description: Architecture audit of the Coax source tree — what the structure gets right, where it does not hold, and the evidence behind each finding.
+tags: [architecture, audit, testing, ci, portability, threading, review]
+---
+
+# Architecture audit
+
+Audited at `f8a77d8`. Every finding below was read against the tree at
+`5c1e05f` and re-checked at `f8a77d8`; nothing under `src/` changed between the
+two, so the line references hold.
+
+The detailed findings retain their discovery order. The priority table below is
+the execution order: it balances impact, likelihood and cost rather than treating
+source-file size or architectural neatness as severity.
+
+`P0` blocks a release, `P1` should be fixed next, `P2` is important but can be
+scheduled, and `P3` is cleanup or a narrowly exposed correctness issue.
+
+Every claim here was verified mechanically. [How the findings were
+checked](#how-the-findings-were-checked) gives the commands, and [Checked and
+clean](#checked-and-clean) records what came back good — including five claims
+raised during the audit that did not survive checking, so they are not raised
+again.
+
+## What holds up
+
+**The portable core is real, not aspirational.** `coax_core` has no link
+dependencies and is configured by a native GCC in the `.#core` shell. That is a
+mechanical platform-boundary check rather than include discipline anyone has to
+remember. Most projects claim a portable core; few enforce one with a second
+build.
+
+**The supervisor is a pure reducer.** `reduce_supervisor_state(state, event,
+now, policy)` returns `{state, effects, transition}`
+([supervisor.hpp:133](../src/core/supervisor.hpp)), and the host owns only
+queueing, re-arming and callbacks. Effects are data, executed elsewhere.
+`PlaybackSupervisor::dispatch` handles reentrancy correctly: an effect that
+dispatches back into the supervisor is enqueued rather than recursing
+([supervisor_host.cpp:14](../src/core/supervisor_host.cpp)). This is why five
+attempts inside a 30-second episode can be tested against a fake clock with no
+media anywhere near it.
+
+**Generation fencing is a type, not an `int`,** and `decide_generation`
+distinguishes `Stale` from `Current` from `Future`. For a player that reopens
+streams under load this is the single highest-value decision in the tree.
+
+**Policy is separated from mechanism and versioned.** `kRecoveryPolicyVersion`
+reaches both the transition log and the diagnostics panel, so a log line from a
+user's machine says which policy produced the behaviour it describes.
+
+**The swap-chain epoch** ([presentation.hpp:25](../src/core/presentation.hpp))
+solves ABA on an address mpv publishes with no ownership contract, and puts the
+decision in a `constexpr` function in the core where it can be tested.
+
+**Most secret-bearing paths are handled deliberately.** `http::get` never puts a
+URL in an error string — only host and status. mpv's own log text is dropped
+wholesale rather than filtered, because it can embed authenticated URLs. The
+credential store uses `CryptProtectData`, `CRYPTPROTECT_UI_FORBIDDEN`, and
+`SecureZeroMemory` on the decrypted DPAPI buffer. Finding 8 records the hole in
+the separate URL-at-load log path, so this is not a claim that every possible
+authenticated URL is safe.
+
+## Priority
+
+| Priority | Work | Why |
+|---|---|---|
+| P0 — release blocker, already tracked | Verify the fetched libmpv archive and satisfy the libmpv/FFmpeg redistribution obligations ([PRD.md §8.2](../PRD.md#82-runtime-provenance-and-licensing)) | The shipped runtime is neither content-verified nor legally complete. This is not newly discovered by this audit, so it is cross-referenced rather than counted as another finding. |
+| P1 | Fix the log snapshot race (finding 2) and stop logging arbitrary authenticated URLs (finding 8) | One is undefined behaviour on ordinary worker/UI overlap; the other can persist credentials. Both fixes are small. |
+| P1 | Make presentation failure terminal without becoming an infinite spin, and propagate render-target recreation failure (findings 7 and 9) | A device-loss path can consume a core indefinitely or leave the application blank with no recovery signal. |
+| P1 | Run the already-portable player suite in native CI and add `LiveSync` coverage (finding 1) | It immediately turns 120 existing assertions over recovery correlation into push coverage. |
+| P2 | Put `ChannelIndex` in the portable target and cache its derived view (findings 5 and 6) | This restores the documented boundary and removes full-catalogue work at frame rate. |
+| P2 | Move the complete service tick out of `run()` and give deadlines a reliable wakeup (finding 3) | Resize/move modal loops currently starve recovery and health work. |
+| P2 | Extract provider parsing/normalisation, then split playback orchestration from `App` behind a test seam (findings 11 and 4) | These are the largest remaining bodies of Coax-owned protocol logic with no runnable tests. |
+| P2/P3 | Correct HTTP read failure and the installed log location; remove dead symbols (findings 10, 12 and 13) | These are real but narrower operational or correctness failures. |
+
+## Findings
+
+### 1. [P1] Five of six `coax_player` units are portable, and their tests never run
+
+`coax_player` compiles the mpv adapter and the portable logic around it into
+one target that links libmpv. Only `mpv_player.cpp` actually needs Windows or
+mpv. The other five — `live_sync.cpp`, `player_event_adapter.cpp`,
+`recovery_effect_executor.cpp`, `transport_log_classifier.cpp` and
+`load_diagnostics.cpp` — compile clean under a native GCC with `-Wall -Wextra
+-Wpedantic`. `load_diagnostics.cpp` qualifies because `win/com_ptr.hpp`
+includes only `<utility>`: it is a pure template over a forward-declared
+`IUnknown`, and nothing in it touches a Windows header.
+
+Because the target links libmpv, `coax_player_adapter_tests` is built as a
+Windows binary on a Linux runner and never executed. AGENTS.md and the CI
+comment both say so, so this is a known limitation rather than an oversight.
+What the audit adds is that the limitation is unnecessary: the suite builds and
+passes natively today, unmodified, in about a second.
+
+```text
+All tests passed (120 assertions in 15 test cases)
+```
+
+The file is named for the event adapter but covers five units — the adapter,
+the buffer-phase gate, `reset_load_observations`, `execute_recovery_effect` and
+`classify_transport_log`. That is the correlation model that decides whether one
+physical failure spends one recovery attempt or two, and it is currently
+verified by nothing on any push.
+
+Split `coax_player_core` (the five portable units) from `coax_mpv`
+(`mpv_player.cpp`), and add the portable half to the `.#core` test binary. No
+logic changes, no porting — the code is already portable, as the compile matrix
+shows. Renaming the test file to match what it covers is worth doing at the
+same time. For a clean conceptual boundary, move `Diagnostics` and
+`reset_load_observations` out of `mpv_player.hpp` too: that header compiles
+natively only because `IUnknown` is forward-declared and `win::ComPtr` does not
+instantiate a Windows call in this translation unit.
+
+`LiveSync` is the one unit here with no test at all. It is a port of ExoPlayer's
+`DefaultLivePlaybackSpeedControl` — a control loop with six tuning constants —
+and is exactly the shape that wants a table test. Once the target is split,
+there is somewhere for one to live.
+
+### 2. [P1] `log::recent()` hands the UI thread a vector the workers are mutating
+
+`log::write` takes `g_mutex` to mutate `g_recent`, including
+`erase(g_recent.begin())` once the 400-entry ring fills.
+[`log::recent()`](../src/util/log.cpp) returns `const std::vector<std::string>&`
+with **no lock**, and `draw_diagnostics()` iterates it on the UI thread.
+
+Both workers log while running: the connect thread at
+[xtream_client.cpp:165](../src/xtream/xtream_client.cpp), the update thread at
+[update_check.cpp:38](../src/app/update_check.cpp). `draw_diagnostics()` is
+called outside the stage switch in `draw_frame`, so it is live during the login
+screen — which is precisely when the update thread is running. Opening F1 and
+expanding Log during a catalogue fetch iterates a vector another thread is
+reallocating.
+
+Return a snapshot taken under the lock, or fill a caller-provided buffer. While
+there, note that `write` takes the lock twice per call; the `fflush` per line is
+defensible for a crash log, the double lock is not.
+
+### 3. [P2] The frame tick lives in `run()`, and a resize drag does not run it
+
+`run()` does pump → `process_player_events` → `service_presentation` →
+`supervisor_.poll` → `sample_playback_health` → live sync → `draw_frame`. But
+during a sizing or moving drag the system enters a modal loop inside
+`DefWindowProc`, and per Microsoft's documentation the operation *"is complete
+when DefWindowProc returns"* — so `pump_messages()` does not return for the
+whole gesture. `draw_frame()` still runs, because WM_SIZE and WM_PAINT call the
+paint handler directly ([app_window.cpp:60](../src/win/app_window.cpp)).
+
+Drawing therefore continues while nothing else does. The consequence that
+matters is the supervisor. `supervisor_.poll()` cannot run, but the recovery
+budget is measured against a real `steady_clock`:
+[supervisor.cpp:100](../src/core/supervisor.cpp) fails the episode when a
+subsequent failure would schedule `retry_at` beyond
+`started + policy.wall_clock_budget`. Dragging the window for ten seconds
+mid-recovery therefore spends a third of the 30-second budget on nothing and
+can make the next failure terminal.
+
+It does **not**, however, deterministically land in `Failed{BudgetExpired}` on
+the first poll after the mouse comes up. The deadline reducer at
+[supervisor.cpp:128](../src/core/supervisor.cpp) starts an already-scheduled
+recovery effect without re-checking the wall-clock budget. Whether the first
+post-drag turn fails, starts that overdue attempt, or processes a queued player
+failure first depends on which state and events existed when the modal loop
+began. The starvation and lost budget are real; the direct-failure sequence is
+not universal.
+
+The comment on the hoisted paint handler is right about why drawing belongs in
+the message loop. The conclusion should have been to hoist the whole tick.
+Extract the body of `run()`'s loop into a `service()` method and call it from
+both places — the same comment already argues the reentrancy is safe, because
+the paint handler is only reached from the message pump, which never runs
+mid-frame. Paint and size messages alone are not a deadline mechanism, though:
+if the pointer stops while Windows still owns the modal loop, neither is
+guaranteed to arrive at the supervisor deadline. A timer or message-wait timeout
+should provide the wakeup.
+
+Mpv's event queue is **not** a serious risk here, for the record: property
+changes are coalesced (see [Checked and clean](#checked-and-clean)), so the
+starved `player_.pump()` is not the problem. The starved `supervisor_.poll()`
+is.
+
+### 4. [P2] `App` is four objects
+
+[app.cpp](../src/app/app.cpp) is 1639 lines and `App` carries around fifty
+members. It is at once the ImGui view (roughly 800 lines across `draw_login`,
+`draw_browser`, `draw_status_bar` and `draw_diagnostics`), the playback
+orchestrator, the presentation-lifetime manager, and the session and
+credentials model. The class holds `search_was_active_`, `pre_mute_volume_` and
+`overlay_menu_open_` — pure view state — next to `last_cache_state_dispatched_`,
+`pending_stream_ends_` and `exact_failure_reported_`, which are playback
+protocol state.
+
+Size is not the complaint. The complaint is that everything *below* `App` is
+testable and mostly tested, while `App` holds several hundred lines of
+orchestration that is not UI and cannot be reached by a test.
+`process_player_events` ([app.cpp:468](../src/app/app.cpp)) contains real
+protocol logic: the exact-failure suppression rule and the 50 ms pending
+stream-end window together decide whether one provider failure costs one
+recovery attempt or two. That is supervisor-grade reasoning living in the view
+layer.
+
+Extract a `PlaybackSession` owning the supervisor, health fold, generation and
+player-event translation. `App` becomes view plus wiring. Merely moving the
+concrete `MpvPlayer` into that class does not make it testable: the session must
+either depend on an injected player interface/fake, or itself be a pure
+coordinator that emits player commands as data. This is the largest piece of
+work on the list and should be done deliberately, after the cheaper items above
+have made the surrounding code testable.
+
+### 5. [P2] `channel_index` is core code that escaped the core target
+
+`src/core/channel_index.cpp` is in namespace `coax::core`, and its header says
+it is *"the part of the application a second platform would reuse unchanged"*.
+It compiles clean natively. But
+[CMakeLists.txt:144](../CMakeLists.txt) builds it into the `coax` executable
+rather than into `coax_core`, so it is not built by the `.#core` shell, not
+touched by CI, and has no tests — while AGENTS.md states that anything in
+`coax_core` needs a test under `test/`.
+
+The rule is right; the file slipped past it by living in `src/core/` without
+being in the target. Two lines of CMake and a test file.
+
+### 6. [P2] `filtered()` rebuilds the catalogue view every frame
+
+`draw_browser` calls `channels_.filtered(search_)` at
+[app.cpp:898](../src/app/app.cpp), guarded only by `show_browser_` and the
+browsing stage. There is exactly one call site and it is unconditional per
+frame: lowercase the query, build an `unordered_map` over every category, push a
+pointer per surviving channel, then `erase_if` the empty groups.
+
+For the tens of thousands of channels the README advertises, that is several
+allocations and tens of thousands of pointer writes at frame rate, producing a
+result that only changes when the query or the catalogue changes. The
+`ImGuiListClipper` below it bounds ImGui submission, not this. Cache the result
+against the query string and invalidate in `reset()`. The cost is established
+from the call graph and algorithm; its precise frame-time impact has not been
+benchmarked.
+
+### 7. [P1] A presentation rebuild can busy-wait forever
+
+While a rebuild is outstanding, `presentation_ready_` is false, so `draw_frame`
+returns before reaching `Present`. `PresentationRebuildBudget::poll` returns
+`Hold` until the retry delay elapses
+([presentation.cpp:34](../src/core/presentation.cpp)), and `run()` has no sleep
+and a non-blocking `PeekMessage`.
+
+Vsync inside `Present` is the only throttle the frame loop has, and this path
+bypasses it. The process therefore spins a core across the retry delays — on a
+machine that has just lost its display adapter.
+
+The terminal case is worse. When the fifth rebuild fails,
+`PresentationRebuildBudget::poll` reports `Exhausted` once, clears
+`outstanding_`, and subsequently returns `Hold`. `presentation_ready_` remains
+false forever, so `draw_frame()` never reaches `Present` again and the loop has
+no throttle for the rest of the process lifetime. This is not a five-second
+spike; it is an indefinite busy-wait until the user closes the application.
+
+Use `MsgWaitForMultipleObjects` (or an equivalent event-loop wait) with the next
+presentation or supervisor deadline as its timeout. Exhaustion also needs an
+explicit terminal presentation state that waits for messages without pretending
+another rebuild is pending.
+
+### 8. [P1] The load log can persist an arbitrary authenticated URL
+
+`MpvPlayer::issue_load` logs every target through `redact_stream_url` at
+[mpv_player.cpp:189](../src/player/mpv_player.cpp). That helper masks credentials
+only when the URL contains an Xtream-shaped `/live/`, `/movie/` or `/series/`
+path. If none is present it deliberately returns the input unchanged
+([redact.cpp:33](../src/util/redact.cpp)); a test pins that behaviour.
+
+The application also accepts an arbitrary direct-media URL from the command line
+([main.cpp:40](../src/main.cpp)). A target such as
+`https://example.invalid/stream?token=secret` is consequently written verbatim
+to `coax.log`. Userinfo or query credentials embedded in a provider base URL can
+survive too: masking the two path segments after `/live/` does not sanitize the
+authority or an earlier query.
+
+This contradicts PRD §7.7's prohibition on full authenticated URLs in logs. Do
+not make persistence depend on recognizing every secret-bearing URL shape.
+Construct the log value from known-safe fields — for example scheme, host and
+internal channel identifier — or apply a general authority/query sanitizer
+before the path-specific mask.
+
+### 9. [P1] Resize can lose the UI render target without entering recovery
+
+After `ResizeBuffers` succeeds, `UiLayer::resize` calls
+`create_render_target()` and discards its Boolean result
+([ui_layer.cpp:176](../src/win/ui_layer.cpp)). `create_render_target` in turn
+collapses both `GetBuffer` and `CreateRenderTargetView` HRESULTs to `false`, so
+the caller cannot classify a device removal or report any other cause.
+
+If either operation fails, `render_target_` remains null. `UiLayer::end_frame`
+then returns before `Present` ([ui_layer.cpp:187](../src/win/ui_layer.cpp)), no
+device loss is latched, and `service_presentation` has nothing to rebuild. The
+application can remain blank and unthrottled indefinitely. A same-size retry is
+also short-circuited because `width_` and `height_` were updated before render
+target creation.
+
+Preserve the HRESULT, feed device removal/reset through `note_result`, and make
+any other render-target failure visible to the presentation owner. A resize is
+complete only after both buffers and the new target exist.
+
+### 10. [P2] The installed application normally has no persistent session log
+
+`session_log()` opens `coax.log` beside the running executable with `_wfopen`
+and silently disables file logging when that fails
+([log.cpp:22](../src/util/log.cpp)). The portable archive may live in a writable
+directory, but the primary installer deliberately installs under Program Files
+([packaging.md:16](packaging.md)). An ordinarily launched, unelevated process
+does not have write access to that directory under normal Windows ACLs. UAC file
+virtualisation does not rescue it: Microsoft documents that it supports only
+32-bit applications, while Coax is native 64-bit
+([UAC architecture](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/architecture#virtualization)).
+
+That makes the session log least likely to exist for the users the installer is
+intended for, even though the comment calls it the only post-fact record of a GUI
+process failure. Put it under `%LOCALAPPDATA%\Coax\Logs` and retain bounded
+rotation. Portable beside-executable logging can remain an explicit mode when
+the directory is writable.
+
+### 11. [P2] Provider parsing and normalisation are platform-coupled and untested
+
+`xtream::Client::fetch_catalog` combines WinHTTP transport, response-shape
+validation, authentication interpretation, JSON parsing and channel/category
+normalisation in one Windows-only translation unit
+([xtream_client.cpp:102](../src/xtream/xtream_client.cpp)). There are no provider
+tests. This falls short of PRD §7.5, which names provider authentication and
+channel normalisation among the logic that must not depend on Win32 types.
+
+Keep WinHTTP as the adapter, but extract pure functions that consume a response
+body and return a normalized catalogue or closed error. Malformed JSON, numeric
+versus string fields, rejected credentials, unknown categories and whitespace
+normalisation can then run in the native suite without inventing a network
+abstraction.
+
+### 12. [P2] An HTTP read failure is treated as successful end-of-body
+
+The response loop at [http.cpp:138](../src/util/http.cpp) breaks when
+`WinHttpQueryDataAvailable` fails *or* when it successfully reports zero bytes.
+Those are different outcomes, but both return `true`. A broken or truncated
+transfer can therefore surface later as a misleading JSON/provider error built
+from a partial body.
+
+Check the API result separately from `available == 0`, populate the transport
+error on failure, and likewise check the status-query call before trusting the
+status value.
+
+### 13. [P3] Symbols with no callers
+
+Verified at zero call sites across `src/` and `test/`:
+
+| Symbol | Where |
+|---|---|
+| `ChannelIndex::find` | [channel_index.hpp:32](../src/core/channel_index.hpp) |
+| `ChannelIndex::category_count` | [channel_index.hpp:35](../src/core/channel_index.hpp) |
+| `ChannelIndex::empty` | [channel_index.hpp:36](../src/core/channel_index.hpp) |
+| `AppWindow::on_close` and `close_handler_` | [app_window.hpp:34](../src/win/app_window.hpp) — never registered, so the guarded call site is dead |
+| `xtream::Client::credentials` | [xtream_client.hpp:35](../src/xtream/xtream_client.hpp) |
+
+## How the findings were checked
+
+**Native portability.** Every file claimed portable was compiled with the
+system GCC, outside both nix shells, with the project's own warning flags:
+
+```bash
+g++ -std=c++20 -Wall -Wextra -Wpedantic -I src -fsyntax-only src/player/live_sync.cpp src/player/player_event_adapter.cpp src/player/recovery_effect_executor.cpp src/player/transport_log_classifier.cpp src/player/load_diagnostics.cpp src/core/channel_index.cpp
+```
+
+All six compile clean. As a negative control, `mpv_player.cpp` fails on
+`unknwn.h`, and it is the only file under `src/player/` that does.
+
+**The orphaned test suite.** Built against the Catch2 already fetched into
+`build-core/`, linking the five portable player units and the core sources:
+
+```bash
+g++ -std=c++20 -I src -I build-core/_deps/catch2-src/src -I build-core/_deps/catch2-build/generated-includes test/player/player_event_adapter_tests.cpp src/player/player_event_adapter.cpp src/player/load_diagnostics.cpp src/player/recovery_effect_executor.cpp src/player/transport_log_classifier.cpp src/player/live_sync.cpp src/core/supervisor.cpp src/core/playback_health.cpp src/core/presentation.cpp src/core/supervisor_host.cpp src/core/version.cpp src/util/redact.cpp build-core/_deps/catch2-build/src/libCatch2Main.a build-core/_deps/catch2-build/src/libCatch2.a -o /tmp/adapter_tests && /tmp/adapter_tests
+```
+
+15 test cases, 120 assertions, all passing.
+
+**The ordinary build paths.** The native `.#core` configuration passed all 66
+discovered tests, and the mingw configuration completed a clean Windows
+cross-build at `f8a77d8`. These do not close finding 1 — the 15 player cases are
+still absent from native CTest — but they establish that the findings are not
+artifacts of an already-broken tree.
+
+**External behaviour** was checked against primary sources rather than memory:
+
+| Claim | Source |
+|---|---|
+| mpv coalesces property-change events | [`client.h:1185`](../third_party/mpv/include/mpv/client.h) in the pinned runtime — the same range PRD.md already cites |
+| mpv's event ring is 1000 entries; async replies are reserved | [mpv `player/client.c` at the pinned commit](https://github.com/mpv-player/mpv/blob/304426c390901436fb1d4a63efbd582ae80c88f4/player/client.c) |
+| A sizing drag runs a modal loop the application's pump does not | [WM_ENTERSIZEMOVE](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-entersizemove) |
+| Program Files writes are not virtualised for a native 64-bit application | [UAC architecture](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/architecture#virtualization) |
+| DPAPI optional entropy has to be supplied again to decrypt | [`CryptProtectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata) and [`CryptUnprotectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata) |
+| The six `LiveSyncConfig` defaults | [AndroidX `DefaultLivePlaybackSpeedControl` at the revision checked on 2026-08-05](https://github.com/androidx/media/blob/5fb306449733dd71595700c1227ad6087578c559/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultLivePlaybackSpeedControl.java) |
+| nlohmann parse errors echo only a short `last read` token | [Parsing and exceptions](https://json.nlohmann.me/features/parsing/parse_exceptions/) |
+
+## Checked and clean
+
+**The ExoPlayer provenance is exact.** All six constants cited in
+`live_sync.hpp` — `0.97`, `1.03`, `0.1`, `20 ms`, `1000 ms`, `500 ms` — match
+the media3 source verbatim. The comments naming them are accurate.
+
+**The credential store meets the encrypted-at-rest requirement.** It uses
+`CryptProtectData` with optional entropy and `CRYPTPROTECT_UI_FORBIDDEN`, and
+`SecureZeroMemory` over the decrypted DPAPI buffer before it is released. The
+comment at [credential_store.cpp:15](../src/win/credential_store.cpp) overstates
+what the entropy buys: it is a constant embedded in the binary, so it does not
+prevent another same-user process that knows the constant from calling DPAPI.
+That is a threat-model/documentation correction, not a failure of the stated
+at-rest requirement. Microsoft's API contract says that the same optional
+entropy must be supplied to decrypt; the point here is that this entropy is
+publicly recoverable rather than independently secret.
+
+**No credentials reach the log through HTTP error construction.** `util::http::get`
+composes its error strings from the cracked host and the status code, never the
+URL, which is what keeps the authenticated `player_api.php` query out of
+`coax.log`. Finding 8 is a separate load-log path and is not contradicted by
+this result.
+
+Five claims raised during the audit did **not** survive checking, recorded here
+so they are not raised again:
+
+- **A resize drag can overflow mpv's event queue and force a player
+  recreation.** It cannot, by the mechanism proposed. Property changes are
+  coalesced — at most one pending event per observed property, delivered only
+  once the queue drains — and async command replies hold reserved slots, so
+  neither can fill the 1000-entry ring. Overflow would need a burst of
+  uncoalesced `MPV_EVENT_LOG_MESSAGE` at warn level. Finding 3 stands on
+  supervisor starvation and elapsed wall-clock budget instead; its exact
+  post-drag transition is state-dependent as that finding now records.
+- **`transport_log_classifier` and `recovery_effect_executor` are untested.**
+  Both are tested, in the suite that never runs — test cases at lines 233, 270,
+  291, 309 and 363 of `test/player/player_event_adapter_tests.cpp`. The
+  `RecoveryExecutor` struct-of-functions seam is used by two of them.
+- **`App` holds `client_` and `credentials_` redundantly.** It does not.
+  `credentials_` carries the portal across the asynchronous gap between
+  `begin_connect` (line 375) and `finish_connect` (line 422), where `client_`
+  does not yet exist. Only the `Client::credentials()` *accessor* is dead, which
+  is finding 13.
+- **The direct-media argument conversion writes one byte beyond its string.**
+  The first `WideCharToMultiByte` result includes the null terminator and the
+  string's logical size does not, which makes the second call's `size` capacity
+  look one byte too large. `std::basic_string` nevertheless guarantees the
+  null element at `data()[size()]`, and this conversion writes that element back
+  as null. It is a brittle-looking contract worth simplifying when the path is
+  touched, but it is not an out-of-bounds write.
+- **A provider error body could carry credentials into the log via
+  nlohmann's `what()`.** The `last read` field is a few characters of context,
+  not a window over the input, and the URL is never part of the parsed body in
+  any case.
+
+One earlier finding — `.direnv/` untracked and unignored — was fixed by
+`f8a77d8` before this document was written.
