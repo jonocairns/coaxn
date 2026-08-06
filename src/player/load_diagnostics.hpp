@@ -33,7 +33,6 @@ struct Diagnostics {
 
     bool core_idle = false;
     bool paused_for_cache = false;
-    double cache_seconds = 0.0;
 
     // Presentation attachment, reported as separate readings rather than one
     // word. "attached" alone cannot distinguish a live attachment from a stale
@@ -67,6 +66,11 @@ struct Diagnostics {
     int buffer_commands_rejected = 0;
 
     std::optional<double> av_sync_seconds;
+    // mpv documents demuxer-cache-duration as an approximate guess that is
+    // often unavailable even while data is buffered, so the absence is carried
+    // rather than flattened to a number. A reader that wants a double has to
+    // decide what an absent reading means for it; there is deliberately no
+    // zero here to fall into, because zero is also a real measurement.
     std::optional<double> cache_duration_seconds;
     std::optional<double> cache_end_seconds;
     std::optional<double> input_rate_bytes_per_second;

@@ -74,6 +74,7 @@ if(BUILD_TESTING)
     # cases predate the target split and passed the whole time -- they were
     # simply linked into a Windows executable no runner could execute.
     add_executable(coax_player_core_tests
+        test/player/live_sync_tests.cpp
         test/player/player_core_tests.cpp)
     target_link_libraries(coax_player_core_tests PRIVATE
         Catch2::Catch2WithMain coax_player_core)

@@ -18,7 +18,6 @@ void reset_load_observations(Diagnostics& diagnostics) {
     diagnostics.video_height = 0;
     diagnostics.core_idle = false;
     diagnostics.paused_for_cache = false;
-    diagnostics.cache_seconds = 0.0;
     diagnostics.last_load_seconds = 0.0;
     diagnostics.health_discontinuities = 0;
     diagnostics.buffer_phase = core::BufferPhase::Zap;

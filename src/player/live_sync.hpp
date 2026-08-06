@@ -58,6 +58,14 @@ public:
     // interval has not elapsed or the speed is unchanged.
     std::optional<double> update(double buffered_seconds, double now_seconds);
 
+    // Fails safe when the caller has no valid measurement to control on.
+    // Returns 1.0 when a correction is currently installed, so the caller can
+    // take it back off; nullopt when playback is already at 1.0 and nothing
+    // needs writing. Without this the controller's own record of the installed
+    // speed would drift away from mpv's, and the next genuine update could be
+    // suppressed as a duplicate of a speed that is no longer running.
+    std::optional<double> hold_unity_speed();
+
     [[nodiscard]] double target_offset_seconds() const { return target_offset_seconds_; }
     [[nodiscard]] double speed() const { return speed_; }
 

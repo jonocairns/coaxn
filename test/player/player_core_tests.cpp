@@ -200,7 +200,6 @@ TEST_CASE("new loads clear observations but retain lifetime diagnostics") {
     diagnostics.video_height = 1080;
     diagnostics.core_idle = true;
     diagnostics.paused_for_cache = true;
-    diagnostics.cache_seconds = 9.0;
     diagnostics.playback_time_seconds = 45.0;
     diagnostics.cache_end_seconds = 54.0;
     diagnostics.cache_duration_seconds = 9.0;

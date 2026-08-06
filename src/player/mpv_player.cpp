@@ -506,10 +506,7 @@ void MpvPlayer::handle_property(std::uint64_t id, const mpv_event_property& prop
         case kPausedForCache:
             diagnostics_.paused_for_cache = property.format == MPV_FORMAT_FLAG && property.data &&
                 *static_cast<int*>(property.data) != 0; break;
-        case kCacheDuration:
-            diagnostics_.cache_duration_seconds = optional_double();
-            diagnostics_.cache_seconds = diagnostics_.cache_duration_seconds.value_or(0.0);
-            break;
+        case kCacheDuration: diagnostics_.cache_duration_seconds = optional_double(); break;
         case kCacheEnd: diagnostics_.cache_end_seconds = optional_double(); break;
         case kPlaybackTime: diagnostics_.playback_time_seconds = optional_double(); break;
         case kAvSync: diagnostics_.av_sync_seconds = optional_double(); break;

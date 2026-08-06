@@ -24,6 +24,12 @@ void LiveSync::notify_rebuffer() {
     has_updated_ = false;
 }
 
+std::optional<double> LiveSync::hold_unity_speed() {
+    if (speed_ == 1.0) return std::nullopt;
+    speed_ = 1.0;
+    return speed_;
+}
+
 std::optional<double> LiveSync::update(double buffered_seconds, double now_seconds) {
     if (has_updated_ && now_seconds - last_update_at_ < config_.min_update_interval_seconds) {
         return std::nullopt;

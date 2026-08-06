@@ -436,8 +436,8 @@ void App::play(const core::Channel& channel) {
 
     // Latency learned on one channel says nothing about the next.
     live_sync_.reset();
-    was_paused_for_cache_ = false;
-    rebuffer_count_       = 0;
+    live_sync_gate_.reset();
+    rebuffer_count_ = 0;
     player_.set_speed(1.0);
 
     generation_ = core::Generation{generation_.value() + 1};
@@ -623,7 +623,7 @@ void App::execute_supervisor_effect(const core::SupervisorEffect& effect) {
                 // The new backend starts at 1.0x. Reset the controller too so
                 // its cached old speed cannot suppress the write the new mpv needs.
                 live_sync_.reset();
-                was_paused_for_cache_ = false;
+                live_sync_gate_.reset();
                 rebuffer_count_ = 0;
                 player_.set_speed(1.0);
                 player_.set_volume(volume_);
@@ -658,29 +658,31 @@ void App::on_supervisor_state_changed(const core::SupervisorState& state) {
 void App::update_live_sync() {
     const auto& diagnostics = player_.diagnostics();
 
-    // Only the transition into a stall counts as a rebuffer; the flag stays
-    // true for its whole duration, so an edge test avoids conceding latency
-    // once per frame.
-    if (diagnostics.paused_for_cache && !was_paused_for_cache_) {
+    const auto step = live_sync_gate_.observe(
+        {.buffered_seconds = diagnostics.cache_duration_seconds,
+         .paused_for_cache = diagnostics.paused_for_cache,
+         .core_idle        = diagnostics.core_idle,
+         .first_frame_seen = first_frame_seen_});
+
+    if (step.rebuffered) {
         ++rebuffer_count_;
         live_sync_.notify_rebuffer();
         log::info("Rebuffer #{}; live target now {:.1f}s",
                   rebuffer_count_, live_sync_.target_offset_seconds());
     }
-    was_paused_for_cache_ = diagnostics.paused_for_cache;
 
-    // Holding the controller at 1.0 while stalled stops it from reacting to a
-    // cache that is draining rather than mistimed.
-    if (diagnostics.paused_for_cache || diagnostics.core_idle) {
-        return;
-    }
-
-    const auto now = std::chrono::steady_clock::now();
-    const double now_seconds =
-        std::chrono::duration<double>(now.time_since_epoch()).count();
-
-    if (const auto speed = live_sync_.update(diagnostics.cache_seconds, now_seconds)) {
-        player_.set_speed(*speed);
+    if (step.hold_unity_speed) {
+        if (const auto speed = live_sync_.hold_unity_speed()) {
+            log::warn("Buffered duration unavailable; holding playback at {:.2f}x", *speed);
+            player_.set_speed(*speed);
+        }
+    } else if (step.control_input) {
+        const auto now = std::chrono::steady_clock::now();
+        const double now_seconds =
+            std::chrono::duration<double>(now.time_since_epoch()).count();
+        if (const auto speed = live_sync_.update(*step.control_input, now_seconds)) {
+            player_.set_speed(*speed);
+        }
     }
 
     player_.set_live_sync_state(live_sync_.target_offset_seconds(), rebuffer_count_);
@@ -1438,7 +1440,13 @@ void App::draw_diagnostics() {
     theme::separator_label("STREAM");
     field("Core idle", d.core_idle ? "yes" : "no");
     field("Paused for cache", d.paused_for_cache ? "yes" : "no");
-    field("Demuxer cache", std::format("{:.1f}s", d.cache_seconds));
+    // Distinguished from a genuine 0.0s: mpv often cannot report this even
+    // while data is buffered, and the controller holds 1.0x when it cannot.
+    if (d.cache_duration_seconds) {
+        field("Demuxer cache", std::format("{:.1f}s", *d.cache_duration_seconds));
+    } else {
+        field("Demuxer cache", "unavailable", true);
+    }
     field("Buffer phase",
           std::format("{} (target {:.0f}s)",
                       d.buffer_phase == core::BufferPhase::Zap ? "zap" : "steady",
