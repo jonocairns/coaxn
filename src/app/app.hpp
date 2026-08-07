@@ -59,6 +59,7 @@ private:
     void begin_update_check();
     void finish_update_check();
     void begin_health_load();
+    void dispatch_cache_state();
     void process_player_events();
     void flush_pending_stream_ends();
     void sample_playback_health();

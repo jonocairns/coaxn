@@ -410,9 +410,11 @@ player::LiveSyncStep frame(player::LiveSyncTurn& turn, player::LiveSync& sync,
 }
 
 // The opening sequence the 2026-08-08 run produced against a live HLS source,
-// as the application saw it: seven seconds of fill, then one turn carrying both
-// the first frame and a momentary unpause, then the fill resuming. Every turn
-// here precedes the supervisor's steady confirmation.
+// as the application saw it: a fill, then one turn carrying both the first frame
+// and a momentary unpause, then the fill resuming. Every turn here precedes the
+// supervisor's steady confirmation. The fill is compressed to two seconds
+// because these cases assert on the gate rather than on any deadline; the
+// AppLoop case below runs it at the observed length against a real supervisor.
 void open_channel(player::LiveSyncTurn& turn, player::LiveSync& sync, double start) {
     frame(turn, sync, {}, opening(), start);
     for (int t = 1; t < 20; ++t) frame(turn, sync, {}, filling(), start + t * 0.1);
@@ -521,9 +523,9 @@ public:
 
 // App::run()'s frame loop, reduced to the parts that decide whether a turn may
 // concede latency, in the order run() uses them: the player-event drain, the
-// supervisor poll, the interval health sample that dispatches cache state, and
-// the live-sync update. The poll deliberately precedes the sample, as it does
-// in the application.
+// cache-state dispatch, the supervisor poll, and the live-sync update. The
+// dispatch precedes the poll, as it does in the application, so a deadline
+// evaluated this turn sees this turn's cache state.
 struct AppLoop {
     FrameClock                clock;
     player::LiveSyncTurn      turn;
@@ -531,7 +533,6 @@ struct AppLoop {
     core::PlaybackSupervisor  supervisor;
     core::Generation          generation{1};
     std::optional<bool>       last_cache_state_dispatched;
-    core::TimePoint           next_health_sample{};
     int                       rebuffers = 0;
 
     AppLoop()
@@ -553,7 +554,6 @@ struct AppLoop {
                                                    core::RecoveryTransport::MpegTs});
         turn.begin_load();
         last_cache_state_dispatched.reset();
-        next_health_sample = clock.current + core::kDefaultHealthPolicy.sample_interval;
     }
 
     void tick(double at, const player::Diagnostics& diagnostics, bool frame_started = false) {
@@ -563,17 +563,15 @@ struct AppLoop {
             turn.observe_events(drain(first_frame(generation)), generation);
             supervisor.dispatch(core::FirstFrame{generation});
         }
-        supervisor.poll();
 
-        if (clock.current >= next_health_sample) {
-            next_health_sample = clock.current + core::kDefaultHealthPolicy.sample_interval;
-            if (!last_cache_state_dispatched ||
-                *last_cache_state_dispatched != diagnostics.paused_for_cache) {
-                last_cache_state_dispatched = diagnostics.paused_for_cache;
-                supervisor.dispatch(core::CacheState{generation,
-                                                     diagnostics.paused_for_cache});
-            }
+        // App::dispatch_cache_state().
+        if (!last_cache_state_dispatched ||
+            *last_cache_state_dispatched != diagnostics.paused_for_cache) {
+            last_cache_state_dispatched = diagnostics.paused_for_cache;
+            supervisor.dispatch(core::CacheState{generation, diagnostics.paused_for_cache});
         }
+
+        supervisor.poll();
 
         const auto step = turn.observe(diagnostics);
         if (step.rebuffered) {
@@ -616,17 +614,42 @@ TEST_CASE("an opening fill that outlasts the steady window still concedes nothin
     CHECK(app.rebuffers == 0);
     CHECK(app.sync.target_offset_seconds() == Approx(4.0));
 
-    // Four clean seconds are not five. Confirming here would charge the tail of
-    // the very fill the window was meant to sit out.
-    for (double t = 15.0; t < 19.0; t += 0.5) app.tick(t, unpaused(4.0));
+    // Every edge of that oscillation restarts the window, so the count runs
+    // from the last one at 15.0 rather than from the first clearing at 14.0.
+    // Sampling cache state on the health interval could not see the 1ms blips
+    // at all, and would have confirmed a second early.
+    for (double t = 15.0; t < 19.5; t += 0.5) app.tick(t, unpaused(4.0));
     CHECK_FALSE(app.turn.playback_established());
 
-    // Five seconds after the fill cleared, the load is confirmed.
-    app.tick(19.0, unpaused(4.0));
+    app.tick(20.0, unpaused(4.0));
     REQUIRE(app.turn.playback_established());
 
     // And only now does a stall mean the viewer lost picture.
-    app.tick(19.5, filling());
+    app.tick(20.5, filling());
     CHECK(app.rebuffers == 1);
     CHECK(app.sync.target_offset_seconds() == Approx(4.5));
+}
+
+TEST_CASE("a fill entered just before the deadline is not outrun by the poll") {
+    AppLoop app;
+    app.play();
+
+    // A clean load: the picture comes up and playback runs.
+    app.tick(0.5, unpaused(std::nullopt), /*frame_started=*/true);
+    for (double t = 1.0; t < 5.4; t += 0.1) app.tick(t, unpaused(4.0));
+    CHECK_FALSE(app.turn.playback_established());
+
+    // The cache re-enters a fill one frame before the window would expire.
+    // Publishing cache state on the health-sample interval instead of every
+    // turn leaves the supervisor holding a stale "playing" reading here, so the
+    // poll confirms Steady mid-fill and arms the gate for the rest of it.
+    app.tick(5.49, filling());
+    app.tick(5.5, filling());
+    CHECK_FALSE(app.turn.playback_established());
+
+    // Which means the tail of that fill still concedes nothing.
+    app.tick(6.0, unpaused(0.7));
+    app.tick(6.01, filling());
+    CHECK(app.rebuffers == 0);
+    CHECK(app.sync.target_offset_seconds() == Approx(4.0));
 }

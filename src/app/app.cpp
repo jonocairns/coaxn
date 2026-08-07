@@ -580,6 +580,27 @@ void App::flush_pending_stream_ends() {
     }
 }
 
+void App::dispatch_cache_state() {
+    // Deliberately every turn and not on the health-sample interval. This is a
+    // change detector, not a measurement, and the supervisor's steady deadline
+    // reads the value it publishes. Sampling it at 500ms let the deadline be
+    // evaluated against a stale "playing" reading: a fill entered just after a
+    // sample would confirm Steady mid-fill, arm live-sync, clear the attempt
+    // count and apply steady buffer targets, and the rest of that fill's
+    // oscillation would then be charged as a rebuffer.
+    //
+    // Diagnostics only move in player_.pump() at the top of the turn, so the
+    // supervisor and the live-sync gate now read the same pause state within a
+    // turn rather than readings up to a sample apart.
+    if (!player_.current_target()) return;
+    if (supervisor_.current().name == core::SupervisorStateName::Idle ||
+        supervisor_.current().name == core::SupervisorStateName::Failed) return;
+    const bool paused = player_.diagnostics().paused_for_cache;
+    if (last_cache_state_dispatched_ && *last_cache_state_dispatched_ == paused) return;
+    last_cache_state_dispatched_ = paused;
+    supervisor_.dispatch(core::CacheState{player_.current_target()->generation, paused});
+}
+
 void App::sample_playback_health() {
     if (!playback_health_ || !player_.current_target()) return;
     if (supervisor_.current().name == core::SupervisorStateName::Idle ||
@@ -602,11 +623,6 @@ void App::sample_playback_health() {
     player_.set_health_discontinuities(fold.state.discontinuities);
 
     const auto generation = player_.current_target()->generation;
-    if (!last_cache_state_dispatched_ ||
-        *last_cache_state_dispatched_ != diagnostics.paused_for_cache) {
-        last_cache_state_dispatched_ = diagnostics.paused_for_cache;
-        supervisor_.dispatch(core::CacheState{generation, diagnostics.paused_for_cache});
-    }
     if (fold.discontinuity) {
         log::warn("Timeline discontinuity #{} generation {} (classified by progress deviation)",
                   fold.state.discontinuities, generation.value());
@@ -1619,6 +1635,9 @@ int App::run() {
         // already dispatched its loss and the recovery deadline it arms is
         // measured from now rather than from a frame later.
         service_presentation();
+        // Before the poll, so a deadline evaluated this turn sees this turn's
+        // cache state rather than the last sampled one.
+        dispatch_cache_state();
         supervisor_.poll();
         sample_playback_health();
 

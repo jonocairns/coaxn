@@ -334,9 +334,16 @@ repeated observation of playing is not an edge and restarts nothing, or a load
 reporting steady good news could never confirm.
 
 Confirmation therefore means five seconds of continuously clean playback, timed
-from the last observed cache-state edge, at the health sampler's 500ms
-resolution. All of this was found because live-sync arming was hung off `Steady`
-and inherited the bug; `apply_buffer_phase(Steady)` was also switching to steady
+from the last observed cache-state edge. Cache state is published to the
+supervisor every turn rather than on the health-sample interval, because the
+deadline is evaluated against it: at 500ms resolution a fill entered just after
+a sample was invisible to the poll, which confirmed `Steady` mid-fill on a stale
+"playing" reading, and brief oscillations were never seen at all. `App` now
+dispatches the change immediately before the poll, so the supervisor and the
+live-sync gate read the same pause state within a turn.
+
+All of this was found because live-sync arming was hung off `Steady` and
+inherited the bug; `apply_buffer_phase(Steady)` was also switching to steady
 buffer targets mid-fill.
 
 The consequence is that a load which never manages five seconds without a fill
@@ -569,7 +576,7 @@ event correlation and buffer-command gate. They did not cover the `LiveSync`
 control law or `App::update_live_sync`, which is where the highest-impact gaps
 sat and why both original P1 defects survived that long.
 
-The native suite now runs 128 cases: the 66 core cases, the 15 that were
+The native suite now runs 129 cases: the 66 core cases, the 15 that were
 previously built as a Windows binary and never executed, 23 over the control
 law, its gate and the application turn that feeds them, one over a late
 first-start edge from a superseded load, and the rest added since. Both
@@ -656,17 +663,19 @@ the observed TS replay and select a safe threshold.
 
 ## Trade-offs
 
-**Latency for stability.** The intended policy is that each true underrun after
-established playback concedes 500ms, while opening fill and recovery fill do
-not. The current application wiring violates that policy: 15 of 18 requested
-loads in the captured session charged a concession at first frame, and
-generation 17's recovery reopen did the same. A channel therefore commonly
-starts at 4.5 seconds rather than the configured 4.0-second target, and the
-target only ratchets upward. On a persistently bad channel, genuine concessions
-still trade live proximity for stability, up to the 30-second ceiling. For live
-sport this is a real cost — a phone notification can arrive before the picture.
-Correcting the false concessions is P1; deciding whether genuine concessions
-should decay is a separate policy question.
+**Latency for stability.** Each true underrun after established playback
+concedes 500ms, while opening fill and recovery fill do not. Establishing that
+distinction took three attempts, because the application wiring defeated the
+first two: 15 of 18 requested loads in the 2026-08-07 session charged a
+concession at first frame, generation 17's recovery reopen did the same, and a
+2026-08-08 run reproduced it with a first-frame guard shipped. A channel now
+holds the configured 4.0-second target through its opening fill. The target
+still only ratchets upward, so on a persistently bad channel genuine concessions
+trade live proximity for stability up to the 30-second ceiling. For live sport
+that is a real cost — a phone notification can arrive before the picture.
+Whether genuine concessions should decay remains an open policy question, as
+does the fact that a load which never plays cleanly for five seconds never
+concedes at all.
 
 **Buffer memory for absorption.** The 64 MiB cache ceiling is a ceiling, not an
 allocation, and remains a tuning value rather than a measured optimum.
@@ -715,7 +724,7 @@ project exists.
 | Risk | Mitigation |
 |---|---|
 | Buffered duration is a poor or unavailable proxy for live offset | Diagnostics state the offset is estimated and report the property as unavailable rather than `0.0s`; the controller holds `1.0x` whenever it is unavailable |
-| Initial or recovery fill is mistaken for a rebuffer | Keep learning disarmed until the application has observed a post-first-frame non-paused state; cover the coincident first-frame and pause edge through application-level sequencing tests |
+| Initial or recovery fill is mistaken for a rebuffer | Keep learning disarmed until the supervisor confirms the load steady, cleared per load by `begin_health_load()`. A first frame, and a post-first-frame non-paused observation, were both tried as the arming signal and both were falsified against the runtime — see the live-sync correctness gaps. Cover the sequencing at application level, driving the real supervisor rather than setting the arming flag directly |
 | Speed changes become audible | Pitch correction enabled and range capped at ±3%, matching ExoPlayer's defaults; representative listening tests remain outstanding |
 | Reconnect options silently rejected by a future libmpv | The wrapper logs every rejected option at startup |
 | Controller fights a stall instead of riding it out | Updates are suspended during `paused-for-cache` or `core-idle`; required fix is to actively install `1.0x` on entry and recompute on exit |
