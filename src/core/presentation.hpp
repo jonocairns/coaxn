@@ -123,6 +123,13 @@ public:
     void succeeded();
     void failed(TimePoint now);
 
+    // When poll() will next decide something other than Hold, or absent when it
+    // never will without a fresh request(). This is what a frame loop with no
+    // present to pace it has to wait on: the retry delay is the only thing
+    // between a failed rebuild and the next attempt, so sleeping past it makes
+    // recovery late, and not sleeping at all makes it a busy-wait.
+    [[nodiscard]] std::optional<TimePoint> next_decision_at(TimePoint now) const;
+
     [[nodiscard]] bool outstanding() const { return outstanding_; }
     [[nodiscard]] bool exhausted() const { return exhausted_; }
     [[nodiscard]] std::size_t attempts() const { return attempts_; }
@@ -135,5 +142,54 @@ private:
     bool outstanding_ = false;
     bool exhausted_ = false;
 };
+
+// What the presentation surface is doing, as far as the frame loop is
+// concerned. The distinction the budget alone cannot make is between the two
+// unusable phases: a rebuild that has not happened yet will happen, and a
+// budget that has been given up on will not. Collapsing them into one "not
+// ready" flag is what leaves a loop waiting forever for an attempt that is
+// never coming.
+enum class PresentationPhase {
+    // A frame can be drawn, and the present that ends it paces the loop.
+    Ready,
+    // Between a teardown and the attempt that will restore it. Nothing may
+    // draw, so nothing presents, so the loop has no throttle of its own.
+    Rebuilding,
+    // Terminal. The rebuild budget is spent and no further attempt will be
+    // made, so there is no presentation deadline left to wake up for.
+    Failed,
+};
+
+const char* to_string(PresentationPhase value);
+
+// Derived rather than assigned, from the two facts the host already owns: a
+// usable surface is always Ready, whatever the budget has been through, so a
+// stale flag cannot stop the application drawing.
+[[nodiscard]] constexpr PresentationPhase decide_presentation_phase(bool surface_ready,
+                                                                   bool rebuild_exhausted) {
+    if (surface_ready) return PresentationPhase::Ready;
+    return rebuild_exhausted ? PresentationPhase::Failed : PresentationPhase::Rebuilding;
+}
+
+// A ceiling on how long the loop may sleep, so the deadlines this decision does
+// not model — health sampling, the pending stream-end window, a worker thread
+// finishing — still get serviced on a predictable cadence rather than waiting
+// on a message that may never arrive. Set to the shortest of them; nothing in
+// the frame loop schedules anything sooner than the 50 ms stream-end window.
+inline constexpr Duration kFrameWaitCeiling = milliseconds(50);
+
+// How long the frame loop may block before it has to run again. Absent means it
+// must not block at all: a present is pending and its vsync wait is the
+// throttle. A zero duration means something is already due.
+//
+// The presentation and supervisor deadlines are passed in rather than assumed,
+// because being late for either is the cost of fixing the spin: an adapter that
+// comes back is not usable until the rebuild attempt that is waiting on the
+// retry delay actually runs.
+[[nodiscard]] std::optional<Duration> decide_frame_wait(
+    PresentationPhase phase, TimePoint now,
+    std::optional<TimePoint> presentation_deadline,
+    std::optional<TimePoint> supervisor_deadline,
+    Duration ceiling = kFrameWaitCeiling);
 
 }  // namespace coax::core

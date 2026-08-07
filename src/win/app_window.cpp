@@ -292,7 +292,22 @@ void AppWindow::set_fullscreen(bool fullscreen) {
     fullscreen_ = fullscreen;
 }
 
-bool AppWindow::pump_messages() {
+bool AppWindow::pump_messages(DWORD timeout_ms) {
+    if (timeout_ms != 0 && running_) {
+        // MWMO_INPUTAVAILABLE is required here, not defensive. PeekMessage
+        // marks everything it sees as old, and Microsoft documents that without
+        // this flag "the existing unread input (received prior to the last time
+        // the thread checked the queue) is ignored" — so a wait entered after
+        // the drain below would sleep through anything the drain left behind.
+        // The flag makes the wait return whenever input exists at all.
+        //
+        // Zero handles is the documented "waits only for an input event" form.
+        // The window procedure validates every WM_PAINT it is given, so a
+        // pending paint cannot hold QS_PAINT set and turn this back into the
+        // spin it exists to remove.
+        MsgWaitForMultipleObjectsEx(0, nullptr, timeout_ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    }
+
     MSG message;
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
         if (message.message == WM_QUIT) {

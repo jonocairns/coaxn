@@ -11,16 +11,21 @@ two, so the line references hold.
 
 Findings 1 and the two live-sync defects it enabled testing for have since been
 fixed, at `41843f9` and `5388982`; findings 2 and 8 at `dcba234` and `8deb198`;
-and the verification half of the P0 at `e8dc558`. Those entries are kept rather
-than deleted, marked with the commit that closed them, so the reasoning stays
-readable and the same ground is not re-audited. Every other finding is still
-open.
+findings 9 and 7 at `840f55a` and `5a691cc`; and the verification half of the P0
+at `e8dc558`. Those entries are kept rather than deleted, marked with the commit
+that closed them, so the reasoning stays readable and the same ground is not
+re-audited. Every other finding is still open.
 
 Line references for the still-open findings are as of `f8a77d8` unless a fix
 since moved them, in which case that fix refreshed them: finding 10's
 `log.cpp:22` is line 28 after finding 2's extraction, the function unchanged.
 Finding 8's `mpv_player.cpp:189` was likewise correct when written and is line
 180 today, moved by `5388982` rather than by anything in that finding.
+`5a691cc` refreshed four more that its own edits to `app.cpp` and
+`app_window.hpp` moved — finding 4's file length and `process_player_events`,
+finding 6's `filtered()` call site, finding 13's `on_close`, and the two connect
+functions under [Checked and clean](#checked-and-clean). Three of those were
+already stale before it touched them; none of the underlying claims changed.
 
 The detailed findings retain their discovery order. The priority table below is
 the execution order: it balances impact, likelihood and cost rather than treating
@@ -81,10 +86,10 @@ not.
 |---|---|---|
 | P0 — release blocker, already tracked | Satisfy the libmpv/FFmpeg redistribution obligations ([PRD.md §8.2](../PRD.md#82-runtime-provenance-and-licensing)) | The shipped runtime is still not legally complete: mpv's and FFmpeg's licence terms and the corresponding source offer are not distributed with it. This is not newly discovered by this audit, so it is cross-referenced rather than counted as another finding. The other half of the row — content verification of the fetched archive — landed at `e8dc558`: `scripts/fetch-libmpv.sh` now checks a pinned SHA-256 between the download and the unpack, refuses to unpack a mismatch, and records the verified digest in `PINNED.txt`. An already-unpacked tree's bytes are deliberately not re-verified, which the script states rather than implies; its identity is, so a tree that does not match the current pin, or is missing a file the build or package consumes, falls through to a fresh verified fetch instead of being trusted. |
 | ~~P1~~ Fixed at `dcba234` and `8deb198` | ~~Fix the log snapshot race (finding 2) and stop logging arbitrary authenticated URLs (finding 8)~~ | The ring is a portable class in `coax_core` handing out snapshots, and every playback target is sanitized before logging regardless of shape. Native CTest went from 98 cases to 111. |
-| P1 | Make presentation failure terminal without becoming an infinite spin, and propagate render-target recreation failure (findings 7 and 9) | A device-loss path can consume a core indefinitely or leave the application blank with no recovery signal. |
+| ~~P1~~ Fixed at `840f55a` and `5a691cc` | ~~Make presentation failure terminal without becoming an infinite spin, and propagate render-target recreation failure (findings 7 and 9)~~ | A resize that loses the render target now classifies the HRESULT and enters the same bounded rebuild, and the frame loop waits on its next deadline instead of spinning: measured at 96.8% of a core before and 0.1% after, in both the rebuilding and the terminal state. Native CTest went from 111 cases to 118. |
 | ~~P1~~ Fixed at `5388982` | ~~Run the already-portable player suite in native CI and add `LiveSync` coverage (finding 1)~~ | The target split landed and the suite runs on every push. Native CTest went from 66 cases to 98. |
 | P2 | Put `ChannelIndex` in the portable target and cache its derived view (findings 5 and 6) | This restores the documented boundary and removes full-catalogue work at frame rate. |
-| P2 | Move the complete service tick out of `run()` and give deadlines a reliable wakeup (finding 3) | Resize/move modal loops currently starve recovery and health work. |
+| P2 | Move the complete service tick out of `run()` and give deadlines a wakeup that survives a modal loop (finding 3) | Resize/move modal loops currently starve recovery and health work. `5a691cc` gave the frame loop a deadline-driven wait, but that wait does not run while Windows owns the thread, so this needs the hoisted tick and a `WM_TIMER` regardless. |
 | P2 | Extract provider parsing/normalisation, then split playback orchestration from `App` behind a test seam (findings 11 and 4) | These are the largest remaining bodies of Coax-owned protocol logic with no runnable tests. |
 | P2/P3 | Correct HTTP read failure and the installed log location; remove dead symbols (findings 10, 12 and 13) | These are real but narrower operational or correctness failures. |
 
@@ -214,6 +219,15 @@ if the pointer stops while Windows still owns the modal loop, neither is
 guaranteed to arrive at the supervisor deadline. A timer or message-wait timeout
 should provide the wakeup.
 
+Half of that wakeup now exists, and it is worth being precise about which half.
+`5a691cc` gave the frame loop a deadline-driven wait for finding 7's sake, and
+`core::decide_frame_wait` already takes the supervisor's next deadline as one of
+its inputs. What it does not do is run inside the modal loop, which is the whole
+of this finding: nothing in that commit hoists the tick, and between
+`WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE` the application's pump — wait and all —
+is not running. A `WM_TIMER` armed for the same deadline is the remaining piece,
+and it wants the extracted `service()` to have something to call.
+
 Mpv's event queue is **not** a serious risk here, for the record: property
 changes are coalesced (see [Checked and clean](#checked-and-clean)), so the
 starved `player_.pump()` is not the problem. The starved `supervisor_.poll()`
@@ -221,7 +235,7 @@ is.
 
 ### 4. [P2] `App` is four objects
 
-[app.cpp](../src/app/app.cpp) is 1639 lines and `App` carries around fifty
+[app.cpp](../src/app/app.cpp) is 1685 lines and `App` carries around fifty
 members. It is at once the ImGui view (roughly 800 lines across `draw_login`,
 `draw_browser`, `draw_status_bar` and `draw_diagnostics`), the playback
 orchestrator, the presentation-lifetime manager, and the session and
@@ -233,7 +247,7 @@ protocol state.
 Size is not the complaint. The complaint is that everything *below* `App` is
 testable and mostly tested, while `App` holds several hundred lines of
 orchestration that is not UI and cannot be reached by a test.
-`process_player_events` ([app.cpp:468](../src/app/app.cpp)) contains real
+`process_player_events` ([app.cpp:485](../src/app/app.cpp)) contains real
 protocol logic: the exact-failure suppression rule and the 50 ms pending
 stream-end window together decide whether one provider failure costs one
 recovery attempt or two. That is supervisor-grade reasoning living in the view
@@ -263,7 +277,7 @@ being in the target. Two lines of CMake and a test file.
 ### 6. [P2] `filtered()` rebuilds the catalogue view every frame
 
 `draw_browser` calls `channels_.filtered(search_)` at
-[app.cpp:898](../src/app/app.cpp), guarded only by `show_browser_` and the
+[app.cpp:917](../src/app/app.cpp), guarded only by `show_browser_` and the
 browsing stage. There is exactly one call site and it is unconditional per
 frame: lowercase the query, build an `unordered_map` over every category, push a
 pointer per surviving channel, then `erase_if` the empty groups.
@@ -276,7 +290,7 @@ against the query string and invalidate in `reset()`. The cost is established
 from the call graph and algorithm; its precise frame-time impact has not been
 benchmarked.
 
-### 7. [P1] A presentation rebuild can busy-wait forever
+### 7. [Fixed at `5a691cc`] A presentation rebuild can busy-wait forever
 
 While a rebuild is outstanding, `presentation_ready_` is false, so `draw_frame`
 returns before reaching `Present`. `PresentationRebuildBudget::poll` returns
@@ -299,6 +313,55 @@ Use `MsgWaitForMultipleObjects` (or an equivalent event-loop wait) with the next
 presentation or supervisor deadline as its timeout. Exhaustion also needs an
 explicit terminal presentation state that waits for messages without pretending
 another rebuild is pending.
+
+**What landed.** Both, split the way finding 2 was and for the same reason: the
+message loop is Windows-only and CI cannot run it, so as much of the decision as
+possible is portable and tested, and the platform sink is kept small enough to
+read.
+
+`coax_core` gains three things.
+[`PresentationPhase`](../src/core/presentation.hpp) names what the budget alone
+could not — `Rebuilding` will get another attempt, `Failed` never will — and
+`decide_presentation_phase` derives it from the surface's usability and the
+budget's exhaustion rather than tracking it, so a usable surface is `Ready`
+whatever the budget has been through.
+`PresentationRebuildBudget::next_decision_at` says when `poll` will next decide
+something: the retry delay, or immediately when the ceiling is already reached
+and the next poll will report exhaustion whatever the clock says, or never once
+it is spent. `decide_frame_wait` turns the phase and the deadlines into how long
+the loop may block — nothing in `Ready`, where the vsync wait inside `Present`
+is the throttle, and otherwise the nearest of the presentation and supervisor
+deadlines. Seven test cases, and native CTest went from 111 to 118.
+
+The wait is ceilinged at 50 ms. That is not a fudge factor: it is the shortest
+deadline in the frame loop that this decision does not model — the pending
+stream-end window at [app.cpp:519](../src/app/app.cpp) — so nothing the loop
+schedules can be made more than one tick late by sleeping. Health sampling is
+500 ms and everything else is longer.
+
+On the Windows side `AppWindow::pump_messages` takes a timeout and waits with
+`MsgWaitForMultipleObjectsEx(0, nullptr, timeout, QS_ALLINPUT,
+MWMO_INPUTAVAILABLE)` before draining
+([app_window.cpp:308](../src/win/app_window.cpp)). `MWMO_INPUTAVAILABLE` is
+required rather than defensive: `PeekMessage` marks everything it sees as old,
+and without the flag Microsoft documents that *"the existing unread input
+(received prior to the last time the thread checked the queue) is ignored"* — so
+a wait entered right after a drain would sleep through whatever the drain left
+behind. Zero handles is the documented *"waits only for an input event"* form.
+The window procedure validates every `WM_PAINT` it is given, so a pending paint
+cannot hold `QS_PAINT` set and turn the wait straight back into the spin.
+
+One thing the finding did not say, found while fixing it. `presentation_ready_`
+is not sufficient to decide that a turn will present: `end_frame` also returns
+before `Present` on a lost device or a missing render target, either of which
+with the phase reading `Ready` is the same busy-wait by another route.
+`App::presentation_phase()` folds both in.
+
+The terminal state remains visually blank, and that is not fixed here. `Failed`
+sets a status the user cannot see, because the surface that would draw it is the
+one that is gone; surfacing it would need a device-independent paint path, which
+is a feature rather than a defect in this one. What the finding was about — the
+core — is now idle.
 
 ### 8. [Fixed at `8deb198`] The load log can persist an arbitrary authenticated URL
 
@@ -348,16 +411,18 @@ the guarantee it used to imply is now covered by cases that were run against the
 pre-fix implementation and fail there, on exactly the token-in-query and userinfo
 URLs.
 
-### 9. [P1] Resize can lose the UI render target without entering recovery
+### 9. [Fixed at `840f55a`] Resize can lose the UI render target without entering recovery
 
 After `ResizeBuffers` succeeds, `UiLayer::resize` calls
 `create_render_target()` and discards its Boolean result
-([ui_layer.cpp:176](../src/win/ui_layer.cpp)). `create_render_target` in turn
+(`ui_layer.cpp:176` as it then was; the discard is gone, so that line no longer
+resolves). `create_render_target` in turn
 collapses both `GetBuffer` and `CreateRenderTargetView` HRESULTs to `false`, so
 the caller cannot classify a device removal or report any other cause.
 
 If either operation fails, `render_target_` remains null. `UiLayer::end_frame`
-then returns before `Present` ([ui_layer.cpp:187](../src/win/ui_layer.cpp)), no
+then returns before `Present` (`ui_layer.cpp:187` then,
+[ui_layer.cpp:203](../src/win/ui_layer.cpp) now — that guard is unchanged), no
 device loss is latched, and `service_presentation` has nothing to rebuild. The
 application can remain blank and unthrottled indefinitely. A same-size retry is
 also short-circuited because `width_` and `height_` were updated before render
@@ -366,6 +431,31 @@ target creation.
 Preserve the HRESULT, feed device removal/reset through `note_result`, and make
 any other render-target failure visible to the presentation owner. A resize is
 complete only after both buffers and the new target exist.
+
+**What landed.** All three, in the order the finding gives them.
+`create_render_target` returns the failing HRESULT
+([ui_layer.cpp:148](../src/win/ui_layer.cpp)) and `resize` feeds it to
+`note_result` ([ui_layer.cpp:183](../src/win/ui_layer.cpp)), which is the
+existing classifier: it latches a loss for `DXGI_ERROR_DEVICE_REMOVED` and
+`DXGI_ERROR_DEVICE_RESET` and logs anything else with its code. `width_` and
+`height_` are recorded only once `ResizeBuffers` *and* the new target have both
+succeeded, so a same-size retry is no longer short-circuited by a size the
+surface never actually reached.
+
+That leaves the third part, and it needed something the finding did not name.
+The non-loss causes latch nothing by design, and no later call reports them
+either, because `end_frame` stops before submitting anything — so there is no
+edge to drive recovery from. `UiLayer::has_render_target()` exposes the fact
+directly and `App::service_presentation` polls it
+([app.cpp:267](../src/app/app.cpp)), requesting the same bounded rebuild the
+device-loss path uses, guarded to fire once per episode rather than once per
+frame.
+
+Nothing portable was added. The classification this routes into —
+`DeviceLossLatch` and `PresentationRebuildBudget` — is already in `coax_core`
+and already covered; what is new here is HRESULT handling and DXGI call ordering
+in a translation unit that builds only into `coax.exe`, which is why the two
+findings in this row split the way they did.
 
 ### 10. [P2] The installed application normally has no persistent session log
 
@@ -421,7 +511,7 @@ Verified at zero call sites across `src/` and `test/`:
 | `ChannelIndex::find` | [channel_index.hpp:32](../src/core/channel_index.hpp) |
 | `ChannelIndex::category_count` | [channel_index.hpp:35](../src/core/channel_index.hpp) |
 | `ChannelIndex::empty` | [channel_index.hpp:36](../src/core/channel_index.hpp) |
-| `AppWindow::on_close` and `close_handler_` | [app_window.hpp:34](../src/win/app_window.hpp) — never registered, so the guarded call site is dead |
+| `AppWindow::on_close` and `close_handler_` | [app_window.hpp:40](../src/win/app_window.hpp) — never registered, so the guarded call site is dead |
 | `xtream::Client::credentials` | [xtream_client.hpp:35](../src/xtream/xtream_client.hpp) |
 
 ## How the findings were checked
@@ -452,8 +542,26 @@ there is no longer any reason to run it by hand.
 discovered tests, and the mingw configuration completed a clean Windows
 cross-build at `f8a77d8`. These did not close finding 1 — the 15 player cases
 were absent from native CTest — but they established that the findings were not
-artifacts of an already-broken tree. The same command now runs 111
+artifacts of an already-broken tree. The same command now runs 118
 cases, and the cross-build still produces `coax.exe`.
+
+**The busy-wait measurement** deserves its own account, because what it
+simulated matters. The probe runs `App::run`'s loop shape — the same pump, the
+same `service_presentation` decisions, the same early return where `draw_frame`
+gives up — around the real `coax_core` budget, phase and wait, compiled from
+`src/core/presentation.cpp`. The retry delay and the attempt ceiling are the
+shipped ones. Two things stand in. The device loss is simulated: the rebuild is
+told to fail rather than an adapter actually being removed. And on the run that
+produced the numbers above, the wait is `poll()` on a pipe with a timeout rather
+than `MsgWaitForMultipleObjectsEx` — both a kernel wait for either an event or a
+deadline, neither consuming CPU while it waits.
+
+The pre-fix spin was reproduced once against the real Win32 pump, at 80.9% of a
+core and 52,074,569 turns in five seconds, before Windows Defender quarantined
+the unsigned probe binary. The post-fix wait was **not** measured on Windows —
+only cross-compiled and linked. What that leaves unverified is the behaviour of
+`MsgWaitForMultipleObjectsEx` specifically, not whether a deadline-driven wait
+removes the spin.
 
 **How the fixes above were checked**, since a fix asserted is worth no more than
 a finding asserted. Each has a negative control, because a check that cannot
@@ -464,6 +572,8 @@ fail proves nothing:
 | Archive verification (P0, first half) | One byte of the real 29 MiB archive flipped, the script run against it: exit 1, `third_party/mpv` never created | The same local-URL script over the unmodified bytes still unpacks, so the rejection is the digest and not the transport |
 | The log ring (finding 2) | ThreadSanitizer over two writers and a concurrent reader: clean | A reduction of the old unlocked-reference pattern, same tool, reports the data race |
 | Stream redaction (finding 8) | The new cases pass against the fix | They were run against the pre-fix `redact.cpp` and fail there, on exactly the token-in-query and userinfo URLs |
+| The frame-loop wait (finding 7) | A probe driving the real budget through `run()`'s loop shape: 0.1% of a core over five seconds, both mid-rebuild and terminal | The same post-fix code with the phase forced to `Ready` still spins at 96.0%, so the idle is the wait decision and not the harness having nothing to do |
+| Recovery is not traded for the idle (finding 7) | The same probe still spends six rebuild attempts in five seconds against the shipped 1 s retry delay | The pre-fix spin spends five in the same window; sleeping through the retry delay would have shown as fewer, not more |
 
 The pinned digest was obtained by downloading the archive twice and confirming
 both copies hash identically, then unpacking it and diffing against the
@@ -478,6 +588,7 @@ succeeded.
 | mpv coalesces property-change events | [`client.h:1185`](../third_party/mpv/include/mpv/client.h) in the pinned runtime — the same range PRD.md already cites |
 | mpv's event ring is 1000 entries; async replies are reserved | [mpv `player/client.c` at the pinned commit](https://github.com/mpv-player/mpv/blob/304426c390901436fb1d4a63efbd582ae80c88f4/player/client.c) |
 | A sizing drag runs a modal loop the application's pump does not | [WM_ENTERSIZEMOVE](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-entersizemove) |
+| A message wait ignores queued input already seen by `PeekMessage` unless `MWMO_INPUTAVAILABLE` is set, and `nCount` of zero waits only for input | [MsgWaitForMultipleObjectsEx](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-msgwaitformultipleobjectsex) |
 | Program Files writes are not virtualised for a native 64-bit application | [UAC architecture](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/user-account-control/architecture#virtualization) |
 | DPAPI optional entropy has to be supplied again to decrypt | [`CryptProtectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata) and [`CryptUnprotectData`](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata) |
 | The six `LiveSyncConfig` defaults | [AndroidX `DefaultLivePlaybackSpeedControl` at the revision checked on 2026-08-05](https://github.com/androidx/media/blob/5fb306449733dd71595700c1227ad6087578c559/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultLivePlaybackSpeedControl.java) |
@@ -525,7 +636,7 @@ so they are not raised again:
   struct-of-functions seam is used by two of them.
 - **`App` holds `client_` and `credentials_` redundantly.** It does not.
   `credentials_` carries the portal across the asynchronous gap between
-  `begin_connect` (line 375) and `finish_connect` (line 422), where `client_`
+  `begin_connect` (line 371) and `finish_connect` (line 416), where `client_`
   does not yet exist. Only the `Client::credentials()` *accessor* is dead, which
   is finding 13.
 - **The direct-media argument conversion writes one byte beyond its string.**

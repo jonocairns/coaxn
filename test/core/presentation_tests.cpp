@@ -151,6 +151,128 @@ TEST_CASE("a rebuilt surface returns a full budget to the next episode") {
     CHECK(budget.attempts() == 1);
 }
 
+TEST_CASE("the budget says when it will next decide, so a loop can sleep until then") {
+    PresentationRebuildBudget budget;
+    // Nothing outstanding is nothing to wake up for.
+    CHECK_FALSE(budget.next_decision_at(at(0)).has_value());
+
+    budget.request(at(1));
+    CHECK(budget.next_decision_at(at(1)) == at(1));
+    REQUIRE(budget.poll(at(1)) == RebuildDecision::Attempt);
+
+    // Mid-attempt and after a failure the answer is the retry delay, which is
+    // the whole reason the loop has anything to wait for.
+    CHECK(budget.next_decision_at(at(1)) == at(2));
+    budget.failed(at(1.2));
+    CHECK(budget.next_decision_at(at(1.2)) == at(2.2));
+
+    budget.succeeded();
+    CHECK_FALSE(budget.next_decision_at(at(2)).has_value());
+}
+
+TEST_CASE("a budget at its ceiling is due immediately, not after another retry delay") {
+    // The failure this guards: poll() reports Exhausted regardless of the
+    // clock, so reporting due_at_ would put the loop to sleep for a second it
+    // is no longer entitled to spend before it can admit it has given up.
+    PresentationRebuildBudget budget;
+    budget.request(at(0));
+
+    double now = 0.0;
+    for (std::size_t attempt = 1; attempt <= kDefaultPresentationRebuildPolicy.max_attempts;
+         ++attempt) {
+        REQUIRE(budget.poll(at(now)) == RebuildDecision::Attempt);
+        budget.failed(at(now));
+        now += kDefaultPresentationRebuildPolicy.retry_delay.count();
+    }
+
+    CHECK(budget.next_decision_at(at(now)) == at(now));
+    REQUIRE(budget.poll(at(now)) == RebuildDecision::Exhausted);
+
+    // And once it has, there is nothing left to wake for at all — including
+    // after a later loss, which cannot restart a spent budget.
+    CHECK_FALSE(budget.next_decision_at(at(now)).has_value());
+    budget.request(at(now + 30));
+    CHECK_FALSE(budget.next_decision_at(at(now + 30)).has_value());
+}
+
+TEST_CASE("an unusable surface is Rebuilding until the budget gives up, then Failed") {
+    CHECK(decide_presentation_phase(false, false) == PresentationPhase::Rebuilding);
+    CHECK(decide_presentation_phase(false, true) == PresentationPhase::Failed);
+
+    // A usable surface is Ready whatever the budget has been through. The
+    // asymmetry is deliberate: a stale exhaustion flag must not be able to stop
+    // an application that can draw from drawing.
+    CHECK(decide_presentation_phase(true, false) == PresentationPhase::Ready);
+    CHECK(decide_presentation_phase(true, true) == PresentationPhase::Ready);
+
+    CHECK(std::string_view(to_string(PresentationPhase::Ready)) == "ready");
+    CHECK(std::string_view(to_string(PresentationPhase::Rebuilding)) == "rebuilding");
+    CHECK(std::string_view(to_string(PresentationPhase::Failed)) == "failed");
+}
+
+TEST_CASE("a frame that will present must not also sleep") {
+    // Present's vsync wait is the loop's throttle. Adding a sleep on top of it
+    // would drop frames on a machine with nothing wrong with it.
+    CHECK_FALSE(decide_frame_wait(PresentationPhase::Ready, at(0), at(0.1), at(0.2)).has_value());
+    CHECK_FALSE(decide_frame_wait(PresentationPhase::Ready, at(0), std::nullopt, std::nullopt)
+                    .has_value());
+}
+
+TEST_CASE("a frame that will not present sleeps until the nearest deadline") {
+    // This is the busy-wait. Nothing reaches Present while the surface is down,
+    // so without a wait the loop spins a core across every retry delay — on a
+    // machine that has just lost its display adapter.
+    const auto rebuilding = decide_frame_wait(PresentationPhase::Rebuilding, at(0), at(0.03),
+                                              at(0.2), seconds(1));
+    REQUIRE(rebuilding.has_value());
+    CHECK(*rebuilding == seconds(0.03));
+
+    // Either deadline can be the nearest one. A wait that ignored the
+    // supervisor would make playback recovery late rather than fast.
+    const auto supervised = decide_frame_wait(PresentationPhase::Rebuilding, at(0), at(0.2),
+                                              at(0.04), seconds(1));
+    REQUIRE(supervised.has_value());
+    CHECK(*supervised == seconds(0.04));
+}
+
+TEST_CASE("the terminal phase still waits, and still wakes for the supervisor") {
+    // The indefinite half of the defect: after exhaustion there is no
+    // presentation deadline at all, and a loop with nothing to wait for is the
+    // one that spins for the lifetime of the process.
+    const auto idle = decide_frame_wait(PresentationPhase::Failed, at(0), std::nullopt,
+                                        std::nullopt, seconds(1));
+    REQUIRE(idle.has_value());
+    CHECK(*idle == seconds(1));
+
+    // Playback recovery outlives the presentation surface, so its deadline is
+    // still a reason to wake up.
+    const auto recovering = decide_frame_wait(PresentationPhase::Failed, at(0), std::nullopt,
+                                              at(0.25), seconds(1));
+    REQUIRE(recovering.has_value());
+    CHECK(*recovering == seconds(0.25));
+}
+
+TEST_CASE("the wait is ceilinged, and a deadline already past is no wait at all") {
+    // Nothing in the frame loop schedules sooner than the 50 ms stream-end
+    // window, so the ceiling bounds how late anything this decision does not
+    // model can be.
+    const auto ceilinged = decide_frame_wait(PresentationPhase::Rebuilding, at(0), at(30),
+                                             at(60));
+    REQUIRE(ceilinged.has_value());
+    CHECK(*ceilinged == kFrameWaitCeiling);
+
+    // A deadline in the past is no sleep, not a negative one.
+    const auto overdue = decide_frame_wait(PresentationPhase::Rebuilding, at(10), at(9),
+                                           std::nullopt);
+    REQUIRE(overdue.has_value());
+    CHECK(*overdue == Duration::zero());
+
+    const auto exact = decide_frame_wait(PresentationPhase::Rebuilding, at(10), at(10),
+                                         std::nullopt);
+    REQUIRE(exact.has_value());
+    CHECK(*exact == Duration::zero());
+}
+
 TEST_CASE("device loss kinds are named for the log, not collapsed") {
     CHECK(std::string_view(to_string(DeviceLossKind::Removed)) == "device-removed");
     CHECK(std::string_view(to_string(DeviceLossKind::Reset)) == "device-reset");

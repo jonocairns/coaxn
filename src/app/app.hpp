@@ -77,6 +77,18 @@ private:
     // device. Resuming the channel is not done here: that is playback recovery
     // and belongs to the supervisor.
     bool rebuild_presentation();
+    // Whether the turn about to run will present, and if not whether that is
+    // temporary. Ready has to mean the present really happens, because the
+    // vsync wait inside it is what the loop is being paced by: end_frame
+    // returns before presenting on a lost device or a missing render target,
+    // and either of those with the phase reading Ready is the busy-wait again.
+    [[nodiscard]] core::PresentationPhase presentation_phase() const {
+        const bool surface_ready =
+            presentation_ready_ && ui_.has_render_target() && !ui_.device_lost();
+        return core::decide_presentation_phase(surface_ready, presentation_budget_.exhausted());
+    }
+    // How long the message pump may block before the next turn has to run.
+    [[nodiscard]] DWORD next_turn_wait_ms() const;
     void load_saved_portal();
     void save_portal() const;
 
