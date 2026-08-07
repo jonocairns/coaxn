@@ -321,13 +321,23 @@ only thing that restarted it — but the fold emits that on a healthy-to-degrade
 *transition*, so a `paused-for-cache` fill that began before first frame is
 already degraded when the window is armed and produces no later edge. The
 deadline then expired mid-fill and confirmed `Steady` while the cache was still
-holding playback back. Two rules now close it: entering cache pause in Zap
-restarts the window, and the deadline cannot confirm `Steady` while
-`cache_paused` is set — it restarts instead. Confirmation therefore means five
-seconds with no observed fill, at the health sampler's 500ms resolution, rather
-than five seconds since a first frame. This was found because live-sync arming
-was hung off `Steady` and inherited the bug; `apply_buffer_phase(Steady)` was
-also switching to steady buffer targets mid-fill.
+holding playback back.
+
+Three rules now close it. The deadline cannot confirm `Steady` while
+`cache_paused` is set; it restarts instead. Entering a cache pause in Zap
+restarts the window, because it interrupts the evidence being counted. And
+leaving one restarts it too, because that is where clean playback actually
+begins — without that rule a held deadline carries credit for time spent
+filling, so a fill clearing just before it expires confirms almost immediately
+and the oscillation at the end of that same fill is charged as a rebuffer. A
+repeated observation of playing is not an edge and restarts nothing, or a load
+reporting steady good news could never confirm.
+
+Confirmation therefore means five seconds of continuously clean playback, timed
+from the last observed cache-state edge, at the health sampler's 500ms
+resolution. All of this was found because live-sync arming was hung off `Steady`
+and inherited the bug; `apply_buffer_phase(Steady)` was also switching to steady
+buffer targets mid-fill.
 
 The consequence is that a load which never manages five seconds without a fill
 never confirms, so it never clears an attempt count, never moves to steady
@@ -559,7 +569,7 @@ event correlation and buffer-command gate. They did not cover the `LiveSync`
 control law or `App::update_live_sync`, which is where the highest-impact gaps
 sat and why both original P1 defects survived that long.
 
-The native suite now runs 127 cases: the 66 core cases, the 15 that were
+The native suite now runs 128 cases: the 66 core cases, the 15 that were
 previously built as a Windows binary and never executed, 23 over the control
 law, its gate and the application turn that feeds them, one over a late
 first-start edge from a superseded load, and the rest added since. Both
@@ -597,7 +607,7 @@ progressive-live and replay comparison refreshed on 2026-08-07:
 | ~~P1~~ Fixed at `5388982` | ~~Preserve unavailable cache duration and hold `1.0x` until valid telemetry arrives~~ | Done. The flattened copy is gone, so an unavailable mpv property can no longer install `0.97x` and accumulate live latency |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Stop co-incident initial-fill and first-frame signals from counting as a rebuffer~~ | Done. Arming is the supervisor's steady confirmation, cleared for every load by `begin_health_load()` rather than by `LiveSyncGate::reset()`, which deliberately does not run on ordinary reopens. A first frame, and a momentary unpaused turn after it, were both tried and both falsified against the runtime |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Add an application-level test for player-event, pause-property and live-sync sequencing~~ | Done. `player::LiveSyncTurn` holds the per-load flags, the generation-filtered event drain and the sample assembly; `App` delegates to it, and the portable cases drive the same object in the same order, including both sequences that defeated the earlier guards and one that drives the real supervisor and deadline rather than setting the arming flag by hand |
-| ~~P1~~ Fixed on 2026-08-08 | ~~Make `Steady` mean five healthy seconds rather than five seconds since a first frame~~ | Done. The deadline could confirm mid-fill because the fold's interrupted edge never fires for a pause that predates the window. Found by hanging live-sync arming off `Steady`; it also had `apply_buffer_phase(Steady)` switching to steady buffer targets while the cache was still filling |
+| ~~P1~~ Fixed on 2026-08-08 | ~~Make `Steady` mean five continuously clean seconds rather than five seconds since a first frame~~ | Done in two passes. The deadline could confirm mid-fill because the fold's interrupted edge never fires for a pause that predates the window; the first repair then let a held deadline carry credit for time spent filling, so a fill clearing just before it expired still confirmed early. Both cache-state edges now restart the window. Found by hanging live-sync arming off `Steady`; it also had `apply_buffer_phase(Steady)` switching to steady buffer targets while the cache was still filling |
 | P1 | Make advancing replay observable and terminally bounded without treating every discontinuity as fatal | Record signed playback and cache-end deviation plus sanitized engine evidence; reproduce advancing playback separated by backward resets; retain the episode across `steady-confirmed`; and end repeated replay at the attempt or wall-clock ceiling |
 | P2 | Decide and document target decay semantics | The present controller intentionally or accidentally retains every 500ms concession until reset; it does not reproduce ExoPlayer's adaptive target |
 | P2 now; P1 before HLS support | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Avoids standards-disfavored edge startup and makes the currently unreachable recovery branch real |

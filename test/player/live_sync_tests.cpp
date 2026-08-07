@@ -605,8 +605,10 @@ TEST_CASE("an opening fill that outlasts the steady window still concedes nothin
     for (double t = 7.0; t < 14.0; t += 0.5) app.tick(t, filling());
     CHECK_FALSE(app.turn.playback_established());
 
-    // The fill then oscillates, exactly as it does at playback start. Charging
-    // any of these is the defect this whole change exists to remove.
+    // The fill clears, and the five seconds are counted from here rather than
+    // from the held deadline. It then oscillates, exactly as it does at
+    // playback start. Charging any of these is the defect this whole change
+    // exists to remove.
     app.tick(14.0, unpaused(0.9));
     app.tick(14.001, filling());
     app.tick(14.5, unpaused(1.2));
@@ -614,13 +616,17 @@ TEST_CASE("an opening fill that outlasts the steady window still concedes nothin
     CHECK(app.rebuffers == 0);
     CHECK(app.sync.target_offset_seconds() == Approx(4.0));
 
-    // Five seconds without an observed fill is the first thing that confirms
-    // the load.
-    for (double t = 15.0; t < 21.0; t += 0.5) app.tick(t, unpaused(4.0));
+    // Four clean seconds are not five. Confirming here would charge the tail of
+    // the very fill the window was meant to sit out.
+    for (double t = 15.0; t < 19.0; t += 0.5) app.tick(t, unpaused(4.0));
+    CHECK_FALSE(app.turn.playback_established());
+
+    // Five seconds after the fill cleared, the load is confirmed.
+    app.tick(19.0, unpaused(4.0));
     REQUIRE(app.turn.playback_established());
 
     // And only now does a stall mean the viewer lost picture.
-    app.tick(21.0, filling());
+    app.tick(19.5, filling());
     CHECK(app.rebuffers == 1);
     CHECK(app.sync.target_offset_seconds() == Approx(4.5));
 }

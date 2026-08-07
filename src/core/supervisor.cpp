@@ -204,15 +204,24 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
         if constexpr (std::is_same_v<T, CacheState>) {
             auto next = state;
             next.cache_paused = value.paused;
-            // Entering cache pause interrupts the evidence the window is
-            // counting, whether or not the fold classified it as a new
-            // degradation edge. Restarting here makes the confirmation mean
-            // five seconds without an observed fill, rather than five seconds
-            // since a first frame.
-            if (value.paused && state.name == SupervisorStateName::Zap &&
-                state.deadlines.steady_at) {
+            // The window counts continuous clean playback, so both edges of a
+            // fill restart it. Entering one interrupts the evidence, whether or
+            // not the fold classified it as a new degradation edge; leaving one
+            // is where clean playback actually begins, so the count starts
+            // there rather than carrying credit for time spent filling. Without
+            // the second rule a fill that clears just before the deadline is
+            // confirmed almost immediately, and the oscillation at the end of
+            // that same fill is charged as a rebuffer.
+            //
+            // A repeated observation of playing is not an edge and must not
+            // restart anything, or a steady load could never confirm.
+            if (state.name == SupervisorStateName::Zap && state.deadlines.steady_at &&
+                (value.paused || state.cache_paused)) {
                 next.deadlines.steady_at = now + policy.steady_healthy_window;
-                return settle(state, next, "cache-pause-restarted-steady-window", now, policy);
+                return settle(state, next,
+                              value.paused ? "cache-pause-restarted-steady-window"
+                                           : "cache-resume-restarted-steady-window",
+                              now, policy);
             }
             return settle(state, next, "cache-state-observed", now, policy);
         } else if constexpr (std::is_same_v<T, AuthRejected>) {

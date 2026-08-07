@@ -323,11 +323,33 @@ TEST_CASE("steady is not confirmed while the cache is still holding playback bac
     CHECK(result.state.name == SupervisorStateName::Zap);
     CHECK(next_deadline_at(result.state) == at(17));
 
-    // Playback finally starts. The window still has to run out from here.
-    state = step(result.state, CacheState{Generation{1}, false}, 13);
-    CHECK(next_deadline_at(state) == at(17));
-    CHECK_FALSE(apply(state, DeadlineReached{}, 16).transition);
-    state = step(state, DeadlineReached{}, 17);
+    // Playback finally starts, and the five seconds are counted from there.
+    // Letting the held deadline stand would confirm on four clean seconds here,
+    // and on almost none at all if the fill cleared just before it expired.
+    auto resumed = apply(result.state, CacheState{Generation{1}, false}, 13);
+    CHECK(resumed.transition->reason == "cache-resume-restarted-steady-window");
+    CHECK(next_deadline_at(resumed.state) == at(18));
+
+    state = resumed.state;
+    CHECK_FALSE(apply(state, DeadlineReached{}, 17).transition);
+    state = step(state, DeadlineReached{}, 18);
+    CHECK(state.name == SupervisorStateName::Steady);
+}
+
+TEST_CASE("a fill clearing just before the deadline still buys a full clean window") {
+    auto state = step(initial_supervisor_state(), ChannelRequested{Generation{1}}, 0);
+    state = step(state, StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs}, .01);
+    state = step(state, FirstFrame{Generation{1}}, 1);
+    CHECK(next_deadline_at(state) == at(6));
+
+    // The whole window is spent filling, and the fill clears with 100ms to go.
+    state = step(state, CacheState{Generation{1}, true}, 1.5);
+    state = step(state, CacheState{Generation{1}, false}, 5.9);
+    CHECK(next_deadline_at(state) == at(10.9));
+
+    // Nothing has played cleanly for five seconds yet, so nothing is confirmed.
+    CHECK_FALSE(apply(state, DeadlineReached{}, 6).transition);
+    state = step(state, DeadlineReached{}, 10.9);
     CHECK(state.name == SupervisorStateName::Steady);
 }
 
@@ -343,14 +365,22 @@ TEST_CASE("entering the cache pause restarts the steady window") {
     CHECK(result.transition->reason == "cache-pause-restarted-steady-window");
     CHECK(next_deadline_at(result.state) == at(8));
 
-    // Leaving it does not restart anything; the window simply runs.
+    // Leaving it restarts the window too: clean playback starts here, and the
+    // three seconds before the fill are not credit towards it.
     state = step(result.state, CacheState{Generation{1}, false}, 4);
-    CHECK(next_deadline_at(state) == at(8));
-    state = step(state, DeadlineReached{}, 8);
+    CHECK(next_deadline_at(state) == at(9));
+
+    // A repeated observation of playing is not an edge. Restarting on it would
+    // mean a load that keeps reporting good news never confirms.
+    const auto repeated = apply(state, CacheState{Generation{1}, false}, 6);
+    CHECK(repeated.transition->reason == "cache-state-observed");
+    CHECK(next_deadline_at(repeated.state) == at(9));
+
+    state = step(state, DeadlineReached{}, 9);
     CHECK(state.name == SupervisorStateName::Steady);
 
     // Outside Zap it is only a cache observation: Steady has no window to hold.
-    const auto settled = apply(state, CacheState{Generation{1}, true}, 9);
+    const auto settled = apply(state, CacheState{Generation{1}, true}, 10);
     CHECK(settled.transition->reason == "cache-state-observed");
     CHECK(settled.state.name == SupervisorStateName::Steady);
 }
