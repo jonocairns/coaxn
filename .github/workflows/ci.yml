@@ -49,9 +49,11 @@ jobs:
         with:
           extra_nix_config: "experimental-features = nix-command flakes"
 
-      # The pinned runtime is a 117 MB download that only moves when the fetch
+      # The pinned runtime is a 29 MiB archive that only moves when the fetch
       # script does, and the script exits early when the tree is already
-      # unpacked -- so the pin itself is the cache key.
+      # unpacked -- so the pin itself is the cache key. A cached tree therefore
+      # skips the digest check; the key covers the digest, so changing the pin
+      # forces a fetch that verifies it.
       - name: Cache pinned libmpv
         uses: actions/cache@v4
         with:

@@ -7,13 +7,19 @@
 #include <cstdio>
 #include <mutex>
 
+#include "util/log_ring.hpp"
+
 namespace coax::log {
 namespace {
 
 constexpr std::size_t kMaxRetained = 400;
 
-std::mutex               g_mutex;
-std::vector<std::string> g_recent;
+Ring g_recent{kMaxRetained};
+
+// Guards the session log stream only. Separate from the ring's own lock so a
+// blocking write to a file on a stalled disk does not also hold up the
+// diagnostics panel, and so write() no longer locks the same mutex twice.
+std::mutex g_file_mutex;
 
 // A GUI-subsystem process has no console, so the session log is the only way
 // to see what happened after the fact. It sits beside the executable rather
@@ -58,26 +64,26 @@ void write(Level level, std::string_view message) {
     std::string line = std::format("[{:%H:%M:%S}.{:03}] {} {}",
                                    secs, ms.count(), level_tag(level), message);
 
-    {
-        std::scoped_lock lock(g_mutex);
-        if (g_recent.size() >= kMaxRetained) {
-            g_recent.erase(g_recent.begin());
-        }
-        g_recent.push_back(line);
-    }
+    g_recent.push(line);
 
     line.push_back('\n');
     OutputDebugStringA(line.c_str());
 
     if (std::FILE* file = session_log()) {
-        std::scoped_lock lock(g_mutex);
+        std::scoped_lock lock(g_file_mutex);
         std::fputs(line.c_str(), file);
+        // Flushed per line because the process this records is the one that may
+        // be about to die; a buffered tail is exactly what would be lost.
         std::fflush(file);
     }
 }
 
-const std::vector<std::string>& recent() {
-    return g_recent;
+std::vector<std::string> recent() {
+    return g_recent.snapshot();
+}
+
+void recent_into(std::vector<std::string>& out) {
+    g_recent.snapshot_into(out);
 }
 
 }  // namespace coax::log

@@ -135,6 +135,10 @@ private:
     // headers from opening on click.
     bool        search_was_active_ = false;
     bool        show_diagnostics_ = false;
+    // Reused destination for the log ring's snapshot. The panel cannot iterate
+    // the ring in place -- worker threads are writing it -- and holding the
+    // buffer keeps the per-frame copy from also being a per-frame allocation.
+    std::vector<std::string> log_snapshot_;
     // Whether mpv's swap chain is in the composition tree. Nothing else paints
     // the area behind the UI, so this decides whether the backdrop has to.
     bool        video_attached_   = false;

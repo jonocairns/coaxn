@@ -1501,7 +1501,8 @@ void App::draw_diagnostics() {
     if (ImGui::CollapsingHeader("Log")) {
         ImGui::BeginChild("log-scroll",
                           ImVec2(theme::scaled(kLogWidth), theme::scaled(kLogHeight)));
-        for (const auto& line : log::recent()) {
+        log::recent_into(log_snapshot_);
+        for (const auto& line : log_snapshot_) {
             ImGui::TextUnformatted(line.c_str());
         }
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) {

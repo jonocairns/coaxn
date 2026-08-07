@@ -119,16 +119,23 @@ halves. It is deliberately the only place the argument is made in full — the
 same reasoning written out here and in the fetch script drifted apart once
 already.
 
-The commit and its source URL are recorded in `third_party/mpv/PINNED.txt`
-after fetching.
+The archive is verified against a pinned SHA-256 before it is unpacked, because
+the commit pins provenance rather than content: a release asset can be replaced
+without the tag moving. A mismatch is fatal and nothing is written. An
+already-unpacked tree is not re-verified — the fetch script says why.
+
+The commit, its source URL and the verified digest are recorded in
+`third_party/mpv/PINNED.txt` after fetching, and shipped beside the runtime as
+`libmpv-PINNED.txt`.
 
 ## Known gaps
 
 The binary is unsigned, so SmartScreen warns anyone who did not build it
 themselves; fixing that needs a code-signing certificate, not a build change.
-`scripts/fetch-libmpv.sh` pins libmpv by tag and URL but does not verify a
-checksum, so the 117 MB blob that makes up most of a release is not
-content-verified. And a release stays two files: one self-contained `.exe`
+The 117 MB libmpv blob that makes up most of a release is content-verified at
+fetch time now, but the release is still not legally complete: mpv's and
+FFmpeg's licence terms and the corresponding source offer are not shipped with
+it (PRD §8.2). And a release stays two files: one self-contained `.exe`
 would mean embedding `libmpv-2.dll` as a resource and extracting it on first
 run, since static libmpv would mean building ffmpeg and its dependency tree
 here.

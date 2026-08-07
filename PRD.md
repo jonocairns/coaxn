@@ -393,13 +393,14 @@ Done when a provider can be replaced entirely from within the application.
 
 ### 8.2 Runtime provenance and licensing
 
-Verify the fetched libmpv archive against a recorded SHA-256 in
-`scripts/fetch-libmpv.sh`. Ship mpv's and FFmpeg's licence terms and the
-corresponding source offer in the installer and archive, alongside Coax's own
-LICENSE.
+Verification has landed: `scripts/fetch-libmpv.sh` checks the archive against a
+recorded SHA-256 and refuses to unpack a mismatch, and the digest is carried in
+`PINNED.txt` beside the runtime. Licensing has not. Ship mpv's and FFmpeg's
+licence terms and the corresponding source offer in the installer and archive,
+alongside Coax's own LICENSE.
 
-Done when a release is content-verified at fetch time and legally complete as
-distributed.
+Done when a release is content-verified at fetch time — it now is — and legally
+complete as distributed, which it is not.
 
 ### 8.3 Composable filter chain and deinterlacing
 
