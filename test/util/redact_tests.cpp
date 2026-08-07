@@ -44,9 +44,43 @@ TEST_CASE("stream URLs mask the two segments after the media marker") {
             "http://host:8080/series/***/***/9.mkv");
 }
 
-TEST_CASE("a stream URL without the expected shape is left alone") {
+// This case used to be called "a stream URL without the expected shape is left
+// alone", which was the defect stated as a guarantee: an unrecognized target
+// was logged verbatim. Both URLs below survive intact for the narrower and
+// still-true reason that neither carries anything to sanitize.
+TEST_CASE("a stream URL with nothing to sanitize keeps its shape") {
     REQUIRE(redact_stream_url("http://host:8080/live/onlyonesegment") ==
             "http://host:8080/live/onlyonesegment");
     REQUIRE(redact_stream_url("http://host:8080/index.m3u8") ==
             "http://host:8080/index.m3u8");
+}
+
+TEST_CASE("an unrecognized stream URL still loses its query") {
+    // The command line accepts an arbitrary direct-media URL, so this reaches
+    // the load log without matching any Xtream shape.
+    REQUIRE(redact_stream_url("https://example.invalid/stream?token=secret") ==
+            "https://example.invalid/stream?***");
+    REQUIRE(redact_stream_url("https://cdn.example/hls/index.m3u8?hdnts=exp=1~hmac=deadbeef") ==
+            "https://cdn.example/hls/index.m3u8?***");
+    REQUIRE(redact_stream_url("https://example.invalid/stream#token=secret") ==
+            "https://example.invalid/stream?***");
+}
+
+TEST_CASE("stream credentials outside the masked path segments are still hidden") {
+    // Userinfo and query live outside the two segments the Xtream mask covers,
+    // in URLs that do and do not match that shape.
+    REQUIRE(redact_stream_url("http://user:pass@host:8080/live/u/p/123.ts") ==
+            "http://***@host:8080/live/***/***/123.ts");
+    REQUIRE(redact_stream_url("http://host:8080/live/u/p/123.ts?token=secret") ==
+            "http://host:8080/live/***/***/123.ts?***");
+    REQUIRE(redact_stream_url("http://user:pass@host:8080/whatever.ts") ==
+            "http://***@host:8080/whatever.ts");
+}
+
+TEST_CASE("a local media path is not mistaken for a URL to sanitize") {
+    // mpv takes file paths as readily as URLs, and there is no credential in
+    // one to hide -- but also no scheme, authority or query to trip over.
+    REQUIRE(redact_stream_url("C:\\videos\\recording.mkv") == "C:\\videos\\recording.mkv");
+    REQUIRE(redact_stream_url("/mnt/media/recording.mkv") == "/mnt/media/recording.mkv");
+    REQUIRE(redact_stream_url("") == "");
 }

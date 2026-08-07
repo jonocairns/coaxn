@@ -1,10 +1,13 @@
 #include "util/redact.hpp"
 
 namespace coax::log {
+namespace {
 
-std::string redact_stream_url(std::string_view url) {
-    // Xtream live URLs are /live/<user>/<pass>/<id>.<ext>; mask the two
-    // segments after the /live/ (or /movie/, /series/) marker.
+// Xtream live URLs are /live/<user>/<pass>/<id>.<ext>; mask the two segments
+// after the /live/ (or /movie/, /series/) marker. Nothing else about the URL is
+// this function's business -- it recognises one shape, and a URL not in that
+// shape comes back untouched, which is why it is not safe on its own.
+std::string mask_media_path_segments(std::string_view url) {
     for (std::string_view marker : {"/live/", "/movie/", "/series/"}) {
         const auto pos = url.find(marker);
         if (pos == std::string_view::npos) {
@@ -31,6 +34,19 @@ std::string redact_stream_url(std::string_view url) {
         }
     }
     return std::string(url);
+}
+
+}  // namespace
+
+std::string redact_stream_url(std::string_view url) {
+    // A playback target is a URL before it is an Xtream URL, and it does not
+    // have to be an Xtream URL at all: the command line accepts an arbitrary
+    // direct-media argument, and a provider base URL can carry credentials in
+    // its authority or query, neither of which masking two path segments
+    // touches. So the general sanitizer runs first and unconditionally, and the
+    // Xtream mask only refines what survives it. Recognising the shape then
+    // decides how much more is hidden -- never whether anything is.
+    return mask_media_path_segments(redact_portal_url(url));
 }
 
 std::string redact_portal_url(std::string_view url) {
