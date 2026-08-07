@@ -24,8 +24,14 @@ public:
     bool create(const wchar_t* title, int width, int height, std::string& error);
     void destroy();
 
-    // Processes pending messages. Returns false once the window has closed.
-    bool pump_messages();
+    // Processes pending messages, first waiting up to `timeout_ms` for one to
+    // arrive. Zero drains and returns immediately, which is what a turn ending
+    // in a present wants: the vsync wait inside that present is the throttle,
+    // and waiting here as well would drop frames. A turn that will *not*
+    // present has no throttle at all, and passing the time until its next
+    // deadline is what keeps it from spinning a core. Returns false once the
+    // window has closed.
+    bool pump_messages(DWORD timeout_ms = 0);
 
     void set_fullscreen(bool fullscreen);
     [[nodiscard]] bool fullscreen() const { return fullscreen_; }

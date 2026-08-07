@@ -275,7 +275,12 @@ void App::service_presentation() {
             return;
         case core::RebuildDecision::Exhausted:
             set_status("Display device lost and could not be rebuilt", true);
-            log::error("Presentation rebuild abandoned after {} attempts; last loss: {}",
+            // Terminal, and said so. The budget is spent, no further attempt is
+            // coming, and presentation_phase() reports Failed from here on —
+            // which is what lets the frame loop wait for messages instead of
+            // polling for a rebuild that will never be scheduled again.
+            log::error("Presentation rebuild abandoned after {} attempts; last loss: {}. "
+                       "The frame loop is now idle; playback recovery continues.",
                        presentation_budget_.attempts(),
                        last_device_loss_.empty() ? "none reported" : last_device_loss_);
             return;
@@ -1598,7 +1603,10 @@ int App::run() {
         return 1;
     }
 
-    while (window_.pump_messages()) {
+    // Zero on the first turn: nothing has been drawn yet, so there is nothing
+    // to be paced against.
+    DWORD wait_ms = 0;
+    while (window_.pump_messages(wait_ms)) {
         player_.pump();
         process_player_events();
         // Before the supervisor polls, so a rebuild completed this turn has
@@ -1628,10 +1636,27 @@ int App::run() {
         update_live_sync();
         finish_connect();
         draw_frame();
+        wait_ms = next_turn_wait_ms();
     }
 
     shutdown();
     return 0;
+}
+
+DWORD App::next_turn_wait_ms() const {
+    const auto now  = supervisor_clock_.now();
+    const auto wait = core::decide_frame_wait(presentation_phase(), now,
+                                              presentation_budget_.next_decision_at(now),
+                                              supervisor_.armed_deadline());
+    // Absent means the turn just drawn ended in a present, whose vsync wait is
+    // already the throttle.
+    if (!wait) {
+        return 0;
+    }
+    // Rounded up rather than truncated, so a deadline a fraction of a
+    // millisecond out is one short sleep instead of a run of zero-length waits
+    // that is the spin under another name.
+    return static_cast<DWORD>(std::chrono::ceil<std::chrono::milliseconds>(*wait).count());
 }
 
 void App::shutdown() {
