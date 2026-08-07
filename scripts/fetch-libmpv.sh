@@ -24,14 +24,26 @@ URL="https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/${MPV_BUI
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest="${repo_root}/third_party/mpv"
 
-# An already-unpacked tree is accepted without re-verification, deliberately.
-# The digest below guards the point where third-party bytes enter the tree; it
-# cannot be recomputed from unpacked files, so re-checking here would need a
-# separate per-file manifest to maintain. Anyone who can rewrite third_party/mpv
-# in place can rewrite this script too, so that manifest would buy little.
-# Delete the directory to force a fetch that is verified again.
-if [[ -f "${dest}/include/mpv/client.h" && -f "${dest}/libmpv.dll.a" ]]; then
-    echo "libmpv already present at ${dest} (mpv ${MPV_GIT_SHORT}, not re-verified)"
+# An already-unpacked tree is accepted without re-verifying its bytes,
+# deliberately: the digest above guards the point where third-party bytes enter
+# the tree, and it cannot be recomputed from unpacked files, so re-checking
+# would need a separate per-file manifest to maintain. Anyone who can rewrite
+# third_party/mpv in place can rewrite this script too, so that manifest would
+# buy little.
+#
+# Identity is a different question from integrity, and is checked. The tree has
+# to be complete -- every file the build and the package consume, not just the
+# two the compiler needs -- and PINNED.txt has to name this pin. Otherwise a
+# half-extracted tree reports success and fails later, and, worse, bumping the
+# pin beside an existing third_party/mpv would silently keep building against
+# the old runtime. Failing either check falls through to the verified fetch
+# below, which overwrites in place, so a stale tree repairs itself.
+pinned_file="${dest}/PINNED.txt"
+if [[ -f "${dest}/include/mpv/client.h" && -f "${dest}/libmpv.dll.a" &&
+      -f "${dest}/libmpv-2.dll" && -f "${pinned_file}" ]] &&
+   grep -Fqx "git_commit=${MPV_GIT_COMMIT}" "${pinned_file}" &&
+   grep -Fqx "archive_sha256=${MPV_ARCHIVE_SHA256}" "${pinned_file}"; then
+    echo "libmpv already present at ${dest} (mpv ${MPV_GIT_SHORT}, bytes not re-verified)"
     exit 0
 fi
 

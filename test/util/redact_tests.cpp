@@ -44,10 +44,31 @@ TEST_CASE("stream URLs mask the two segments after the media marker") {
             "http://host:8080/series/***/***/9.mkv");
 }
 
+TEST_CASE("a truncated media URL still loses its credentials") {
+    // Two credential segments are the whole condition. Masking used to need a
+    // third segment after them, so a target ending at the password was logged
+    // whole -- reachable through the direct-media command-line argument.
+    REQUIRE(redact_stream_url("http://host/live/user/pass") == "http://host/live/***/***");
+    REQUIRE(redact_stream_url("http://host/movie/user/pass") == "http://host/movie/***/***");
+    REQUIRE(redact_stream_url("http://host/series/user/pass") == "http://host/series/***/***");
+    REQUIRE(redact_stream_url("http://host:8080/live/user/pass/") ==
+            "http://host:8080/live/***/***/");
+}
+
+TEST_CASE("a truncated media URL keeps the marker for the query it dropped") {
+    // The credentials go, and so does the query -- but the evidence that a
+    // query existed survives, as it does for every other sanitized target.
+    REQUIRE(redact_stream_url("http://host/live/user/pass?token=x") ==
+            "http://host/live/***/***?***");
+    REQUIRE(redact_stream_url("http://host/live/user/pass#frag") ==
+            "http://host/live/***/***?***");
+}
+
 // This case used to be called "a stream URL without the expected shape is left
 // alone", which was the defect stated as a guarantee: an unrecognized target
 // was logged verbatim. Both URLs below survive intact for the narrower and
-// still-true reason that neither carries anything to sanitize.
+// still-true reason that neither carries anything to sanitize -- and the first
+// because one path segment is a stream name, not a credential pair.
 TEST_CASE("a stream URL with nothing to sanitize keeps its shape") {
     REQUIRE(redact_stream_url("http://host:8080/live/onlyonesegment") ==
             "http://host:8080/live/onlyonesegment");

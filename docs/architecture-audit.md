@@ -79,8 +79,8 @@ not.
 
 | Priority | Work | Why |
 |---|---|---|
-| P0 — release blocker, already tracked | Satisfy the libmpv/FFmpeg redistribution obligations ([PRD.md §8.2](../PRD.md#82-runtime-provenance-and-licensing)) | The shipped runtime is still not legally complete: mpv's and FFmpeg's licence terms and the corresponding source offer are not distributed with it. This is not newly discovered by this audit, so it is cross-referenced rather than counted as another finding. The other half of the row — content verification of the fetched archive — landed at `e8dc558`: `scripts/fetch-libmpv.sh` now checks a pinned SHA-256 between the download and the unpack, refuses to unpack a mismatch, and records the verified digest in `PINNED.txt`. An already-unpacked tree is deliberately not re-verified, which the script states rather than implies. |
-| ~~P1~~ Fixed at `dcba234` and `8deb198` | ~~Fix the log snapshot race (finding 2) and stop logging arbitrary authenticated URLs (finding 8)~~ | The ring is a portable class in `coax_core` handing out snapshots, and every playback target is sanitized before logging regardless of shape. Native CTest went from 98 cases to 109. |
+| P0 — release blocker, already tracked | Satisfy the libmpv/FFmpeg redistribution obligations ([PRD.md §8.2](../PRD.md#82-runtime-provenance-and-licensing)) | The shipped runtime is still not legally complete: mpv's and FFmpeg's licence terms and the corresponding source offer are not distributed with it. This is not newly discovered by this audit, so it is cross-referenced rather than counted as another finding. The other half of the row — content verification of the fetched archive — landed at `e8dc558`: `scripts/fetch-libmpv.sh` now checks a pinned SHA-256 between the download and the unpack, refuses to unpack a mismatch, and records the verified digest in `PINNED.txt`. An already-unpacked tree's bytes are deliberately not re-verified, which the script states rather than implies; its identity is, so a tree that does not match the current pin, or is missing a file the build or package consumes, falls through to a fresh verified fetch instead of being trusted. |
+| ~~P1~~ Fixed at `dcba234` and `8deb198` | ~~Fix the log snapshot race (finding 2) and stop logging arbitrary authenticated URLs (finding 8)~~ | The ring is a portable class in `coax_core` handing out snapshots, and every playback target is sanitized before logging regardless of shape. Native CTest went from 98 cases to 111. |
 | P1 | Make presentation failure terminal without becoming an infinite spin, and propagate render-target recreation failure (findings 7 and 9) | A device-loss path can consume a core indefinitely or leave the application blank with no recovery signal. |
 | ~~P1~~ Fixed at `5388982` | ~~Run the already-portable player suite in native CI and add `LiveSync` coverage (finding 1)~~ | The target split landed and the suite runs on every push. Native CTest went from 66 cases to 98. |
 | P2 | Put `ChannelIndex` in the portable target and cache its derived view (findings 5 and 6) | This restores the documented boundary and removes full-catalogue work at frame rate. |
@@ -133,7 +133,7 @@ translation unit.
 ExoPlayer's `DefaultLivePlaybackSpeedControl` — a control loop with six tuning
 constants — and exactly the shape that wants a table test. It has 16 cases now,
 added with the live-sync fixes in `5388982`. Native CTest went to 98 cases from
-66, and stands at 109 after findings 2 and 8.
+66, and stands at 111 after findings 2 and 8.
 
 ### 2. [Fixed at `dcba234`] `log::recent()` hands the UI thread a vector the workers are mutating
 
@@ -328,6 +328,16 @@ path mask only refines what survives it — so recognising the shape decides how
 much more is hidden, never whether anything is. `redact_portal_url` already had
 the authority and query machinery, and it was already tested.
 
+Review caught that the composition alone left a residual hole of the same kind,
+and it is fixed in the same PR. The path mask required a *third* segment after
+the credential pair, so `http://host/live/user/pass` — a target with nothing
+following the password — matched the marker, failed the segment count and was
+logged whole. Two credential segments being present is now the whole condition;
+what follows them is preserved but decides nothing. Coax's own
+`Client::stream_url` always appends `/{id}.ts` and cannot produce the truncated
+form, so the reachable route was the direct-media command-line argument — the
+same untrusted-input path this finding is about.
+
 The test that pinned the old behaviour deserves an exact account, because it is
 not the one this document implied. Its two assertions still pass: neither
 example carries a query, userinfo or fragment, so both URLs survive intact for a
@@ -442,7 +452,7 @@ there is no longer any reason to run it by hand.
 discovered tests, and the mingw configuration completed a clean Windows
 cross-build at `f8a77d8`. These did not close finding 1 — the 15 player cases
 were absent from native CTest — but they established that the findings were not
-artifacts of an already-broken tree. The same command now runs 109
+artifacts of an already-broken tree. The same command now runs 111
 cases, and the cross-build still produces `coax.exe`.
 
 **How the fixes above were checked**, since a fix asserted is worth no more than

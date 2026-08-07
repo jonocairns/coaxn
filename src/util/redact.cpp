@@ -1,5 +1,7 @@
 #include "util/redact.hpp"
 
+#include <algorithm>
+
 namespace coax::log {
 namespace {
 
@@ -7,6 +9,13 @@ namespace {
 // after the /live/ (or /movie/, /series/) marker. Nothing else about the URL is
 // this function's business -- it recognises one shape, and a URL not in that
 // shape comes back untouched, which is why it is not safe on its own.
+//
+// What it does not require is a *complete* URL of that shape. A target ending
+// at the password, or carrying a query where the stream id should be, still has
+// two credential segments in it, and masking used to depend on a third segment
+// following them -- so http://host/live/user/pass was logged whole. Two
+// segments present is the whole condition; what comes after them is preserved
+// but does not decide anything.
 std::string mask_media_path_segments(std::string_view url) {
     for (std::string_view marker : {"/live/", "/movie/", "/series/"}) {
         const auto pos = url.find(marker);
@@ -15,23 +24,28 @@ std::string mask_media_path_segments(std::string_view url) {
         }
 
         const auto creds_start = pos + marker.size();
-        auto       cursor      = creds_start;
-        int        segments    = 0;
-        while (segments < 2 && cursor < url.size()) {
-            const auto slash = url.find('/', cursor);
-            if (slash == std::string_view::npos) {
-                break;
-            }
-            cursor = slash + 1;
-            ++segments;
+        // Segments end where the path does. Everything from a '?' or '#' on is
+        // carried through untouched -- by this point redact_portal_url has
+        // already replaced any real query with its marker.
+        const auto path_end = std::min(url.find_first_of("?#", creds_start), url.size());
+
+        const auto first_sep = url.find('/', creds_start);
+        if (first_sep >= path_end) {
+            continue;  // one segment at most: a stream name, not a credential pair
         }
 
-        if (segments == 2) {
-            std::string out(url.substr(0, creds_start));
-            out += "***/***/";
-            out += url.substr(cursor);
-            return out;
+        std::string out(url.substr(0, creds_start));
+        out += "***/***";
+
+        const auto second_sep = url.find('/', first_sep + 1);
+        if (second_sep < path_end) {
+            out += '/';
+            out += url.substr(second_sep + 1);
+        } else {
+            // The password runs to the end of the path; keep any query marker.
+            out += url.substr(path_end);
         }
+        return out;
     }
     return std::string(url);
 }

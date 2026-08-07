@@ -132,6 +132,17 @@ TEST_CASE("a reader snapshotting while writers push sees only whole lines") {
 
     first.join();
     second.join();
+
+    // Nothing above guarantees the reader was scheduled at all: if it first ran
+    // after stop was set, it would observe nothing and fail the assertion below
+    // with the ring perfectly correct. Both writers have finished, so the ring
+    // is full and no longer changing -- the reader's next snapshot is bound to
+    // return a full buffer, which makes this wait terminate rather than merely
+    // usually terminate.
+    while (observed.load(std::memory_order_relaxed) == 0) {
+        std::this_thread::yield();
+    }
+
     stop.store(true, std::memory_order_relaxed);
     reader.join();
 
