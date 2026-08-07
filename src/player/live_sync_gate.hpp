@@ -13,8 +13,10 @@ struct LiveSyncSample {
     std::optional<double> buffered_seconds;
     bool paused_for_cache = false;
     bool core_idle = false;
-    // Whether the current load has produced a frame yet.
-    bool first_frame_seen = false;
+    // Whether the supervisor has confirmed this load as steady -- a first frame
+    // followed by a healthy window. Deliberately not "has a frame been seen":
+    // see LiveSyncGate::observe for what that weaker reading cannot separate.
+    bool playback_established = false;
 };
 
 // What the caller should do with the controller this turn. At most one of
@@ -41,19 +43,33 @@ public:
     // Starts a new channel or a new backend, alongside LiveSync::reset(). A
     // pause edge belongs to the load that produced it, so the previous load's
     // state is dropped rather than carried into the next one.
+    //
+    // There is deliberately no arm state to clear here. Recovery reopens keep
+    // the learned pause and controller state and never call this, but they are
+    // new loads and must not concede for their own fill; arming therefore
+    // travels in the sample, from a reading the reopen resets.
     void reset() { was_paused_for_cache_ = false; }
 
     LiveSyncStep observe(const LiveSyncSample& sample) {
         LiveSyncStep step;
 
-        // Only the transition into a stall counts, and only once playback has
-        // started. The flag stays true for the whole stall, so an edge test
-        // avoids conceding latency once per frame; the first-frame condition
-        // separates a real underrun from the initial fill and from each
-        // recovery reopen, neither of which has interrupted anything the
-        // viewer was watching.
+        // Only the transition into a stall counts, and only once the load is
+        // established. The flag stays true for the whole stall, so an edge test
+        // avoids conceding latency once per frame.
+        //
+        // Two weaker readings of "established" were tried against this runtime
+        // and both failed. "A frame has been seen" fails because the
+        // application reports both signals as of one turn -- its event drain
+        // sets the flag before it reads the pause property -- and the
+        // initial-fill pause edge commonly coincides with playback start.
+        // "A frame, plus a turn that is not filling" fails because mpv
+        // publishes exactly one such turn as playback begins and then re-enters
+        // the same opening fill a millisecond later, which is a rising edge
+        // against a state that reads as established. Only the supervisor's
+        // steady confirmation -- a first frame plus a healthy window -- is a
+        // reading the opening fill cannot manufacture.
         step.rebuffered =
-            sample.paused_for_cache && !was_paused_for_cache_ && sample.first_frame_seen;
+            sample.paused_for_cache && !was_paused_for_cache_ && sample.playback_established;
         was_paused_for_cache_ = sample.paused_for_cache;
 
         // A draining cache is not a mistimed one. Leave the controller alone

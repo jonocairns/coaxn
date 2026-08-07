@@ -221,9 +221,10 @@ extract one: HLS would still feed demuxer buffered duration to this controller.
 
 #### Known live-sync correctness gaps
 
-Two of the three defects recorded here were fixed at `5388982`. They are kept,
-marked with what landed, because the engine behaviour that caused them is
-permanent and the rules that answer it are only obvious once the trap is stated.
+Two of the three original defects recorded here are fixed. The second took three
+attempts, and both failed ones are recorded in full: each passed its isolated
+tests and was then falsified by the running application, so the engine behaviour
+and the two wrong readings of it are all easy to reintroduce.
 
 1. **Fixed.** When `demuxer-cache-duration` was unavailable, the adapter
    preserved an optional value for health but separately converted it to `0.0`
@@ -234,24 +235,72 @@ permanent and the rules that answer it are only obvious once the trap is stated.
    controller update until a valid one arrives. A real `0.0` is still a
    measurement and is still controlled on. The diagnostics overlay distinguishes
    the two rather than reporting `0.0s` for both.
-2. **Fixed.** `cache-pause-initial=yes` makes mpv enter the same
-   `paused-for-cache` state used for an actual underrun. The application counted
-   every rising edge as a rebuffer, so a normal initial fill added 500ms to the
-   target before a frame had been shown, and each recovery reopen added another —
-   recovery retains the controller by design, so those concessions accumulated
-   across an episode. Rebuffer learning is now gated on the load having produced
-   a first frame.
+2. **Fixed, after two falsified attempts.** `cache-pause-initial=yes` makes mpv
+   enter the same `paused-for-cache` state used for an actual underrun, and no
+   reading taken close to playback start separates the two.
+
+   The first attempt, at `5388982`, rejected a pause while `first_frame_seen`
+   was false. The application defeats it by collapsing both signals into one
+   turn: `process_player_events` sets the flag before `update_live_sync` reads
+   the pause state, and the initial-fill edge commonly coincides with playback
+   start, so the gate sees `paused=true, first_frame_seen=true` and charges
+   500ms. Of 18 user-requested generations in the 2026-08-07 session, 16
+   eventually logged `Rebuffer #1`; 15 logged it within one millisecond of first
+   frame. Generations 4 and 12 logged no `#1`, and generation 18 was the sole
+   later edge, 10.36 seconds after first frame. Generation 17's recovery load
+   separately charged `Rebuffer #6` in the same millisecond as its recovered
+   first frame. Reordering the two calls cannot separate signals that arrive in
+   the same application turn.
+
+   The second attempt followed from that evidence: stay disarmed until a
+   post-first-frame, non-paused observation establishes playback. A 2026-08-08
+   run against a live HLS source falsified it with the fix in the shipped
+   binary. mpv releases `paused-for-cache` for a single frame turn as the
+   picture comes up and re-enters the opening fill about a millisecond later.
+   That first turn arms, the second is a rising edge against an armed gate, and
+   `Rebuffer #1` still landed one millisecond after `first-frame`. A momentary
+   unpause is not established playback, and a dwell threshold picked to survive
+   one observation would not be evidence-backed.
+
+   The gate now concedes only on a pause edge taken while the supervisor has
+   confirmed the load steady: a first frame followed by the five-second
+   `steady_healthy_window`. That is the application's existing definition of
+   playback having actually started, it is the same standard the supervisor
+   already applies before clearing a recovery attempt count — a first frame by
+   itself is not evidence — and an opening fill cannot manufacture it. The
+   signal is per load. `App::begin_health_load()` clears it on user loads and on
+   every recovery reopen, while `LiveSyncGate::reset()` deliberately does not
+   run on ordinary reopens because `was_paused_for_cache_` and learned
+   controller state are meant to survive an episode. Those are opposite
+   lifetimes and are kept as separate flags with separate entry points.
+
+   The cost is deliberate: a genuine underrun inside a load's first five seconds
+   concedes nothing. That window is already treated as opening the channel
+   rather than playing it, non-progress in it already reaches the supervisor as
+   a stall, and under-charging there is the safe direction for a defect whose
+   entire history is over-charging.
 3. **Open, P2.** While `paused-for-cache` or `core-idle` is true, the
    application still returns without setting speed. It therefore retains the
    previously installed `0.97x` or `1.03x`; it is not literally held at `1.0x`.
    This is unchanged by the fixes above, which act on the telemetry and
-   first-frame conditions rather than on the stall branch.
+   arming conditions rather than on the stall branch.
 
-Both fixed rules live in `player::LiveSyncGate`, beside the controller they
-guard rather than inside `App`'s frame tick. They are playback protocol, not
-view state, and while they sat in `App` no test could reach them — which is why
-they went unnoticed. `LiveSync` and the gate now have 16 cases in the portable
-player suite that CI runs.
+Both rules live in `player::LiveSyncGate`, beside the controller they guard
+rather than inside `App`'s frame tick. The gate stayed correct in isolation
+through both falsified attempts, which is the lesson: the defect was never in
+the rule, it was in what the application handed the rule and when.
+
+`player::LiveSyncTurn` now owns that assembly — the per-load flags, the
+generation-filtered event drain, and the construction of the sample from
+`Diagnostics` — and `App` delegates to it rather than keeping its own copy. It
+is one object, driven by the application and by the portable tests in the same
+order, so there is no fixture to drift from the wiring. That is what the earlier
+cases lacked: they supplied a pre-first-frame paused observation the runtime
+usually did not produce, and `a recovery reopen concedes nothing before its own
+first frame` fed `buffering(false)` around the reopen and passed while asserting
+the exact behavior generation 17 falsified. The seam is a partial answer to
+architecture-audit finding 4; the rest of `App`'s orchestration is still not
+reachable by a test.
 
 ### Supervisor
 
@@ -345,10 +394,121 @@ abs((currentPlayback - previousPlayback) - elapsed) > 1 second
 
 Forward discontinuities that still make progress can be diagnostic only. A
 backward or no-progress discontinuity can classify the sample as degraded,
-emit `PlaybackInterrupted`, restart the steady window and, if degradation
-continues, contribute to decode-stall recovery. The health discontinuity
-counter resets per load and remains distinct from the number of
+emit `PlaybackInterrupted`, restart the steady window while still in Zap and,
+if degradation continues, contribute to decode-stall recovery. The health
+discontinuity counter resets per load and remains distinct from the number of
 `MPV_EVENT_PLAYBACK_RESTART` edges reported by mpv.
+
+#### Advancing replay is not a stall
+
+A provider session captured on 2026-08-07 exposed a different failure from the
+unsafe FFmpeg reconnect described under Transport recovery. The user-visible
+symptom was the same short section of video repeating until the stream was
+requested again. The log corroborates media-timeline discontinuities; by itself
+it cannot prove that the pictures repeated. The application leaves
+`PlayerConfig::transport_reconnect` at its `false` default, but the session log
+does not record the evaluated option or active network backend.
+
+Two automatic recoveries were observed to completion, and both were followed
+by the reported replay shape:
+
+- Generation 16 detected a progress stall, reopened, produced its first frame
+  after 3.19 seconds and passed the five-second healthy window. It then recorded
+  three discontinuities, separated by 3.53 and 15.12 seconds, before the user
+  selected another channel.
+- Generation 17 detected a progress stall, reopened and produced its first
+  frame after 3.79 seconds. It passed the healthy window, then recorded two
+  discontinuities 4.03 seconds apart. A user request for the same channel 24.91
+  seconds after the automatic load started created generation 18. That load
+  recorded six rebuffers across its first 30 minutes, no discontinuity, and no
+  channel replacement before session shutdown 57 minutes after it began.
+
+A third automatic recovery, generation 15, was replaced by a user request
+before its first frame and says nothing about the recovered result. The session
+also contains discontinuities without preceding recovery: generation 12 had
+three and generation 3 had one. There is no matching screen observation to say
+whether those were replay, legitimate MPEG-TS resets or damage. They prevent a
+classifier from defining replay as exclusively post-recovery, while recovery
+proximity remains useful corroborating context. The variable intervals also
+rule out hard-coding the roughly four-second spacing seen in generation 17.
+
+The evidence establishes a bad media timeline after two recoveries; it does not
+attribute repeated bytes to the provider, an intermediate transport layer or
+retained engine/controller state. Automatic recovery and a user channel request
+both reach the same mpv `loadfile replace` command, and a generation is
+ownership bookkeeping rather than a different network operation. They do have
+one concrete state difference: a user request resets `LiveSync`,
+`LiveSyncGate`, the displayed rebuffer count and mpv speed to `1.0x`, while
+`reopen_current` resets none of them. Generation 16 retained a 5.0-second live
+target. Generation 17 inherited 6.5 seconds, then falsely charged a further
+0.5-second concession at its recovered first frame to reach 7.0 seconds. These
+are distinct findings: the reopen retained an old target, and its own initial
+fill then raised that target. With about one second buffered during Zap against
+the resulting seven-second live target, the controller error is about minus six
+seconds and speed clamps to the `0.97x` floor. That retained and ratcheted state
+can change latency and playback rate and must be isolated experimentally, but it
+does not by itself explain backwards media movement. The later user request's
+success is evidence for timing or state-reset sensitivity, not proof that
+incrementing the generation fixed the stream.
+
+This condition escapes the present health policy. Playback advances normally
+while each repeated section is shown, so those samples are healthy and the
+cache can remain fed. Only the boundary that jumps backwards is degraded. The
+healthy-to-degraded edge already reaches the supervisor: the fold emits
+`interrupted`, and the application dispatches `PlaybackInterrupted`. The
+supervisor only acts on that event in Zap while a steady deadline exists, so it
+ignores the same edge after `steady-confirmed`. The next advancing sample also
+clears the continuous decode-degradation timer. The missing behavior is thus a
+Steady-state replay policy, not merely a new event path.
+
+Restarting on a count of generic discontinuities is not an acceptable fix.
+Live MPEG-TS can contain legitimate timestamp resets, splices and damage. The
+current fold reduces signed playback movement to a boolean discontinuity and
+also clamps the cache-end delta with `max(0, delta / elapsed)`. A backwards
+cache-end jump therefore becomes a zero input ratio, loses its sign and
+magnitude, and changes the degraded-reason classification. Preserve signed
+playback movement and deviation as well as signed cache-end movement; retain a
+nonnegative delivery rate only as a separately derived value. Correlate those
+signals with the load epoch, recovery history, cache state and sanitized engine
+warnings before defining a replay threshold.
+
+Replay recovery also needs its own episode invariant. Today
+`steady-confirmed` resets `attempt` to zero and clears `recovery_started_at`.
+Both observed replaying loads reached Steady before their first post-recovery
+discontinuity, so naively feeding replay back into the existing reducer would
+launder the budget and permit an unbounded succession of five-attempt episodes.
+Once replay is confirmed during recovery probation, it must inherit the
+original attempt count and start time. A confirmed replay on an otherwise fresh
+load starts a replay episode. `steady-confirmed` must not clear that episode;
+only a new user intent or a measured replay-free probation window may do so.
+Each recurrence inside the episode spends an attempt. If the attempt ceiling is
+exhausted or the next attempt would exceed the wall-clock deadline, recovery
+ends in the existing explicit Failed state; replay-free playback does not fail
+merely because probation ends. The probation duration and evidence threshold
+need fixtures and provider data, but the terminal invariant does not.
+
+A delayed fresh request and player recreation remain separate experiments.
+Recreation cannot cure provider-side replay, while another immediate request
+may reproduce it. Due-time budget enforcement is still required so an overdue
+effect cannot start after its episode deadline.
+
+Media3 does not supply a generic solution for this raw endpoint. Its live
+window, default-position recovery and `BehindLiveWindowException` apply to
+adaptive streams. The Media3 guidance explicitly says a progressive live
+stream has no live window and can be played at only one position. ExoPlayer's
+default load policy gives progressive live I/O failures six retries with capped
+backoff, but continuously delivered replayed media is not an I/O failure. HLS
+has stronger evidence: media sequence numbers expose falling behind the live
+window, and an unchanged playlist is declared stuck after 3.5 target
+durations. If the provider offers a real HLS endpoint, making transport
+selection reachable is preferable to inventing a live edge from progressive
+timestamps.
+
+TiviMate's current implementation is closed and is not a design contract. A
+2019 developer release note reported restarting playback after ten seconds of
+video freezing, which supports an application watchdog for no progress but
+does not show detection of a short section whose playback clock keeps
+advancing. Coax should not claim parity from that historical observation.
 
 ### Cross-cutting: generations
 
@@ -372,20 +532,27 @@ Validated against commit `f8a77d8` on 2026-08-05. The native core suite passed
 cases. These results strongly cover the supervisor, health fold, generations,
 event correlation and buffer-command gate. They did not cover the `LiveSync`
 control law or `App::update_live_sync`, which is where the highest-impact gaps
-sat and why both P1 defects survived that long.
+sat and why both original P1 defects survived that long.
 
-The native suite now runs 98 cases: the 66 core cases, the 15 that were
-previously built as a Windows binary and never executed, 16 new ones over the
-control law and its gate, and one over a late first-start edge from a superseded
-load. The two P1 defects are fixed and pinned by tests.
+The native suite now runs 124 cases: the 66 core cases, the 15 that were
+previously built as a Windows binary and never executed, 22 over the control
+law, its gate and the application turn that feeds them, one over a late
+first-start edge from a superseded load, and the rest added since. Both
+live-sync defects are fixed and pinned. The initial-fill rule is pinned twice
+over: in isolation on the gate, and through `player::LiveSyncTurn` on the two
+application sequences that falsified the earlier attempts — a first frame
+arriving in the same turn as the fill's pause property, and the single unpaused
+turn mpv publishes as a picture comes up.
 
-Primary-source web and code fact-check refreshed on the same date:
+Primary-source web and code fact-check was performed on 2026-08-05, with the
+progressive-live and replay comparison refreshed on 2026-08-07:
 
 | Area | Result | Best-practice alignment |
 |---|---|---|
 | mpv buffered-duration telemetry | Confirmed: `demuxer-cache-duration` is approximate, very unreliable and often unavailable | Preserve validity and fail safe at `1.0x`; never reinterpret missing telemetry as zero — **done at `5388982`** |
-| Initial buffering versus rebuffer | Confirmed against the pinned mpv source: initial fill and later underruns share the `cache-pause-wait` threshold and `paused-for-cache` state, though later underruns have additional trigger conditions; Media3 excludes initial buffering and seeks from `notifyRebuffer` | Gate rebuffer learning on first playback start — **done at `5388982`** |
+| Initial buffering versus rebuffer | Confirmed against the pinned mpv source: initial fill and later underruns share the `cache-pause-wait` threshold and `paused-for-cache` state. Confirmed again by observation that no reading near playback start separates them — the application receives playback start and the initial-fill pause edge in one turn, and mpv publishes a single unpaused turn mid-fill as the picture comes up | Arm rebuffer learning only on the supervisor's steady confirmation, and test the real application sequencing — **done on 2026-08-08** |
 | ExoPlayer comparison | Constants and proportional term confirmed; full controller also consumes live offset and buffered duration, smooths feasibility and adapts its target | Describe Coax as inspired by, not a port; do not claim manifest live offset unless it is actually available |
+| Progressive-live replay | Media3 has no live window for a progressive source. Its six-retry default handles load errors, not plausible bytes that replay prior content. HLS instead has media sequence, behind-window and stuck-playlist signals | Keep stall recovery, replay detection and live-edge control distinct; preserve signed playback and cache-end evidence, and retain one recovery episode across premature Steady transitions |
 | HLS start position | Contradicted: `-1` selects the last segment, while RFC 8216 recommends at least three target durations from the end for normal playback | Honor valid `EXT-X-START` or use a conservative demuxer default; do not equate the last segment with a robust live start |
 | HLS retry and connection options | Confirmed: `seg_max_retry=0` is the default; persistent/multiple HTTP settings are not retry controls; normal playlist refresh is required | Keep normal refresh below Coax, bound error retries across layers, and leave connection defaults alone without provider evidence |
 | Supervisor retry timing | Partially aligned: delays are capped exponential and recovery is bounded, but there is no jitter or `Retry-After` handling | Add bounded jitter and response-aware retry before broad distribution; enforce the wall-clock budget again when an attempt becomes due |
@@ -395,8 +562,9 @@ Primary-source web and code fact-check refreshed on the same date:
 | Priority | Finding | Practical effect |
 |---|---|---|
 | ~~P1~~ Fixed at `5388982` | ~~Preserve unavailable cache duration and hold `1.0x` until valid telemetry arrives~~ | Done. The flattened copy is gone, so an unavailable mpv property can no longer install `0.97x` and accumulate live latency |
-| ~~P1~~ Fixed at `5388982` | ~~Count rebuffer only after first playback has started~~ | Done, in `LiveSyncGate`. Neither a normal initial fill nor a recovery reopen adds 500ms to the target now |
-| ~~P1~~ Fixed at `5388982` | ~~Add direct `LiveSync` and application-integration tests~~ | 16 cases in the portable player suite, run by CI: telemetry loss and recovery, initial buffering, stall entry/exit, rate limiting, target bounds and reset. The integration half covers the extracted `LiveSyncGate`; `App` itself is still not reachable by a test (architecture audit finding 4) |
+| ~~P1~~ Fixed on 2026-08-08 | ~~Stop co-incident initial-fill and first-frame signals from counting as a rebuffer~~ | Done. Arming is the supervisor's steady confirmation, cleared for every load by `begin_health_load()` rather than by `LiveSyncGate::reset()`, which deliberately does not run on ordinary reopens. A first frame, and a momentary unpaused turn after it, were both tried and both falsified against the runtime |
+| ~~P1~~ Fixed on 2026-08-08 | ~~Add an application-level test for player-event, pause-property and live-sync sequencing~~ | Done. `player::LiveSyncTurn` holds the per-load flags, the generation-filtered event drain and the sample assembly; `App` delegates to it, and the portable cases drive the same object in the same order, including both sequences that defeated the earlier guards |
+| P1 | Make advancing replay observable and terminally bounded without treating every discontinuity as fatal | Record signed playback and cache-end deviation plus sanitized engine evidence; reproduce advancing playback separated by backward resets; retain the episode across `steady-confirmed`; and end repeated replay at the attempt or wall-clock ceiling |
 | P2 | Decide and document target decay semantics | The present controller intentionally or accidentally retains every 500ms concession until reset; it does not reproduce ExoPlayer's adaptive target |
 | P2 now; P1 before HLS support | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Avoids standards-disfavored edge startup and makes the currently unreachable recovery branch real |
 | P2 | Remove HLS connection overrides unless reproduced provider evidence requires them; define one error-retry budget across FFmpeg and Coax | Preserves normal playlist refresh and avoids mistaking connection strategy for retry control |
@@ -416,29 +584,45 @@ settings on the same representative channel set and record:
 - rebuffer count, total rebuffer duration and time-to-resume per playback hour;
 - recovery detection-to-first-frame time, attempt count and terminal-failure
   rate by classified cause;
+- signed playback movement versus monotonic expected movement and signed
+  cache-end movement, correlated with load epoch, time since recovery and cache
+  state; retain the clamped delivery rate as a distinct derived measurement;
+- credential-safe engine warning details or structured warning categories,
+  correlated with the health sample that follows them; the current adapter
+  discards all warning text, leaving thousands of component-only lines that
+  cannot attribute the next discontinuity;
 - buffered-duration availability, controller speed duty cycle and target
   changes, without relabelling the proxy as measured live offset;
 - dropped/late frames, decode degradation and A/V sync while speed correction
   is active; and
 - process memory together with demuxer forward/back-buffer readings.
 
-The regression matrix should include unavailable cache telemetry, initial fill,
-brief jitter that the cache should absorb, a connection reset, prolonged input
-silence, repeated/backward timestamps, authentication failure, rapid channel
-changes and player recreation. HLS adds playlist stagnation, a missing segment,
+The regression matrix should include unavailable cache telemetry and initial
+fill, including the application turn in which first frame and the fill pause
+edge coincide with no earlier paused observation. It should also include a
+recovery reopen with the same coincident signals, brief jitter that the cache
+should absorb, a connection reset, prolonged input silence, an isolated
+legitimate timestamp reset, and advancing playback separated by repeated
+backward resets. It also covers authentication failure, rapid channel changes
+and player recreation. HLS adds playlist stagnation, a missing segment,
 `EXT-X-START`, a sliding live window and startup at the conservative live
-position. Provider testing remains necessary for the observed TS replay case,
-which unit tests cannot reproduce from mpv properties alone.
+position. A deterministic fold fixture can prove that replay evidence is
+classified and bounded, but provider testing remains necessary to attribute
+the observed TS replay and select a safe threshold.
 
 ## Trade-offs
 
-**Latency for stability.** Each rebuffer concedes 500ms — counting only
-underruns after playback has started, not the opening fill or a recovery
-reopen. On a persistently bad channel the controller settles further behind live
-rather than fighting a losing battle, up to the 30s ceiling. For live sport this
-is a real cost — a phone notification can arrive before the picture — which is
-why the increment is small. The current controller retains each increment and
-claws back only additional buffered duration above the raised target.
+**Latency for stability.** The intended policy is that each true underrun after
+established playback concedes 500ms, while opening fill and recovery fill do
+not. The current application wiring violates that policy: 15 of 18 requested
+loads in the captured session charged a concession at first frame, and
+generation 17's recovery reopen did the same. A channel therefore commonly
+starts at 4.5 seconds rather than the configured 4.0-second target, and the
+target only ratchets upward. On a persistently bad channel, genuine concessions
+still trade live proximity for stability, up to the 30-second ceiling. For live
+sport this is a real cost — a phone notification can arrive before the picture.
+Correcting the false concessions is P1; deciding whether genuine concessions
+should decay is a separate policy question.
 
 **Buffer memory for absorption.** The 64 MiB cache ceiling is a ceiling, not an
 allocation, and remains a tuning value rather than a measured optimum.
@@ -448,9 +632,12 @@ its first frame. A server that can deliver buffered content faster than real
 time can still turn some of that readahead into live latency.
 
 **Bounded recovery can surface failure.** Five attempts and a nominal 30-second
-budget prevent a dead provider or broken decoder from producing an infinite
-reopen loop. Due-time budget enforcement remains a required fix for the late UI
-poll edge case. The cost is an explicit failed state that needs a new channel
+budget prevent a continuously failing ordinary recovery episode from reopening
+forever. They do not yet bound advancing replay: the five-second Steady
+transition clears the episode before the observed discontinuities arrive. A
+replay episode must survive that transition and terminate at the same attempt or
+time ceiling. Due-time budget enforcement remains a required fix for the late
+UI poll edge case. The cost is an explicit failed state that needs a new channel
 intent; diagnostics retain the detection, current attempt, elapsed budget and
 policy version.
 
@@ -484,14 +671,17 @@ project exists.
 | Risk | Mitigation |
 |---|---|
 | Buffered duration is a poor or unavailable proxy for live offset | Diagnostics state the offset is estimated and report the property as unavailable rather than `0.0s`; the controller holds `1.0x` whenever it is unavailable |
-| Initial buffering is mistaken for a rebuffer | Learning is gated on first playback start, in `LiveSyncGate` |
+| Initial or recovery fill is mistaken for a rebuffer | Keep learning disarmed until the application has observed a post-first-frame non-paused state; cover the coincident first-frame and pause edge through application-level sequencing tests |
 | Speed changes become audible | Pitch correction enabled and range capped at ±3%, matching ExoPlayer's defaults; representative listening tests remain outstanding |
 | Reconnect options silently rejected by a future libmpv | The wrapper logs every rejected option at startup |
 | Controller fights a stall instead of riding it out | Updates are suspended during `paused-for-cache` or `core-idle`; required fix is to actively install `1.0x` on entry and recompute on exit |
 | HLS starts too close to the playlist edge (latent while the HLS branch is unreachable) | Required fix is to replace `live_start_index=-1`, prefer a valid `EXT-X-START`, and otherwise retain a conservative start |
 | HLS connection overrides reduce robustness or throughput | Leave FFmpeg's persistent/multiple HTTP defaults enabled unless a provider-specific failure is reproduced |
 | Many clients retry a provider outage in lockstep | Add bounded jitter to the capped exponential schedule while preserving the total recovery budget |
+| A progressive stream advances while replaying prior content | Preserve signed playback and cache-end movement plus recovery-epoch evidence; require corroborated repeated backward resets, and retain the replay episode across `steady-confirmed` until probation succeeds or the episode becomes Failed |
+| Legitimate MPEG-TS timestamp resets are mistaken for replay | Never restart from a generic discontinuity count; keep isolated and forward resets diagnostic and validate any clustered-backward rule against representative channels |
 | Warning-log wording changes in mpv or FFmpeg | Exact failure classification can fall back to generic end handling; keep classifier fixtures aligned with the pinned runtime |
+| Blanket warning redaction prevents replay attribution | Preserve a credential-safe sanitized message or structured category and test the sanitizer against authenticated URL, query, header and provider-specific warning fixtures before persisting text |
 | The shipped mpv network backend or FFmpeg version changes | Log `mpv-version`, `mpv-configuration` and `ffmpeg-version`; validate transport options against those values |
 | Declared buffer policy and applied mpv value diverge | Remove the duplicate `"64MiB"` literal and format `core::kDemuxerMaxBytes` for the mpv option |
 | Fixed policy values do not match real provider behavior | Capture per-channel buffer, interruption, recovery and live-latency measurements before retuning |
@@ -505,10 +695,14 @@ project exists.
 - [FFmpeg HLS demuxer documentation at the revision checked on 2026-08-05](https://github.com/FFmpeg/FFmpeg/blob/d295add2225e1ad9ba9d55cb612cce50072dc45d/doc/demuxers.texi)
 - [FFmpeg HLS implementation defaults at the revision checked on 2026-08-05](https://github.com/FFmpeg/FFmpeg/blob/d295add2225e1ad9ba9d55cb612cce50072dc45d/libavformat/hls.c)
 - [RFC 8216 HLS client responsibilities](https://datatracker.ietf.org/doc/html/rfc8216#section-6.3.3)
-- [Android Media3 live-streaming guidance (retrieved 2026-08-05)](https://developer.android.com/media/media3/exoplayer/live-streaming)
+- [Android Media3 live-streaming guidance (retrieved 2026-08-07)](https://developer.android.com/media/media3/exoplayer/live-streaming)
 - [AndroidX `LivePlaybackSpeedControl` API (retrieved 2026-08-05)](https://developer.android.com/reference/androidx/media3/exoplayer/LivePlaybackSpeedControl)
 - [AndroidX `DefaultLoadControl` at the revision checked on 2026-08-05](https://github.com/androidx/media/blob/5fb306449733dd71595700c1227ad6087578c559/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultLoadControl.java)
 - [AndroidX `DefaultLivePlaybackSpeedControl` at the revision checked on 2026-08-05](https://github.com/androidx/media/blob/5fb306449733dd71595700c1227ad6087578c559/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultLivePlaybackSpeedControl.java)
+- [AndroidX progressive-live retry policy at the revision checked on 2026-08-07](https://github.com/androidx/media/blob/5fb306449733dd71595700c1227ad6087578c559/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/upstream/DefaultLoadErrorHandlingPolicy.java)
+- [AndroidX HLS stuck-playlist detection at the revision checked on 2026-08-07](https://github.com/androidx/media/blob/5fb306449733dd71595700c1227ad6087578c559/libraries/exoplayer_hls/src/main/java/androidx/media3/exoplayer/hls/playlist/DefaultHlsPlaylistTracker.java)
+- [AndroidX HLS behind-live-window detection at the revision checked on 2026-08-07](https://github.com/androidx/media/blob/5fb306449733dd71595700c1227ad6087578c559/libraries/exoplayer_hls/src/main/java/androidx/media3/exoplayer/hls/HlsChunkSource.java)
+- [Historical TiviMate 1.3.2 developer release note (retrieved 2026-08-07)](https://www.reddit.com/r/TiviMate/comments/bjtlr0/version_132/)
 - [Google Cloud retry strategy (retrieved 2026-08-05)](https://docs.cloud.google.com/storage/docs/retry-strategy)
 - [RFC 9110 idempotent methods](https://datatracker.ietf.org/doc/html/rfc9110#section-9.2.2)
 - [RFC 9110 `403 Forbidden`](https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.4)

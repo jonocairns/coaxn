@@ -453,7 +453,7 @@ void App::play(const core::Channel& channel) {
 
     // Latency learned on one channel says nothing about the next.
     live_sync_.reset();
-    live_sync_gate_.reset();
+    live_sync_turn_.reset();
     rebuffer_count_ = 0;
     player_.set_speed(1.0);
 
@@ -474,7 +474,10 @@ void App::begin_health_load() {
                                                      target.cache_seconds);
     health_snapshot_ = playback_health_->snapshot;
     next_health_sample_ = now + core::kDefaultHealthPolicy.sample_interval;
-    first_frame_seen_ = false;
+    // Every load starts unestablished, so no load can concede latency for its
+    // own opening fill. Recovery reopens reach here too, which is why this and
+    // not LiveSyncGate::reset() owns that lifetime.
+    live_sync_turn_.begin_load();
     stall_reported_ = false;
     decode_stall_reported_ = false;
     exact_failure_reported_ = false;
@@ -483,7 +486,13 @@ void App::begin_health_load() {
 }
 
 void App::process_player_events() {
-    for (const auto& event : player_.take_events()) {
+    const auto events = player_.take_events();
+    // Live-sync sees this turn's events before update_live_sync() reads this
+    // turn's properties, which is the real ordering and the one the portable
+    // LiveSyncTurn cases pin. Both signals can describe the same instant.
+    live_sync_turn_.observe_events(events, generation_);
+
+    for (const auto& event : events) {
         std::visit(Overloaded{
             [&](const player::LoadCommandResult& result) {
                 if (!result.accepted) {
@@ -499,7 +508,6 @@ void App::process_player_events() {
             },
             [&](const player::FirstPlaybackStart&) {
                 if (event.generation != generation_) return;
-                first_frame_seen_ = true;
                 supervisor_.dispatch(core::FirstFrame{event.generation});
             },
             [&](const player::EndFileEvent& ended) {
@@ -585,7 +593,7 @@ void App::sample_playback_health() {
     const auto fold = core::fold_playback_health(
         *playback_health_, player_.health_observation(), now,
         {.container_fps = diagnostics.container_fps,
-         .first_frame_seen = first_frame_seen_,
+         .first_frame_seen = live_sync_turn_.first_frame_seen(),
          .main_process_cpu_percent = std::nullopt,
          .phase = diagnostics.buffer_phase,
          .target_seconds = target.cache_seconds});
@@ -640,7 +648,7 @@ void App::execute_supervisor_effect(const core::SupervisorEffect& effect) {
                 // The new backend starts at 1.0x. Reset the controller too so
                 // its cached old speed cannot suppress the write the new mpv needs.
                 live_sync_.reset();
-                live_sync_gate_.reset();
+                live_sync_turn_.reset();
                 rebuffer_count_ = 0;
                 player_.set_speed(1.0);
                 player_.set_volume(volume_);
@@ -664,6 +672,10 @@ void App::on_supervisor_state_changed(const core::SupervisorState& state) {
     supervisor_snapshot_ = core::project_supervisor_stats(state, supervisor_clock_.now());
     if (state.name == core::SupervisorStateName::Steady) {
         player_.apply_buffer_phase(state.generation, core::BufferPhase::Steady);
+        // Steady is a first frame plus a healthy window, which is the only
+        // reading of "playback has started" that mpv's opening fill cannot
+        // produce. Until it arrives, a paused-for-cache edge is still the fill.
+        if (state.generation == generation_) live_sync_turn_.note_playback_established();
     } else if (state.name == core::SupervisorStateName::Failed) {
         set_status(state.failure
                        ? std::format("Playback failed: {}", core::to_string(*state.failure))
@@ -673,13 +685,7 @@ void App::on_supervisor_state_changed(const core::SupervisorState& state) {
 }
 
 void App::update_live_sync() {
-    const auto& diagnostics = player_.diagnostics();
-
-    const auto step = live_sync_gate_.observe(
-        {.buffered_seconds = diagnostics.cache_duration_seconds,
-         .paused_for_cache = diagnostics.paused_for_cache,
-         .core_idle        = diagnostics.core_idle,
-         .first_frame_seen = first_frame_seen_});
+    const auto step = live_sync_turn_.observe(player_.diagnostics());
 
     if (step.rebuffered) {
         ++rebuffer_count_;

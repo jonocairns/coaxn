@@ -14,7 +14,7 @@
 #include "core/presentation.hpp"
 #include "core/supervisor_host.hpp"
 #include "player/live_sync.hpp"
-#include "player/live_sync_gate.hpp"
+#include "player/live_sync_turn.hpp"
 #include "player/mpv_player.hpp"
 #include "win/app_window.hpp"
 #include "win/composition.hpp"
@@ -175,10 +175,13 @@ private:
     int         last_video_width_  = 0;
     int         last_video_height_ = 0;
 
-    // Live-offset control. The gate decides what each turn is allowed to learn
-    // from mpv's cache signalling; the controller decides the speed.
+    // Live-offset control. The turn assembles what each frame reports and its
+    // gate decides what may be learned from mpv's cache signalling; the
+    // controller decides the speed. The turn owns the per-load flags because
+    // the question is when a signal arrived relative to the others in its turn,
+    // which no single half can answer.
     player::LiveSync     live_sync_;
-    player::LiveSyncGate live_sync_gate_;
+    player::LiveSyncTurn live_sync_turn_;
     int                  rebuffer_count_ = 0;
 
     // Presentation lifetime. The budget bounds and paces rebuilds; the rest is
@@ -199,7 +202,6 @@ private:
     core::BufferHealthSnapshot health_snapshot_;
     core::SupervisorStatsSnapshot supervisor_snapshot_;
     core::TimePoint next_health_sample_{};
-    bool first_frame_seen_ = false;
     bool stall_reported_ = false;
     bool decode_stall_reported_ = false;
     bool exact_failure_reported_ = false;
