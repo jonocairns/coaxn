@@ -47,12 +47,22 @@ public:
     [[nodiscard]] std::optional<DeviceLossReport> take_device_loss();
     [[nodiscard]] bool device_lost() const { return loss_.lost(); }
 
+    // Whether there is anything to draw into. A resize whose render target
+    // could not be recreated leaves a live device behind an unusable swap
+    // chain, which is not a device loss and which nothing reports again:
+    // end_frame returns before Present, so no further call can fail. The
+    // missing target is therefore the signal itself, and the presentation
+    // owner polls it.
+    [[nodiscard]] bool has_render_target() const { return static_cast<bool>(render_target_); }
+
     [[nodiscard]] ID3D11Device*    device()       const { return device_.get(); }
     [[nodiscard]] IDXGIDevice*     dxgi_device()  const { return dxgi_device_.get(); }
     [[nodiscard]] IDXGISwapChain1* swapchain()    const { return swapchain_.get(); }
 
 private:
-    bool create_render_target();
+    // Returns the failing HRESULT rather than a Boolean, so the caller can tell
+    // a device removal from any other cause and route it accordingly.
+    HRESULT create_render_target();
     // Classifies a DXGI result and latches a loss report if it is one.
     void note_result(HRESULT hr, const char* operation);
 

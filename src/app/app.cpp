@@ -258,6 +258,18 @@ void App::service_presentation() {
         presentation_budget_.request(supervisor_clock_.now());
     }
 
+    // The other way the surface can become unusable: a resize recreates the
+    // swap chain's buffers and then fails to build a render target over them,
+    // for a reason that is not a device loss and so latches nothing. Rebuilding
+    // is the same remedy, and the budget bounds it the same way. Guarded so it
+    // reports once per episode rather than once per frame — after this the
+    // surface is either back or presentation_ready_ is false.
+    if (presentation_ready_ && !ui_.has_render_target() &&
+        !presentation_budget_.outstanding() && !presentation_budget_.exhausted()) {
+        log::warn("UI render target missing with a live device; rebuilding presentation");
+        presentation_budget_.request(supervisor_clock_.now());
+    }
+
     switch (presentation_budget_.poll(supervisor_clock_.now())) {
         case core::RebuildDecision::Hold:
             return;

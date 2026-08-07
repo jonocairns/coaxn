@@ -81,8 +81,9 @@ bool UiLayer::create(int width, int height, std::string& error) {
         return false;
     }
 
-    if (!create_render_target()) {
-        error = "Creating the UI render target failed";
+    if (const HRESULT target = create_render_target(); FAILED(target)) {
+        error = std::format("Creating the UI render target failed (0x{:08X})",
+                            static_cast<unsigned>(target));
         return false;
     }
 
@@ -144,13 +145,17 @@ std::optional<DeviceLossReport> UiLayer::take_device_loss() {
     return std::exchange(pending_loss_, std::nullopt);
 }
 
-bool UiLayer::create_render_target() {
+HRESULT UiLayer::create_render_target() {
     ComPtr<ID3D11Texture2D> back_buffer;
-    if (FAILED(swapchain_->GetBuffer(0, IID_PPV_ARGS(back_buffer.put())))) {
-        return false;
+    // Both results are carried out rather than collapsed to a Boolean. One of
+    // them can be a device removal, which has to reach note_result for recovery
+    // to start at all; the rest have to reach a log to be diagnosable. A bare
+    // false says neither.
+    if (const HRESULT hr = swapchain_->GetBuffer(0, IID_PPV_ARGS(back_buffer.put()));
+        FAILED(hr)) {
+        return hr;
     }
-    return SUCCEEDED(device_->CreateRenderTargetView(back_buffer.get(), nullptr,
-                                                     render_target_.put()));
+    return device_->CreateRenderTargetView(back_buffer.get(), nullptr, render_target_.put());
 }
 
 void UiLayer::resize(int width, int height) {
@@ -160,20 +165,31 @@ void UiLayer::resize(int width, int height) {
         return;
     }
 
-    width_  = width;
-    height_ = height;
-
     render_target_.reset();
-    const HRESULT hr = swapchain_->ResizeBuffers(0, static_cast<UINT>(width_),
-                                                 static_cast<UINT>(height_),
-                                                 DXGI_FORMAT_UNKNOWN, 0);
-    if (FAILED(hr)) {
+    const HRESULT resized = swapchain_->ResizeBuffers(0, static_cast<UINT>(width),
+                                                      static_cast<UINT>(height),
+                                                      DXGI_FORMAT_UNKNOWN, 0);
+    if (FAILED(resized)) {
         // Resizing is the other place a removed adapter surfaces, and a window
         // being dragged between displays hits it before any present does.
-        note_result(hr, "ResizeBuffers");
+        note_result(resized, "ResizeBuffers");
         return;
     }
-    create_render_target();
+
+    if (const HRESULT target = create_render_target(); FAILED(target)) {
+        // The buffers are the new size and nothing can draw into them. Nothing
+        // later reports that either, because end_frame stops before Present, so
+        // this is the one place the failure can be classified.
+        note_result(target, "render target creation on resize");
+        return;
+    }
+
+    // Recorded only now. A resize is complete once the buffers and a target
+    // over them both exist; committing the size before the target means a
+    // same-size retry short-circuits on the check above and the surface stays
+    // unusable for the rest of the process.
+    width_  = width;
+    height_ = height;
 }
 
 void UiLayer::begin_frame() {
