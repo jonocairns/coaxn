@@ -116,6 +116,17 @@ SupervisorReduction reduce_deadline(const SupervisorState& state, TimePoint now,
                                     const RecoveryPolicy& policy) {
     if (state.name == SupervisorStateName::Zap && state.deadlines.steady_at &&
         now >= *state.deadlines.steady_at) {
+        // The window is evidence of continuous playback, so it cannot expire
+        // while the cache is still holding playback back. PlaybackInterrupted
+        // alone does not cover this: the fold emits it on a healthy-to-degraded
+        // transition, and an opening fill that began before first frame is
+        // already degraded when the window is armed, so it produces no later
+        // edge and the window would otherwise run out mid-fill.
+        if (state.cache_paused) {
+            auto next = state;
+            next.deadlines.steady_at = now + policy.steady_healthy_window;
+            return settle(state, next, "steady-window-held-by-cache-pause", now, policy);
+        }
         auto next = state;
         next.attempt = 0;
         next.deadlines = {};
@@ -193,6 +204,16 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
         if constexpr (std::is_same_v<T, CacheState>) {
             auto next = state;
             next.cache_paused = value.paused;
+            // Entering cache pause interrupts the evidence the window is
+            // counting, whether or not the fold classified it as a new
+            // degradation edge. Restarting here makes the confirmation mean
+            // five seconds without an observed fill, rather than five seconds
+            // since a first frame.
+            if (value.paused && state.name == SupervisorStateName::Zap &&
+                state.deadlines.steady_at) {
+                next.deadlines.steady_at = now + policy.steady_healthy_window;
+                return settle(state, next, "cache-pause-restarted-steady-window", now, policy);
+            }
             return settle(state, next, "cache-state-observed", now, policy);
         } else if constexpr (std::is_same_v<T, AuthRejected>) {
             if (state.name == SupervisorStateName::Idle) return ignore(state);

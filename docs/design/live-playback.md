@@ -267,7 +267,10 @@ and the two wrong readings of it are all easy to reintroduce.
    `steady_healthy_window`. That is the application's existing definition of
    playback having actually started, it is the same standard the supervisor
    already applies before clearing a recovery attempt count — a first frame by
-   itself is not evidence — and an opening fill cannot manufacture it. The
+   itself is not evidence — and an opening fill cannot manufacture it. Hanging
+   arming off `Steady` also exposed that the reducer was not enforcing that
+   standard; see the Supervisor section for the deadline defect this found and
+   closed, without which this fix would have inherited it. The
    signal is per load. `App::begin_health_load()` clears it on user loads and on
    every recovery reopen, while `LiveSyncGate::reset()` deliberately does not
    run on ordinary reopens because `was_paused_for_cache_` and learned
@@ -311,6 +314,28 @@ schedule is `[500, 1000, 2000, 4000, 5000]` milliseconds, with a 30-second
 wall-clock budget for the whole recovery episode. The attempt count clears only
 after the recovered load produces a first frame and then remains healthy for
 five seconds. A first frame by itself is not recovery evidence.
+
+Until 2026-08-08 that last sentence was a claim the reducer did not enforce. A
+first frame armed the five-second deadline, and `PlaybackInterrupted` was the
+only thing that restarted it — but the fold emits that on a healthy-to-degraded
+*transition*, so a `paused-for-cache` fill that began before first frame is
+already degraded when the window is armed and produces no later edge. The
+deadline then expired mid-fill and confirmed `Steady` while the cache was still
+holding playback back. Two rules now close it: entering cache pause in Zap
+restarts the window, and the deadline cannot confirm `Steady` while
+`cache_paused` is set — it restarts instead. Confirmation therefore means five
+seconds with no observed fill, at the health sampler's 500ms resolution, rather
+than five seconds since a first frame. This was found because live-sync arming
+was hung off `Steady` and inherited the bug; `apply_buffer_phase(Steady)` was
+also switching to steady buffer targets mid-fill.
+
+The consequence is that a load which never manages five seconds without a fill
+never confirms, so it never clears an attempt count, never moves to steady
+buffer targets, and never concedes live latency. For a channel in that state the
+supervisor's stall detection and recovery are the relevant machinery, not a
+500ms target nudge — but it does mean the rebuffer concession cannot help a
+channel that has never once played cleanly. Revisit alongside the target decay
+semantics in the priority table.
 
 The base schedule is truncated exponential backoff, but it is deterministic.
 Network retry guidance recommends adding jitter so many clients do not retry a
@@ -534,15 +559,23 @@ event correlation and buffer-command gate. They did not cover the `LiveSync`
 control law or `App::update_live_sync`, which is where the highest-impact gaps
 sat and why both original P1 defects survived that long.
 
-The native suite now runs 124 cases: the 66 core cases, the 15 that were
-previously built as a Windows binary and never executed, 22 over the control
+The native suite now runs 127 cases: the 66 core cases, the 15 that were
+previously built as a Windows binary and never executed, 23 over the control
 law, its gate and the application turn that feeds them, one over a late
 first-start edge from a superseded load, and the rest added since. Both
-live-sync defects are fixed and pinned. The initial-fill rule is pinned twice
-over: in isolation on the gate, and through `player::LiveSyncTurn` on the two
-application sequences that falsified the earlier attempts — a first frame
-arriving in the same turn as the fill's pause property, and the single unpaused
-turn mpv publishes as a picture comes up.
+live-sync defects are fixed and pinned.
+
+The initial-fill rule is pinned three ways, because two of its predecessors
+passed a weaker test and shipped broken. In isolation on the gate; through
+`player::LiveSyncTurn` on the two application sequences that falsified those
+attempts — a first frame arriving in the same turn as the fill's pause property,
+and the single unpaused turn mpv publishes as a picture comes up; and through a
+case that drives the real `PlaybackSupervisor` against a fake clock in the frame
+loop's own order, so the arming signal is the one the reducer actually produces
+rather than a flag the test sets by hand. That last one is what caught the
+deadline defect: the gate's rules can be right, the turn assembly can be right,
+and the whole thing still concedes latency because the signal it arms on does
+not mean what its name says.
 
 Primary-source web and code fact-check was performed on 2026-08-05, with the
 progressive-live and replay comparison refreshed on 2026-08-07:
@@ -563,7 +596,8 @@ progressive-live and replay comparison refreshed on 2026-08-07:
 |---|---|---|
 | ~~P1~~ Fixed at `5388982` | ~~Preserve unavailable cache duration and hold `1.0x` until valid telemetry arrives~~ | Done. The flattened copy is gone, so an unavailable mpv property can no longer install `0.97x` and accumulate live latency |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Stop co-incident initial-fill and first-frame signals from counting as a rebuffer~~ | Done. Arming is the supervisor's steady confirmation, cleared for every load by `begin_health_load()` rather than by `LiveSyncGate::reset()`, which deliberately does not run on ordinary reopens. A first frame, and a momentary unpaused turn after it, were both tried and both falsified against the runtime |
-| ~~P1~~ Fixed on 2026-08-08 | ~~Add an application-level test for player-event, pause-property and live-sync sequencing~~ | Done. `player::LiveSyncTurn` holds the per-load flags, the generation-filtered event drain and the sample assembly; `App` delegates to it, and the portable cases drive the same object in the same order, including both sequences that defeated the earlier guards |
+| ~~P1~~ Fixed on 2026-08-08 | ~~Add an application-level test for player-event, pause-property and live-sync sequencing~~ | Done. `player::LiveSyncTurn` holds the per-load flags, the generation-filtered event drain and the sample assembly; `App` delegates to it, and the portable cases drive the same object in the same order, including both sequences that defeated the earlier guards and one that drives the real supervisor and deadline rather than setting the arming flag by hand |
+| ~~P1~~ Fixed on 2026-08-08 | ~~Make `Steady` mean five healthy seconds rather than five seconds since a first frame~~ | Done. The deadline could confirm mid-fill because the fold's interrupted edge never fires for a pause that predates the window. Found by hanging live-sync arming off `Steady`; it also had `apply_buffer_phase(Steady)` switching to steady buffer targets while the cache was still filling |
 | P1 | Make advancing replay observable and terminally bounded without treating every discontinuity as fatal | Record signed playback and cache-end deviation plus sanitized engine evidence; reproduce advancing playback separated by backward resets; retain the episode across `steady-confirmed`; and end repeated replay at the attempt or wall-clock ceiling |
 | P2 | Decide and document target decay semantics | The present controller intentionally or accidentally retains every 500ms concession until reset; it does not reproduce ExoPlayer's adaptive target |
 | P2 now; P1 before HLS support | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Avoids standards-disfavored edge startup and makes the currently unreachable recovery branch real |

@@ -299,6 +299,62 @@ TEST_CASE("healthy steady window restarts only while armed and phase changes onc
     CHECK_FALSE(apply(state, PlaybackInterrupted{Generation{1}}, 12).transition);
 }
 
+TEST_CASE("steady is not confirmed while the cache is still holding playback back") {
+    auto state = step(initial_supervisor_state(), ChannelRequested{Generation{1}}, 0);
+    state = step(state, StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs}, .01);
+
+    // The opening fill starts before anything is shown, so the health fold has
+    // already classified the load degraded by the time a frame arrives. There
+    // is no healthy-to-degraded transition left, and PlaybackInterrupted is the
+    // only other thing that restarts the window.
+    state = step(state, CacheState{Generation{1}, true}, 1);
+    state = step(state, FirstFrame{Generation{1}}, 2);
+    CHECK(next_deadline_at(state) == at(7));
+
+    // The fill outlasts the window. Confirming here would mean "five seconds
+    // since a first frame", not "five seconds of playback".
+    auto result = apply(state, DeadlineReached{}, 7);
+    CHECK(result.state.name == SupervisorStateName::Zap);
+    CHECK(result.transition->reason == "steady-window-held-by-cache-pause");
+    CHECK(next_deadline_at(result.state) == at(12));
+
+    // It holds for as long as the fill does.
+    result = apply(result.state, DeadlineReached{}, 12);
+    CHECK(result.state.name == SupervisorStateName::Zap);
+    CHECK(next_deadline_at(result.state) == at(17));
+
+    // Playback finally starts. The window still has to run out from here.
+    state = step(result.state, CacheState{Generation{1}, false}, 13);
+    CHECK(next_deadline_at(state) == at(17));
+    CHECK_FALSE(apply(state, DeadlineReached{}, 16).transition);
+    state = step(state, DeadlineReached{}, 17);
+    CHECK(state.name == SupervisorStateName::Steady);
+}
+
+TEST_CASE("entering the cache pause restarts the steady window") {
+    auto state = step(initial_supervisor_state(), ChannelRequested{Generation{1}}, 0);
+    state = step(state, StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs}, .01);
+    state = step(state, FirstFrame{Generation{1}}, 1);
+    CHECK(next_deadline_at(state) == at(6));
+
+    // A fill entered after the window is armed interrupts the evidence it is
+    // counting, whether or not the fold called it a new degradation edge.
+    auto result = apply(state, CacheState{Generation{1}, true}, 3);
+    CHECK(result.transition->reason == "cache-pause-restarted-steady-window");
+    CHECK(next_deadline_at(result.state) == at(8));
+
+    // Leaving it does not restart anything; the window simply runs.
+    state = step(result.state, CacheState{Generation{1}, false}, 4);
+    CHECK(next_deadline_at(state) == at(8));
+    state = step(state, DeadlineReached{}, 8);
+    CHECK(state.name == SupervisorStateName::Steady);
+
+    // Outside Zap it is only a cache observation: Steady has no window to hold.
+    const auto settled = apply(state, CacheState{Generation{1}, true}, 9);
+    CHECK(settled.transition->reason == "cache-state-observed");
+    CHECK(settled.state.name == SupervisorStateName::Steady);
+}
+
 TEST_CASE("progress and decode stalls use transport branch and shared budget") {
     auto state = step(reach_steady(), PlaybackStalled{Generation{1}, StallKind::Progress}, 20);
     CHECK(state.detection == DetectionReason::ProgressStall);

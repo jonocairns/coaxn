@@ -5,6 +5,8 @@
 #include <optional>
 #include <span>
 
+#include "core/policy.hpp"
+#include "core/supervisor_host.hpp"
 #include "player/live_sync.hpp"
 #include "player/live_sync_gate.hpp"
 #include "player/live_sync_turn.hpp"
@@ -499,4 +501,126 @@ TEST_CASE("a first frame belonging to a superseded load is not this load's") {
     CHECK_FALSE(frame(turn, sync, drain(first_frame(superseded)), filling(), 0.0).rebuffered);
     CHECK_FALSE(turn.first_frame_seen());
     CHECK(sync.target_offset_seconds() == Approx(4.0));
+}
+
+// The revised design's critical integration. The cases above hand
+// LiveSyncTurn its arming decision directly, which is the right shape for the
+// gate's own rules but assumes the supervisor's steady confirmation means what
+// it claims. It has to be driven for real: `Steady` is reached by a deadline,
+// and the fold that would otherwise restart that deadline emits its interrupted
+// edge only on a healthy-to-degraded transition. An opening fill that begins
+// before first frame is already degraded when the window is armed.
+
+namespace {
+
+class FrameClock final : public core::SupervisorClock {
+public:
+    core::TimePoint current{};
+    [[nodiscard]] core::TimePoint now() const override { return current; }
+};
+
+// App::run()'s frame loop, reduced to the parts that decide whether a turn may
+// concede latency, in the order run() uses them: the player-event drain, the
+// supervisor poll, the interval health sample that dispatches cache state, and
+// the live-sync update. The poll deliberately precedes the sample, as it does
+// in the application.
+struct AppLoop {
+    FrameClock                clock;
+    player::LiveSyncTurn      turn;
+    player::LiveSync          sync;
+    core::PlaybackSupervisor  supervisor;
+    core::Generation          generation{1};
+    std::optional<bool>       last_cache_state_dispatched;
+    core::TimePoint           next_health_sample{};
+    int                       rebuffers = 0;
+
+    AppLoop()
+        : supervisor(clock, {
+              .on_effect = {},
+              // App::on_supervisor_state_changed.
+              .on_state_changed = [this](const core::SupervisorState& state) {
+                  if (state.name == core::SupervisorStateName::Steady &&
+                      state.generation == generation) {
+                      turn.note_playback_established();
+                  }
+              },
+              .on_transition = {}}) {}
+
+    // App::play() followed by App::begin_health_load().
+    void play() {
+        supervisor.dispatch(core::ChannelRequested{generation});
+        supervisor.dispatch(core::StreamLoadIssued{generation,
+                                                   core::RecoveryTransport::MpegTs});
+        turn.begin_load();
+        last_cache_state_dispatched.reset();
+        next_health_sample = clock.current + core::kDefaultHealthPolicy.sample_interval;
+    }
+
+    void tick(double at, const player::Diagnostics& diagnostics, bool frame_started = false) {
+        clock.current = core::TimePoint{core::seconds(at)};
+
+        if (frame_started) {
+            turn.observe_events(drain(first_frame(generation)), generation);
+            supervisor.dispatch(core::FirstFrame{generation});
+        }
+        supervisor.poll();
+
+        if (clock.current >= next_health_sample) {
+            next_health_sample = clock.current + core::kDefaultHealthPolicy.sample_interval;
+            if (!last_cache_state_dispatched ||
+                *last_cache_state_dispatched != diagnostics.paused_for_cache) {
+                last_cache_state_dispatched = diagnostics.paused_for_cache;
+                supervisor.dispatch(core::CacheState{generation,
+                                                     diagnostics.paused_for_cache});
+            }
+        }
+
+        const auto step = turn.observe(diagnostics);
+        if (step.rebuffered) {
+            ++rebuffers;
+            sync.notify_rebuffer();
+        }
+        if (step.hold_unity_speed) sync.hold_unity_speed();
+        else if (step.control_input) sync.update(*step.control_input, at);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("an opening fill that outlasts the steady window still concedes nothing") {
+    AppLoop app;
+    app.play();
+
+    // The opening fill starts before anything has been shown, so the health
+    // fold classifies the load degraded from the outset.
+    for (double t = 0.5; t < 6.9; t += 0.5) app.tick(t, filling());
+
+    // The picture comes up mid-fill and arms the five-second window.
+    app.tick(6.9, unpaused(std::nullopt), /*frame_started=*/true);
+    REQUIRE(app.turn.first_frame_seen());
+
+    // The fill outlasts that window. There is no healthy-to-degraded transition
+    // left to emit, so PlaybackInterrupted never restarts it; only the reducer
+    // refusing to confirm while the cache is paused keeps the load unconfirmed.
+    for (double t = 7.0; t < 14.0; t += 0.5) app.tick(t, filling());
+    CHECK_FALSE(app.turn.playback_established());
+
+    // The fill then oscillates, exactly as it does at playback start. Charging
+    // any of these is the defect this whole change exists to remove.
+    app.tick(14.0, unpaused(0.9));
+    app.tick(14.001, filling());
+    app.tick(14.5, unpaused(1.2));
+    app.tick(14.501, filling());
+    CHECK(app.rebuffers == 0);
+    CHECK(app.sync.target_offset_seconds() == Approx(4.0));
+
+    // Five seconds without an observed fill is the first thing that confirms
+    // the load.
+    for (double t = 15.0; t < 21.0; t += 0.5) app.tick(t, unpaused(4.0));
+    REQUIRE(app.turn.playback_established());
+
+    // And only now does a stall mean the viewer lost picture.
+    app.tick(21.0, filling());
+    CHECK(app.rebuffers == 1);
+    CHECK(app.sync.target_offset_seconds() == Approx(4.5));
 }
