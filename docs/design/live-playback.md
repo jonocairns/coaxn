@@ -656,7 +656,7 @@ event correlation and buffer-command gate. They did not cover the `LiveSync`
 control law or `App::update_live_sync`, which is where the highest-impact gaps
 sat and why both original P1 defects survived that long.
 
-The native suite now runs 129 cases: the 66 core cases, the 15 that were
+The native suite now runs 132 cases: the 66 core cases, the 15 that were
 previously built as a Windows binary and never executed, 23 over the control
 law, its gate and the application turn that feeds them, one over a late
 first-start edge from a superseded load, and the rest added since. Both
@@ -675,19 +675,36 @@ and the whole thing still concedes latency because the signal it arms on does
 not mean what its name says.
 
 A 2026-08-08 session against the provider exercised eight loads across five
-channels and is the first end-to-end check of this behaviour outside tests. No
+channels and was the first end-to-end check of this behaviour outside tests. No
 load conceded latency for its opening fill; every one held the 4.0-second
 opening target through first frame. The momentary unpause appeared roughly a
 millisecond after first frame on several different channels, so it is a property
-of the runtime rather than of one source. Steady confirmation landed 5.00
-seconds after the last observed cache edge on five consecutive loads. Four
-genuine underruns after confirmation were charged normally, with the interval
-between them widening from 5 to 23 seconds as the target grew, so the mechanism
-still adapts rather than having been disabled. `cache-pause-restarted-steady-window`
-and `cache-resume-restarted-steady-window` were both observed;
-`steady-window-held-by-cache-pause` was not, and remains covered only by tests.
-The later current-health guard was also forced only in portable tests; these
-provider runs did not sustain a non-cache degradation across the deadline.
+of the runtime rather than of one source. On that predecessor build, Steady
+confirmation landed 5.00 seconds after the last observed cache edge on five
+consecutive loads. Four genuine underruns after confirmation were charged
+normally, with the interval between them widening from 5 to 23 seconds as the
+target grew, so the mechanism still adapts rather than having been disabled.
+`cache-pause-restarted-steady-window` and
+`cache-resume-restarted-steady-window` were both observed in that session.
+
+A later five-and-a-half-minute run of the final health-level build exercised
+three loads across three channels. All three reached Steady, none conceded for
+startup, two post-Steady underruns were charged normally and moved the target
+from 4.0 through 4.5 to 5.0 seconds, and no recovery or failure occurred. Once
+past first-load jank, confirmation arrived 5.002 seconds after the determinate
+Healthy edge. That edge followed cache resume by 150–250ms because health is
+sampled every 500ms while cache state is published every turn. The small delay
+is intentional: the clock now begins with confirmed progress rather than merely
+with the end of a fill.
+
+Neither `steady-window-held-by-cache-pause` nor
+`steady-window-held-by-unhealthy-playback` fired in the final session, so both
+deadline guards remain field-unobserved and test-covered only. The same run also
+gave a second independent example of discontinuity-counter conflation: one
+1.6-second rebuffer produced discontinuities at both pause and resume, while a
+shorter rebuffer produced none. The generic count is therefore noisy rather
+than consistently correlated with a rebuffer, strengthening the requirement to
+record signed movement before deriving any replay threshold from it.
 
 Primary-source web and code fact-check was performed on 2026-08-05, with the
 progressive-live and replay comparison refreshed on 2026-08-07:
