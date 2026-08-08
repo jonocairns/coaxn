@@ -489,13 +489,14 @@ it has no independent default. `forward-lag` and `resume-lag` mean a negative
 deviation beyond the one-second discontinuity threshold. At the scheduled
 500ms cadence they therefore normally require a delayed application turn and
 must not be read as generic sub-threshold stream lag; the signed deviation is
-the primary observation. The F1 diagnostics panel shows the raw values and category. The session
-log writes a generation-scoped debug line for every health sample and a warning
-line for each existing discontinuity, including signed movements, pause
-context, the count of engine messages since the preceding sample and the
-most recent diagnostic's sanitized severity/component/category. The generation
-printed on those lines comes from the evidence snapshot itself rather than
-being looked up again from the current target.
+the primary observation. The F1 diagnostics panel shows the raw values and
+category. The session log writes a generation-scoped debug line for every
+health sample and a warning line for each existing discontinuity, including
+signed movements, pause context, the count of engine messages since the
+preceding sample and the most recent diagnostic's sanitized
+severity/component/category. The generation printed on those lines comes from
+the evidence snapshot itself rather than being looked up again from the current
+target.
 
 Forward discontinuities that still make progress can be diagnostic only. A
 backward or no-progress discontinuity can classify the sample as degraded,

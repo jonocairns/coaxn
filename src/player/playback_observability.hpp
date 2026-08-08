@@ -73,6 +73,7 @@ enum class RequestScheme { Http, Https, LocalFile, Other };
 enum class RequestTargetShape { XtreamLive, HlsPlaylist, MediaPath, Opaque };
 
 struct SourceCorrelation {
+    // Zero means the load has no provider session, as with direct media.
     std::uint64_t provider_session = 0;
     std::uint64_t channel_session = 0;
 };

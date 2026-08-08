@@ -452,7 +452,8 @@ void App::finish_connect() {
     client_ = std::make_unique<xtream::Client>(credentials_);
     channels_.reset(std::move(catalog.categories), std::move(catalog.channels));
     const auto provider_session = target_registry_.begin_provider_session();
-    log::info("Provider session {} connected", provider_session);
+    log::info("Provider session {} connected to {}", provider_session,
+              log::redact_portal_url(credentials_.base_url));
     stage_  = Stage::Browsing;
     set_status(std::format("{} channels", channels_.channel_count()));
     save_portal();
