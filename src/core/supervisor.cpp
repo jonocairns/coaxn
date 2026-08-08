@@ -116,6 +116,21 @@ SupervisorReduction reduce_deadline(const SupervisorState& state, TimePoint now,
                                     const RecoveryPolicy& policy) {
     if (state.name == SupervisorStateName::Zap && state.deadlines.steady_at &&
         now >= *state.deadlines.steady_at) {
+        // The window cannot expire while the cache is holding playback back or
+        // the last determinate health level is unhealthy. An interruption edge
+        // alone cannot establish that: a sustained unhealthy run produces no
+        // later edge to stop the deadline. Unknown telemetry is neutral and
+        // leaves this retained level unchanged.
+        if (state.cache_paused) {
+            auto next = state;
+            next.deadlines.steady_at = now + policy.steady_healthy_window;
+            return settle(state, next, "steady-window-held-by-cache-pause", now, policy);
+        }
+        if (state.playback_unhealthy) {
+            auto next = state;
+            next.deadlines.steady_at = now + policy.steady_healthy_window;
+            return settle(state, next, "steady-window-held-by-unhealthy-playback", now, policy);
+        }
         auto next = state;
         next.attempt = 0;
         next.deadlines = {};
@@ -193,7 +208,41 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
         if constexpr (std::is_same_v<T, CacheState>) {
             auto next = state;
             next.cache_paused = value.paused;
+            // The window counts continuous clean playback, so both edges of a
+            // fill restart it. Entering one interrupts the evidence, whether or
+            // not the fold classified it as a new degradation edge; leaving one
+            // is where clean playback actually begins, so the count starts
+            // there rather than carrying credit for time spent filling. Without
+            // the second rule a fill that clears just before the deadline is
+            // confirmed almost immediately, and the oscillation at the end of
+            // that same fill is charged as a rebuffer.
+            //
+            // A repeated observation of playing is not an edge and must not
+            // restart anything, or a steady load could never confirm.
+            if (state.name == SupervisorStateName::Zap && state.deadlines.steady_at &&
+                (value.paused || state.cache_paused)) {
+                next.deadlines.steady_at = now + policy.steady_healthy_window;
+                return settle(state, next,
+                              value.paused ? "cache-pause-restarted-steady-window"
+                                           : "cache-resume-restarted-steady-window",
+                              now, policy);
+            }
             return settle(state, next, "cache-state-observed", now, policy);
+        } else if constexpr (std::is_same_v<T, PlaybackHealthObserved>) {
+            if (state.playback_unhealthy == value.unhealthy) return ignore(state);
+            auto next = state;
+            next.playback_unhealthy = value.unhealthy;
+            // Both edges restart the evidence window. Becoming unhealthy
+            // invalidates what was counted; becoming healthy is the instant a
+            // new continuous healthy interval can begin.
+            if (state.name == SupervisorStateName::Zap && state.deadlines.steady_at) {
+                next.deadlines.steady_at = now + policy.steady_healthy_window;
+                return settle(state, next,
+                              value.unhealthy ? "playback-unhealthy-restarted-steady-window"
+                                              : "playback-health-restarted-steady-window",
+                              now, policy);
+            }
+            return settle(state, next, "playback-health-observed", now, policy);
         } else if constexpr (std::is_same_v<T, AuthRejected>) {
             if (state.name == SupervisorStateName::Idle) return ignore(state);
             return terminal(state, state.detection, FailureReason::AuthRejected,
@@ -205,13 +254,6 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
                               .steady_at = now + policy.steady_healthy_window};
             next.first_frame_at = now;
             return settle(state, next, "first-frame", now, policy);
-        } else if constexpr (std::is_same_v<T, PlaybackInterrupted>) {
-            if (state.name != SupervisorStateName::Zap || !state.deadlines.steady_at) {
-                return ignore(state);
-            }
-            auto next = state;
-            next.deadlines.steady_at = now + policy.steady_healthy_window;
-            return settle(state, next, "steady-window-restarted", now, policy);
         } else if constexpr (std::is_same_v<T, DecodeStalled>) {
             return recover(state, DetectionReason::DecodeStall, reopen_action(state), now, policy);
         } else if constexpr (std::is_same_v<T, PlaybackStalled>) {
@@ -248,6 +290,8 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
             auto next = state;
             next.deadlines = {};
             next.first_frame_at.reset();
+            next.cache_paused = false;
+            next.playback_unhealthy = false;
             next.name = SupervisorStateName::Zap;
             next.transport = value.transport;
             return settle(state, next, "stream-load-issued", now, policy);

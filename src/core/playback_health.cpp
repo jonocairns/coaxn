@@ -23,12 +23,6 @@ bool input_is_delivering(std::optional<double> ratio) {
     return ratio && *ratio > 0.0;
 }
 
-bool is_unhealthy(PlaybackHealthVerdict verdict, bool cache_paused) {
-    return cache_paused || verdict == PlaybackHealthVerdict::Degraded ||
-           verdict == PlaybackHealthVerdict::OpenStalled ||
-           verdict == PlaybackHealthVerdict::Stalled;
-}
-
 bool is_discontinuous(std::optional<double> previous_playback,
                       std::optional<double> playback,
                       std::optional<Duration> elapsed,
@@ -191,8 +185,6 @@ PlaybackHealthFold fold_playback_health(const PlaybackHealthState& previous,
     return PlaybackHealthFold{
         .decode_stalled = decode_stalled,
         .discontinuity = discontinuity,
-        .interrupted = is_unhealthy(verdict, observation.cache_paused) &&
-                       !is_unhealthy(previous.verdict, previous.snapshot.cache_paused),
         .state = state,
         .stalled = stalled,
     };

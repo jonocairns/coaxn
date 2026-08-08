@@ -261,6 +261,14 @@ coordinator that emits player commands as data. This is the largest piece of
 work on the list and should be done deliberately, after the cheaper items above
 have made the surrounding code testable.
 
+One slice of this landed on 2026-08-08 under duress: `player::LiveSyncTurn`
+took the load-scoped live-sync flags, the generation-filtered first-frame drain
+and the sample assembly out of `App`, because two successive fixes to a live-sync
+defect passed their isolated tests and were then falsified by the untestable
+application ordering. The remaining protocol in `process_player_events` — the
+exact-failure suppression rule and the 50 ms pending stream-end window — is
+still unreachable.
+
 ### 5. [P2] `channel_index` is core code that escaped the core target
 
 `src/core/channel_index.cpp` is in namespace `coax::core`, and its header says

@@ -46,6 +46,9 @@ struct SupervisorDeadlines {
 struct SupervisorState {
     std::size_t attempt = 0;
     bool cache_paused = false;
+    // The last determinate health level, not an interruption edge. Unknown
+    // telemetry does not set or clear it, and a new load starts neutral.
+    bool playback_unhealthy = false;
     SupervisorDeadlines deadlines;
     std::optional<DetectionReason> detection;
     std::optional<FailureReason> failure;
@@ -64,7 +67,7 @@ struct DecodeStalled { Generation generation; };
 struct FirstFrame { Generation generation; };
 struct IpcUnresponsive { Generation generation; };
 struct ChannelRequested { Generation generation; };
-struct PlaybackInterrupted { Generation generation; };
+struct PlaybackHealthObserved { Generation generation; bool unhealthy; };
 struct PlaybackStopped { Generation generation; };
 // The graphics device the video is presented through went away. mpv's own
 // device dies with it, so the stream has to be reopened on a rebuilt one —
@@ -84,7 +87,7 @@ struct StreamLoadIssued { Generation generation; RecoveryTransport transport; };
 
 using SupervisorEvent = std::variant<
     DeadlineReached, CacheState, AuthRejected, DecodeStalled, FirstFrame,
-    IpcUnresponsive, ChannelRequested, PlaybackInterrupted, PlaybackStopped,
+    IpcUnresponsive, ChannelRequested, PlaybackHealthObserved, PlaybackStopped,
     PresentationLost, ProcessExited, SourceFailed, PlaybackStalled, StreamEnded,
     StreamLoadIssued>;
 

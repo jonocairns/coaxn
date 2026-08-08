@@ -32,6 +32,10 @@ struct HostFixture {
         supervisor.dispatch(ChannelRequested{generation});
         supervisor.dispatch(StreamLoadIssued{generation, RecoveryTransport::MpegTs});
     }
+    void start_healthy_playback(Generation generation = Generation{1}) {
+        supervisor.dispatch(FirstFrame{generation});
+        supervisor.dispatch(PlaybackHealthObserved{generation, false});
+    }
     void advance(double seconds_value) { clock.advance_to(seconds_value); supervisor.poll(); }
 };
 }  // namespace
@@ -40,7 +44,7 @@ TEST_CASE("host owns one deadline and runs effects when it expires") {
     HostFixture host;
     host.start();
     CHECK_FALSE(host.supervisor.armed_deadline());
-    host.supervisor.dispatch(FirstFrame{Generation{1}});
+    host.start_healthy_playback();
     CHECK(host.supervisor.armed_deadline() == TimePoint{seconds(5)});
     host.advance(5);
     CHECK(host.supervisor.current().name == SupervisorStateName::Steady);
@@ -76,6 +80,7 @@ TEST_CASE("synchronous effect settlement is queued instead of reentering callbac
     supervisor.dispatch(ChannelRequested{Generation{1}});
     supervisor.dispatch(StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs});
     supervisor.dispatch(FirstFrame{Generation{1}});
+    supervisor.dispatch(PlaybackHealthObserved{Generation{1}, false});
     clock.advance_to(5.0);
     supervisor.poll();
     supervisor.dispatch(StreamEnded{Generation{1}, EndReason::Error, {}});
@@ -94,7 +99,7 @@ TEST_CASE("synchronous effect settlement is queued instead of reentering callbac
 
 TEST_CASE("backend recreation is bounded and a rejected attempt terminates") {
     HostFixture host;
-    host.start(); host.supervisor.dispatch(FirstFrame{Generation{1}}); host.advance(5);
+    host.start(); host.start_healthy_playback(); host.advance(5);
     host.supervisor.dispatch(ProcessExited{Generation{1}});
     CHECK(host.supervisor.armed_deadline() == TimePoint{seconds(5.5)});
     host.advance(5.5);
@@ -108,7 +113,7 @@ TEST_CASE("backend recreation is bounded and a rejected attempt terminates") {
 
 TEST_CASE("recreation attempts share budget until steady then reset") {
     HostFixture host;
-    host.start(); host.supervisor.dispatch(FirstFrame{Generation{1}}); host.advance(5);
+    host.start(); host.start_healthy_playback(); host.advance(5);
     host.supervisor.dispatch(ProcessExited{Generation{1}}); host.advance(5.5);
     host.supervisor.dispatch(StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs});
     host.supervisor.dispatch(ProcessExited{Generation{1}});
@@ -118,7 +123,7 @@ TEST_CASE("recreation attempts share budget until steady then reset") {
     CHECK(host.effects.size() == 2);
 
     host.supervisor.dispatch(StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs});
-    host.supervisor.dispatch(FirstFrame{Generation{1}});
+    host.start_healthy_playback();
     host.advance(11.5);
     CHECK(host.supervisor.current().name == SupervisorStateName::Steady);
     host.supervisor.dispatch(ProcessExited{Generation{1}});
@@ -127,7 +132,7 @@ TEST_CASE("recreation attempts share budget until steady then reset") {
 
 TEST_CASE("new generation and disposal disarm the host") {
     HostFixture host;
-    host.start(); host.supervisor.dispatch(FirstFrame{Generation{1}}); host.advance(5);
+    host.start(); host.start_healthy_playback(); host.advance(5);
     host.supervisor.dispatch(StreamEnded{Generation{1}, EndReason::Error, {}});
     REQUIRE(host.supervisor.armed_deadline());
     host.supervisor.dispatch(ChannelRequested{Generation{2}});
@@ -146,7 +151,7 @@ TEST_CASE("host reports accepted transitions and ignores stale events") {
     REQUIRE(host.transitions.size() == 2);
     host.supervisor.dispatch(FirstFrame{Generation{99}});
     CHECK(host.transitions.size() == 2);
-    host.supervisor.dispatch(FirstFrame{Generation{1}}); host.advance(5);
+    host.start_healthy_playback(); host.advance(5);
     host.supervisor.dispatch(StreamEnded{Generation{1}, EndReason::Eof, {}});
     REQUIRE_FALSE(host.transitions.empty());
     const auto& transition = host.transitions.back();
@@ -157,7 +162,7 @@ TEST_CASE("host reports accepted transitions and ignores stale events") {
 
 TEST_CASE("repeated backend failure exhausts the shared recreation schedule") {
     HostFixture host;
-    host.start(); host.supervisor.dispatch(FirstFrame{Generation{1}}); host.advance(5);
+    host.start(); host.start_healthy_playback(); host.advance(5);
     double now = 5.0;
     for (const auto delay : kDefaultRecoveryPolicy.attempt_delays) {
         host.supervisor.dispatch(ProcessExited{Generation{1}});

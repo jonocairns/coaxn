@@ -453,7 +453,7 @@ void App::play(const core::Channel& channel) {
 
     // Latency learned on one channel says nothing about the next.
     live_sync_.reset();
-    live_sync_gate_.reset();
+    live_sync_turn_.reset();
     rebuffer_count_ = 0;
     player_.set_speed(1.0);
 
@@ -474,7 +474,10 @@ void App::begin_health_load() {
                                                      target.cache_seconds);
     health_snapshot_ = playback_health_->snapshot;
     next_health_sample_ = now + core::kDefaultHealthPolicy.sample_interval;
-    first_frame_seen_ = false;
+    // Every load starts unestablished, so no load can concede latency for its
+    // own opening fill. Recovery reopens reach here too, which is why this and
+    // not LiveSyncGate::reset() owns that lifetime.
+    live_sync_turn_.begin_load();
     stall_reported_ = false;
     decode_stall_reported_ = false;
     exact_failure_reported_ = false;
@@ -483,7 +486,13 @@ void App::begin_health_load() {
 }
 
 void App::process_player_events() {
-    for (const auto& event : player_.take_events()) {
+    const auto events = player_.take_events();
+    // Live-sync sees this turn's events before update_live_sync() reads this
+    // turn's properties, which is the real ordering and the one the portable
+    // LiveSyncTurn cases pin. Both signals can describe the same instant.
+    live_sync_turn_.observe_events(events, generation_);
+
+    for (const auto& event : events) {
         std::visit(Overloaded{
             [&](const player::LoadCommandResult& result) {
                 if (!result.accepted) {
@@ -499,7 +508,6 @@ void App::process_player_events() {
             },
             [&](const player::FirstPlaybackStart&) {
                 if (event.generation != generation_) return;
-                first_frame_seen_ = true;
                 supervisor_.dispatch(core::FirstFrame{event.generation});
             },
             [&](const player::EndFileEvent& ended) {
@@ -572,6 +580,27 @@ void App::flush_pending_stream_ends() {
     }
 }
 
+void App::dispatch_cache_state() {
+    // Deliberately every turn and not on the health-sample interval. This is a
+    // change detector, not a measurement, and the supervisor's steady deadline
+    // reads the value it publishes. Sampling it at 500ms let the deadline be
+    // evaluated against a stale "playing" reading: a fill entered just after a
+    // sample would confirm Steady mid-fill, arm live-sync, clear the attempt
+    // count and apply steady buffer targets, and the rest of that fill's
+    // oscillation would then be charged as a rebuffer.
+    //
+    // Diagnostics only move in player_.pump() at the top of the turn, so the
+    // supervisor and the live-sync gate now read the same pause state within a
+    // turn rather than readings up to a sample apart.
+    if (!player_.current_target()) return;
+    if (supervisor_.current().name == core::SupervisorStateName::Idle ||
+        supervisor_.current().name == core::SupervisorStateName::Failed) return;
+    const bool paused = player_.diagnostics().paused_for_cache;
+    if (last_cache_state_dispatched_ && *last_cache_state_dispatched_ == paused) return;
+    last_cache_state_dispatched_ = paused;
+    supervisor_.dispatch(core::CacheState{player_.current_target()->generation, paused});
+}
+
 void App::sample_playback_health() {
     if (!playback_health_ || !player_.current_target()) return;
     if (supervisor_.current().name == core::SupervisorStateName::Idle ||
@@ -585,7 +614,7 @@ void App::sample_playback_health() {
     const auto fold = core::fold_playback_health(
         *playback_health_, player_.health_observation(), now,
         {.container_fps = diagnostics.container_fps,
-         .first_frame_seen = first_frame_seen_,
+         .first_frame_seen = live_sync_turn_.first_frame_seen(),
          .main_process_cpu_percent = std::nullopt,
          .phase = diagnostics.buffer_phase,
          .target_seconds = target.cache_seconds});
@@ -594,17 +623,18 @@ void App::sample_playback_health() {
     player_.set_health_discontinuities(fold.state.discontinuities);
 
     const auto generation = player_.current_target()->generation;
-    if (!last_cache_state_dispatched_ ||
-        *last_cache_state_dispatched_ != diagnostics.paused_for_cache) {
-        last_cache_state_dispatched_ = diagnostics.paused_for_cache;
-        supervisor_.dispatch(core::CacheState{generation, diagnostics.paused_for_cache});
+    // Publish determinate levels rather than an interruption edge, so a
+    // sustained degradation can hold the steady deadline. Unknown is absence
+    // of playback-time evidence: it must neither create nor clear an unhealthy
+    // state. A new load starts neutral, preserving the pre-level behavior when
+    // playback-time is unavailable throughout.
+    if (fold.state.verdict != core::PlaybackHealthVerdict::Unknown) {
+        supervisor_.dispatch(core::PlaybackHealthObserved{
+            generation, fold.state.verdict != core::PlaybackHealthVerdict::Healthy});
     }
     if (fold.discontinuity) {
         log::warn("Timeline discontinuity #{} generation {} (classified by progress deviation)",
                   fold.state.discontinuities, generation.value());
-    }
-    if (fold.interrupted) {
-        supervisor_.dispatch(core::PlaybackInterrupted{generation});
     }
     if (fold.stalled && !stall_reported_) {
         stall_reported_ = true;
@@ -640,7 +670,7 @@ void App::execute_supervisor_effect(const core::SupervisorEffect& effect) {
                 // The new backend starts at 1.0x. Reset the controller too so
                 // its cached old speed cannot suppress the write the new mpv needs.
                 live_sync_.reset();
-                live_sync_gate_.reset();
+                live_sync_turn_.reset();
                 rebuffer_count_ = 0;
                 player_.set_speed(1.0);
                 player_.set_volume(volume_);
@@ -664,6 +694,10 @@ void App::on_supervisor_state_changed(const core::SupervisorState& state) {
     supervisor_snapshot_ = core::project_supervisor_stats(state, supervisor_clock_.now());
     if (state.name == core::SupervisorStateName::Steady) {
         player_.apply_buffer_phase(state.generation, core::BufferPhase::Steady);
+        // Steady is a first frame plus a healthy window, which is the only
+        // reading of "playback has started" that mpv's opening fill cannot
+        // produce. Until it arrives, a paused-for-cache edge is still the fill.
+        if (state.generation == generation_) live_sync_turn_.note_playback_established();
     } else if (state.name == core::SupervisorStateName::Failed) {
         set_status(state.failure
                        ? std::format("Playback failed: {}", core::to_string(*state.failure))
@@ -673,13 +707,7 @@ void App::on_supervisor_state_changed(const core::SupervisorState& state) {
 }
 
 void App::update_live_sync() {
-    const auto& diagnostics = player_.diagnostics();
-
-    const auto step = live_sync_gate_.observe(
-        {.buffered_seconds = diagnostics.cache_duration_seconds,
-         .paused_for_cache = diagnostics.paused_for_cache,
-         .core_idle        = diagnostics.core_idle,
-         .first_frame_seen = first_frame_seen_});
+    const auto step = live_sync_turn_.observe(player_.diagnostics());
 
     if (step.rebuffered) {
         ++rebuffer_count_;
@@ -1613,8 +1641,14 @@ int App::run() {
         // already dispatched its loss and the recovery deadline it arms is
         // measured from now rather than from a frame later.
         service_presentation();
-        supervisor_.poll();
+        // Before the poll, so a deadline evaluated this turn sees this turn's
+        // cache state rather than the last sampled one.
+        dispatch_cache_state();
+        // Health is sampled before the poll for the same reason: a deadline
+        // due this turn must see this turn's health level, not the previous
+        // sample's verdict.
         sample_playback_health();
+        supervisor_.poll();
 
         // Video dimensions arrive after the load completes, and can change
         // mid-stream when the provider switches encoder profile. Either way
