@@ -623,11 +623,15 @@ void App::sample_playback_health() {
     player_.set_health_discontinuities(fold.state.discontinuities);
 
     const auto generation = player_.current_target()->generation;
-    // Publish the level rather than relying on fold.interrupted. The latter is
-    // deliberately an edge, so a degradation that remains active cannot by
-    // itself prevent a later steady deadline from expiring.
-    supervisor_.dispatch(core::PlaybackHealthObserved{
-        generation, fold.state.verdict == core::PlaybackHealthVerdict::Healthy});
+    // Publish determinate levels rather than an interruption edge, so a
+    // sustained degradation can hold the steady deadline. Unknown is absence
+    // of playback-time evidence: it must neither create nor clear an unhealthy
+    // state. A new load starts neutral, preserving the pre-level behavior when
+    // playback-time is unavailable throughout.
+    if (fold.state.verdict != core::PlaybackHealthVerdict::Unknown) {
+        supervisor_.dispatch(core::PlaybackHealthObserved{
+            generation, fold.state.verdict != core::PlaybackHealthVerdict::Healthy});
+    }
     if (fold.discontinuity) {
         log::warn("Timeline discontinuity #{} generation {} (classified by progress deviation)",
                   fold.state.discontinuities, generation.value());

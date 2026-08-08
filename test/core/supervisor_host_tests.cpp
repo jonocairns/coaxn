@@ -34,7 +34,7 @@ struct HostFixture {
     }
     void start_healthy_playback(Generation generation = Generation{1}) {
         supervisor.dispatch(FirstFrame{generation});
-        supervisor.dispatch(PlaybackHealthObserved{generation, true});
+        supervisor.dispatch(PlaybackHealthObserved{generation, false});
     }
     void advance(double seconds_value) { clock.advance_to(seconds_value); supervisor.poll(); }
 };
@@ -80,7 +80,7 @@ TEST_CASE("synchronous effect settlement is queued instead of reentering callbac
     supervisor.dispatch(ChannelRequested{Generation{1}});
     supervisor.dispatch(StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs});
     supervisor.dispatch(FirstFrame{Generation{1}});
-    supervisor.dispatch(PlaybackHealthObserved{Generation{1}, true});
+    supervisor.dispatch(PlaybackHealthObserved{Generation{1}, false});
     clock.advance_to(5.0);
     supervisor.poll();
     supervisor.dispatch(StreamEnded{Generation{1}, EndReason::Error, {}});

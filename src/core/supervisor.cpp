@@ -116,17 +116,17 @@ SupervisorReduction reduce_deadline(const SupervisorState& state, TimePoint now,
                                     const RecoveryPolicy& policy) {
     if (state.name == SupervisorStateName::Zap && state.deadlines.steady_at &&
         now >= *state.deadlines.steady_at) {
-        // The window is evidence of continuous healthy playback, so it cannot
-        // expire while the cache is holding playback back or the health fold's
-        // current verdict is not Healthy. An interruption edge alone cannot
-        // establish that: a sustained unhealthy run produces no later edge to
-        // stop the deadline.
+        // The window cannot expire while the cache is holding playback back or
+        // the last determinate health level is unhealthy. An interruption edge
+        // alone cannot establish that: a sustained unhealthy run produces no
+        // later edge to stop the deadline. Unknown telemetry is neutral and
+        // leaves this retained level unchanged.
         if (state.cache_paused) {
             auto next = state;
             next.deadlines.steady_at = now + policy.steady_healthy_window;
             return settle(state, next, "steady-window-held-by-cache-pause", now, policy);
         }
-        if (!state.playback_healthy) {
+        if (state.playback_unhealthy) {
             auto next = state;
             next.deadlines.steady_at = now + policy.steady_healthy_window;
             return settle(state, next, "steady-window-held-by-unhealthy-playback", now, policy);
@@ -229,17 +229,17 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
             }
             return settle(state, next, "cache-state-observed", now, policy);
         } else if constexpr (std::is_same_v<T, PlaybackHealthObserved>) {
-            if (state.playback_healthy == value.healthy) return ignore(state);
+            if (state.playback_unhealthy == value.unhealthy) return ignore(state);
             auto next = state;
-            next.playback_healthy = value.healthy;
+            next.playback_unhealthy = value.unhealthy;
             // Both edges restart the evidence window. Becoming unhealthy
             // invalidates what was counted; becoming healthy is the instant a
             // new continuous healthy interval can begin.
             if (state.name == SupervisorStateName::Zap && state.deadlines.steady_at) {
                 next.deadlines.steady_at = now + policy.steady_healthy_window;
                 return settle(state, next,
-                              value.healthy ? "playback-health-restarted-steady-window"
-                                            : "playback-unhealthy-restarted-steady-window",
+                              value.unhealthy ? "playback-unhealthy-restarted-steady-window"
+                                              : "playback-health-restarted-steady-window",
                               now, policy);
             }
             return settle(state, next, "playback-health-observed", now, policy);
@@ -291,7 +291,7 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
             next.deadlines = {};
             next.first_frame_at.reset();
             next.cache_paused = false;
-            next.playback_healthy = false;
+            next.playback_unhealthy = false;
             next.name = SupervisorStateName::Zap;
             next.transport = value.transport;
             return settle(state, next, "stream-load-issued", now, policy);

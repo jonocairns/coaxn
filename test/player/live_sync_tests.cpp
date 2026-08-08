@@ -5,6 +5,7 @@
 #include <optional>
 #include <span>
 
+#include "core/playback_health.hpp"
 #include "core/policy.hpp"
 #include "core/supervisor_host.hpp"
 #include "player/live_sync.hpp"
@@ -557,7 +558,7 @@ struct AppLoop {
     }
 
     void tick(double at, const player::Diagnostics& diagnostics, bool frame_started = false,
-              std::optional<bool> health_healthy = std::nullopt) {
+              std::optional<core::PlaybackHealthVerdict> health_verdict = std::nullopt) {
         clock.current = core::TimePoint{core::seconds(at)};
 
         if (frame_started) {
@@ -572,9 +573,11 @@ struct AppLoop {
             supervisor.dispatch(core::CacheState{generation, diagnostics.paused_for_cache});
         }
 
-        // App::sample_playback_health() publishes the fold's current level.
-        if (health_healthy) {
-            supervisor.dispatch(core::PlaybackHealthObserved{generation, *health_healthy});
+        // App::sample_playback_health() publishes determinate fold levels and
+        // retains the last one when playback-time evidence is unavailable.
+        if (health_verdict && *health_verdict != core::PlaybackHealthVerdict::Unknown) {
+            supervisor.dispatch(core::PlaybackHealthObserved{
+                generation, *health_verdict != core::PlaybackHealthVerdict::Healthy});
         }
 
         supervisor.poll();
@@ -624,7 +627,7 @@ TEST_CASE("an opening fill that outlasts the steady window still concedes nothin
     // from the last one at 15.0 rather than from the first clearing at 14.0.
     // Sampling cache state on the health interval could not see the 1ms blips
     // at all, and would have confirmed a second early.
-    app.tick(15.0, unpaused(4.0), false, true);
+    app.tick(15.0, unpaused(4.0), false, core::PlaybackHealthVerdict::Healthy);
     for (double t = 15.5; t < 19.5; t += 0.5) app.tick(t, unpaused(4.0));
     CHECK_FALSE(app.turn.playback_established());
 
@@ -643,7 +646,7 @@ TEST_CASE("a fill entered just before the deadline is not outrun by the poll") {
 
     // A clean load: the picture comes up and playback runs.
     app.tick(0.5, unpaused(std::nullopt), /*frame_started=*/true,
-             /*health_healthy=*/true);
+             core::PlaybackHealthVerdict::Healthy);
     for (double t = 1.0; t < 5.4; t += 0.1) app.tick(t, unpaused(4.0));
     CHECK_FALSE(app.turn.playback_established());
 
@@ -669,16 +672,42 @@ TEST_CASE("a sustained unhealthy level cannot be outrun by the steady poll") {
     // A frame arrives, but decode progress remains degraded throughout the
     // first window. No new interruption edge is available at its deadline.
     app.tick(0.5, unpaused(std::nullopt), /*frame_started=*/true,
-             /*health_healthy=*/false);
-    app.tick(5.5, unpaused(4.0), false, false);
+             core::PlaybackHealthVerdict::Degraded);
+    app.tick(5.5, unpaused(4.0), false, core::PlaybackHealthVerdict::Degraded);
     CHECK_FALSE(app.turn.playback_established());
 
     // Establishment requires a complete window beginning with an observed
     // Healthy level.
-    app.tick(6.0, unpaused(4.0), false, true);
-    app.tick(10.5, unpaused(4.0), false, true);
+    app.tick(6.0, unpaused(4.0), false, core::PlaybackHealthVerdict::Healthy);
+    app.tick(10.5, unpaused(4.0), false, core::PlaybackHealthVerdict::Healthy);
     CHECK_FALSE(app.turn.playback_established());
-    app.tick(11.0, unpaused(4.0), false, true);
+    app.tick(11.0, unpaused(4.0), false, core::PlaybackHealthVerdict::Healthy);
     CHECK(app.turn.playback_established());
     CHECK(app.rebuffers == 0);
+}
+
+TEST_CASE("unknown health is neutral and cannot erase determinate degradation") {
+    SECTION("missing playback time throughout preserves the previous neutral policy") {
+        AppLoop app;
+        app.play();
+        app.tick(0.5, unpaused(std::nullopt), /*frame_started=*/true,
+                 core::PlaybackHealthVerdict::Unknown);
+        app.tick(5.5, unpaused(4.0), false, core::PlaybackHealthVerdict::Unknown);
+        CHECK(app.turn.playback_established());
+    }
+
+    SECTION("missing playback time does not clear an observed unhealthy run") {
+        AppLoop app;
+        app.play();
+        app.tick(0.5, unpaused(std::nullopt), /*frame_started=*/true,
+                 core::PlaybackHealthVerdict::Healthy);
+        app.tick(2.0, unpaused(4.0), false, core::PlaybackHealthVerdict::Degraded);
+        app.tick(3.0, unpaused(4.0), false, core::PlaybackHealthVerdict::Unknown);
+        app.tick(7.0, unpaused(4.0), false, core::PlaybackHealthVerdict::Unknown);
+        CHECK_FALSE(app.turn.playback_established());
+
+        app.tick(8.0, unpaused(4.0), false, core::PlaybackHealthVerdict::Healthy);
+        app.tick(13.0, unpaused(4.0), false, core::PlaybackHealthVerdict::Healthy);
+        CHECK(app.turn.playback_established());
+    }
 }

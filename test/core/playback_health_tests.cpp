@@ -178,16 +178,8 @@ TEST_CASE("an unreadable sample retains the frozen progress baseline") {
                       [](const auto& fold) { return fold.stalled; }));
 }
 
-TEST_CASE("cache pause is depleted and unhealthy edges are reported once per run") {
-    auto values = advancing(3);
-    append(values, frozen(3, 1.5));
-    append(values, advancing(3, 1.5));
-    append(values, frozen(3, 3.0));
-    const auto result = replay(values);
-    CHECK(std::count_if(result.folds.begin(), result.folds.end(),
-                        [](const auto& fold) { return fold.interrupted; }) == 2);
-
-    values = advancing(4);
+TEST_CASE("cache pause is depleted even without buffer duration") {
+    auto values = advancing(4);
     auto paused = frozen(6, 2.0);
     for (auto& value : paused) { value.buffer_seconds.reset(); value.cache_paused = true; }
     append(values, paused);

@@ -68,7 +68,6 @@ struct PlaybackHealthFoldOptions {
 struct PlaybackHealthFold {
     bool decode_stalled = false;
     bool discontinuity = false;
-    bool interrupted = false;
     PlaybackHealthState state;
     bool stalled = false;
 };

@@ -338,33 +338,40 @@ shorter than the six-second decode-stall threshold: `Steady` could clear a
 recovery attempt immediately before the continuing degradation triggered the
 next recovery, laundering attempt two back into attempt one.
 
-The supervisor therefore stores the health fold's current level as
-`PlaybackHealthObserved`, not only its transition. Both health edges restart an
-armed window: becoming unhealthy invalidates the elapsed evidence, and becoming
-healthy starts a new clean interval. At the deadline, a non-Healthy level holds
-and restarts the window even when there has been no further edge. Repeated
-same-level observations do not restart anything, or periodic good news would
-prevent a healthy load from ever confirming.
+The supervisor therefore stores the last *determinate* health level as
+`PlaybackHealthObserved`, not only its transition. Both determinate edges
+restart an armed window: becoming unhealthy invalidates the elapsed evidence,
+and becoming healthy starts a new clean interval. At the deadline, a retained
+unhealthy level holds and restarts the window even when there has been no
+further edge. Repeated same-level observations do not restart anything, or
+periodic good news would prevent a healthy load from ever confirming.
 
-Confirmation now means five continuously clean seconds at the health sampler's
-500ms resolution, timed from the latest cache-state or health-level edge. Cache
-state is still published every turn because brief mpv pause oscillations occur
-far below that resolution. `App` publishes a due health sample and then polls,
-so a deadline sees the latest observed health verdict; cache state is dispatched
-immediately before both, so the supervisor and live-sync gate read the same
-pause state within a turn.
+`Unknown` is deliberately neutral. It means playback-time evidence was absent,
+so `App` publishes no new level: it cannot manufacture an unhealthy condition,
+and it cannot clear one already observed. A new load starts neutral, preserving
+the old `is_unhealthy()` boundary when playback time is unavailable throughout.
+This avoids repeating the missing-cache-duration defect in the opposite
+direction by converting absent telemetry into a definite `false` health level.
+
+Confirmation now means five seconds without an observed unhealthy condition at
+the health sampler's 500ms resolution, timed from the latest cache-state or
+determinate health-level edge. Cache state is still published every turn because
+brief mpv pause oscillations occur far below that resolution. `App` publishes a
+due determinate health sample and then polls, so a deadline sees the latest
+known verdict; cache state is dispatched immediately before both, so the
+supervisor and live-sync gate read the same pause state within a turn.
 
 All of this was found because live-sync arming was hung off `Steady` and
 inherited the bug; `apply_buffer_phase(Steady)` was also switching to steady
 buffer targets mid-fill.
 
-The consequence is that a load which never manages five observed Healthy
-seconds without a fill never confirms, so it never clears an attempt count,
-never moves to steady buffer targets, and never concedes live latency. For a
-channel in that state the supervisor's stall detection and recovery are the
-relevant machinery, not a 500ms target nudge — but it does mean the rebuffer
-concession cannot help a channel that has never once played cleanly. Revisit
-alongside the target decay semantics in the priority table.
+The consequence is that a load which never manages five seconds without an
+observed unhealthy condition or fill never confirms, so it never clears an
+attempt count, never moves to steady buffer targets, and never concedes live
+latency. For a channel in that state the supervisor's stall detection and
+recovery are the relevant machinery, not a 500ms target nudge — but it does mean
+the rebuffer concession cannot help a channel that has never once played
+cleanly. Revisit alongside the target decay semantics in the priority table.
 
 The base schedule is truncated exponential backoff, but it is deterministic.
 Network retry guidance recommends adding jitter so many clients do not retry a
@@ -702,7 +709,7 @@ progressive-live and replay comparison refreshed on 2026-08-07:
 | ~~P1~~ Fixed at `5388982` | ~~Preserve unavailable cache duration and hold `1.0x` until valid telemetry arrives~~ | Done. The flattened copy is gone, so an unavailable mpv property can no longer install `0.97x` and accumulate live latency |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Stop co-incident initial-fill and first-frame signals from counting as a rebuffer~~ | Done. Arming is the supervisor's steady confirmation, cleared for every load by `begin_health_load()` rather than by `LiveSyncGate::reset()`, which deliberately does not run on ordinary reopens. A first frame, and a momentary unpaused turn after it, were both tried and both falsified against the runtime |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Add an application-level test for player-event, pause-property and live-sync sequencing~~ | Done. `player::LiveSyncTurn` holds the per-load flags, the generation-filtered event drain and the sample assembly; `App` delegates to it, and the portable cases drive the same object in the same order, including both sequences that defeated the earlier guards and one that drives the real supervisor and deadline rather than setting the arming flag by hand |
-| ~~P1~~ Fixed on 2026-08-08 | ~~Make `Steady` mean five continuously clean seconds rather than five seconds since a first frame~~ | Done in three passes. The deadline could confirm mid-fill because the fold's interrupted edge never fires for a pause that predates the window; the first repair then let a held deadline carry credit for time spent filling, so both cache-state edges now restart the window. The final repair made the fold's current health verdict supervisor state: otherwise a non-cache degradation could remain unhealthy without another edge, confirm at five seconds and clear an attempt just before the six-second decode-stall recovery. Found by hanging live-sync arming off `Steady`; it also had `apply_buffer_phase(Steady)` switching to steady buffer targets while playback was unhealthy |
+| ~~P1~~ Fixed on 2026-08-08 | ~~Make `Steady` mean five continuously clean seconds rather than five seconds since a first frame~~ | Done in three passes. The deadline could confirm mid-fill because the fold's interrupted edge never fires for a pause that predates the window; the first repair then let a held deadline carry credit for time spent filling, so both cache-state edges now restart the window. The final repair made the fold's last determinate health verdict supervisor state: otherwise a non-cache degradation could remain unhealthy without another edge, confirm at five seconds and clear an attempt just before the six-second decode-stall recovery. `Unknown` remains neutral, so missing playback-time telemetry neither invents nor clears an unhealthy condition. Found by hanging live-sync arming off `Steady`; it also had `apply_buffer_phase(Steady)` switching to steady buffer targets while playback was unhealthy |
 | P1 | Make advancing replay observable before deciding any policy for it | Record signed playback and cache-end deviation plus sanitized engine warning text, and capture the request the stack sends on a fresh selection. The 2026-08-08 session showed the present counter scores a cache pause and a backward jump identically, so no threshold can be derived from it yet, and a fresh user request reproduced the replayed section — which makes reopening a doubtful remedy. Retain the episode across `steady-confirmed` and keep the attempt and wall-clock ceilings so repeated replay cannot retry forever, but do not assume the retries help |
 | P2 | Decide and document target decay semantics | The present controller intentionally or accidentally retains every 500ms concession until reset; it does not reproduce ExoPlayer's adaptive target |
 | P2 now; P1 before HLS support | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Avoids standards-disfavored edge startup and makes the currently unreachable recovery branch real |
