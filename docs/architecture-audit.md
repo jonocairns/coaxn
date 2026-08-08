@@ -373,7 +373,8 @@ core — is now idle.
 
 ### 8. [Fixed at `8deb198`] The load log can persist an arbitrary authenticated URL
 
-`MpvPlayer::issue_load` logs every target through `redact_stream_url` at
+At the time of this fix, `MpvPlayer::issue_load` logged every target through
+`redact_stream_url` at
 [mpv_player.cpp:180](../src/player/mpv_player.cpp). That helper masked credentials
 only when the URL contains an Xtream-shaped `/live/`, `/movie/` or `/series/`
 path. If none is present it deliberately returns the input unchanged
@@ -408,6 +409,14 @@ what follows them is preserved but decides nothing. Coax's own
 `Client::stream_url` always appends `/{id}.ts` and cannot produce the truncated
 form, so the reachable route was the direct-media command-line argument — the
 same untrusted-input path this finding is about.
+
+**Later hardening.** Replay-observability work stopped persisting stream URLs
+altogether. The load log now retains only scheme/target shape, query/userinfo
+presence and process-local provider/channel session numbers derived from the
+normalized channel ID. The stream redactor and its tests were removed once it
+had no production caller; `redact_portal_url` remains for the separate portal
+origin log. This is stricter than the original repair while preserving
+same-channel reselection correlation without a host, path or stream ID.
 
 The test that pinned the old behaviour deserves an exact account, because it is
 not the one this document implied. Its two assertions still pass: neither

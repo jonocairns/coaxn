@@ -16,6 +16,7 @@
 #include "player/live_sync.hpp"
 #include "player/live_sync_turn.hpp"
 #include "player/mpv_player.hpp"
+#include "player/session_target_registry.hpp"
 #include "win/app_window.hpp"
 #include "win/composition.hpp"
 #include "win/ui_layer.hpp"
@@ -105,6 +106,7 @@ private:
     win::UiLayer         ui_;
     win::CompositionTree composition_;
     player::MpvPlayer    player_;
+    player::SessionTargetRegistry target_registry_;
     core::ChannelIndex   channels_;
 
     core::SteadySupervisorClock supervisor_clock_;
@@ -201,11 +203,15 @@ private:
     core::Generation generation_;
     std::optional<core::PlaybackHealthState> playback_health_;
     core::BufferHealthSnapshot health_snapshot_;
+    player::TimelineClassification timeline_classification_ =
+        player::TimelineClassification::Unavailable;
     core::SupervisorStatsSnapshot supervisor_snapshot_;
     core::TimePoint next_health_sample_{};
     bool stall_reported_ = false;
     bool decode_stall_reported_ = false;
     bool exact_failure_reported_ = false;
+    std::uint64_t last_health_engine_message_count_ = 0;
+    std::uint64_t last_health_unattributed_engine_message_count_ = 0;
     std::optional<bool> last_cache_state_dispatched_;
 
     struct PendingStreamEnd {

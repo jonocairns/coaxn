@@ -13,6 +13,7 @@
 #include "player/buffer_phase_gate.hpp"
 #include "player/load_diagnostics.hpp"
 #include "player/player_event_adapter.hpp"
+#include "player/playback_observability.hpp"
 #include "win/com_ptr.hpp"
 
 struct mpv_handle;
@@ -40,6 +41,7 @@ struct PlaybackTarget {
     core::Generation generation;
     core::RecoveryTransport transport = core::RecoveryTransport::MpegTs;
     bool probed_format_forced = false;
+    SourceCorrelation correlation;
 };
 
 // RAII libmpv owner. The UI thread is the sole caller.
@@ -58,7 +60,8 @@ public:
 
     bool initialize(const PlayerConfig& config, std::string& error);
     bool play(const std::string& url, core::Generation generation,
-              core::RecoveryTransport transport, bool force_probed_format = false);
+              core::RecoveryTransport transport, bool force_probed_format = false,
+              SourceCorrelation correlation = {});
     void stop(core::Generation generation);
 
     [[nodiscard]] std::optional<core::RecoveryTransport> reopen_current(
@@ -105,7 +108,7 @@ private:
     // across which an address can be reused by a different object.
     void bump_swapchain_epoch();
     std::uint64_t next_request_id();
-    bool issue_load(bool force_probed_format);
+    bool issue_load(bool force_probed_format, LoadRequestIntent intent);
     bool issue_buffer_property(core::Generation generation, core::BufferPhase phase,
                                BufferProperty property, double value);
 
@@ -134,6 +137,7 @@ private:
     bool file_loaded_ = false;
     bool transport_log_armed_ = false;
     bool transport_classification_reported_ = false;
+    EngineDiagnosticLogGate engine_diagnostic_log_gate_;
 
     double vsr_scale_ = 1.0;
     bool vsr_enabled_ = false;

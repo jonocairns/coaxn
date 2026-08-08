@@ -40,8 +40,10 @@ target_compile_options(coax_core PRIVATE -Wall -Wextra -Wpedantic)
 add_library(coax_player_core
     src/player/live_sync.cpp
     src/player/load_diagnostics.cpp
+    src/player/playback_observability.cpp
     src/player/player_event_adapter.cpp
     src/player/recovery_effect_executor.cpp
+    src/player/session_target_registry.cpp
     src/player/transport_log_classifier.cpp)
 target_include_directories(coax_player_core PUBLIC src)
 target_link_libraries(coax_player_core PUBLIC coax_core)

@@ -7,6 +7,7 @@
 #include <format>
 
 #include "core/policy.hpp"
+#include "core/supervisor.hpp"
 #include "util/log.hpp"
 #include "player/transport_log_classifier.hpp"
 
@@ -166,24 +167,39 @@ void MpvPlayer::destroy_backend() {
 std::uint64_t MpvPlayer::next_request_id() { return ++request_sequence_; }
 
 bool MpvPlayer::play(const std::string& url, core::Generation generation,
-                     core::RecoveryTransport transport, bool force_probed_format) {
+                     core::RecoveryTransport transport, bool force_probed_format,
+                     SourceCorrelation correlation) {
     if (!mpv_) return false;
-    target_ = PlaybackTarget{url, generation, transport, force_probed_format};
+    target_ = PlaybackTarget{url, generation, transport, force_probed_format, correlation};
     reset_load_observations(diagnostics_);
     buffer_phase_gate_.begin_load(generation);
     apply_buffer_phase(generation, core::BufferPhase::Zap);
-    return issue_load(force_probed_format);
+    return issue_load(force_probed_format, LoadRequestIntent::FreshSelection);
 }
 
-bool MpvPlayer::issue_load(bool force_probed_format) {
+bool MpvPlayer::issue_load(bool force_probed_format, LoadRequestIntent intent) {
     if (!mpv_ || !target_) return false;
-    log::info("Loading {} generation {}", log::redact_stream_url(target_->url),
-              target_->generation.value());
+    diagnostics_.request_shape = inspect_request_shape(
+        target_->url, intent, target_->transport, force_probed_format,
+        target_->correlation);
+    const auto& request = *diagnostics_.request_shape;
+    log::info(
+        "Load request generation {} provider-session={} channel-session={} "
+        "intent={} command=loadfile mode=replace transport={} "
+        "scheme={} target={} query={} userinfo={} forced-format={}; "
+        "HTTP method/range/headers unobserved below libmpv",
+        target_->generation.value(), request.correlation.provider_session,
+        request.correlation.channel_session, to_string(request.intent),
+        core::to_string(request.transport), to_string(request.scheme),
+        to_string(request.target), request.query_present ? "present" : "absent",
+        request.userinfo_present ? "present" : "absent",
+        request.forced_format ? "yes" : "no");
     load_started_at_ = std::chrono::steady_clock::now();
     load_in_flight_ = true;
     file_loaded_ = false;
     transport_log_armed_ = false;
     transport_classification_reported_ = false;
+    engine_diagnostic_log_gate_.reset();
     target_->probed_format_forced = force_probed_format;
 
     const std::uint64_t request_id = next_request_id();
@@ -263,7 +279,7 @@ std::optional<core::RecoveryTransport> MpvPlayer::reopen_current(
     reset_load_observations(diagnostics_);
     buffer_phase_gate_.begin_load(generation);
     apply_buffer_phase(generation, core::BufferPhase::Zap);
-    if (!issue_load(force_probed_format)) return std::nullopt;
+    if (!issue_load(force_probed_format, LoadRequestIntent::RecoveryReopen)) return std::nullopt;
     return target_->transport;
 }
 
@@ -277,8 +293,11 @@ std::optional<core::RecoveryTransport> MpvPlayer::recreate_player(
     // Synchronous UI-thread recreation cannot be superseded mid-call, but the
     // equality check is retained as the explicit replacement fence.
     if (!target_ || target_->generation != generation) return std::nullopt;
-    if (!play(target.url, target.generation, target.transport,
-              target.probed_format_forced)) {
+    reset_load_observations(diagnostics_);
+    buffer_phase_gate_.begin_load(generation);
+    apply_buffer_phase(generation, core::BufferPhase::Zap);
+    if (!issue_load(target.probed_format_forced,
+                    LoadRequestIntent::PlayerRecreation)) {
         return std::nullopt;
     }
     return target.transport;
@@ -518,7 +537,8 @@ void MpvPlayer::handle_property(std::uint64_t id, const mpv_event_property& prop
 }
 
 core::PlaybackHealthObservation MpvPlayer::health_observation() const {
-    return {.av_sync_seconds = diagnostics_.av_sync_seconds,
+    return {.generation = target_ ? target_->generation : core::Generation{},
+            .av_sync_seconds = diagnostics_.av_sync_seconds,
             .buffer_seconds = diagnostics_.cache_duration_seconds,
             .cache_end_seconds = diagnostics_.cache_end_seconds,
             .cache_paused = diagnostics_.paused_for_cache,
@@ -584,7 +604,12 @@ void MpvPlayer::pump() {
             }
             case MPV_EVENT_LOG_MESSAGE: {
                 const auto* message = static_cast<mpv_event_log_message*>(event->data);
-                if (transport_log_armed_ && !transport_classification_reported_ && target_) {
+                const std::optional<core::Generation> target_generation = target_
+                    ? std::optional{target_->generation} : std::nullopt;
+                const auto attribution = classify_engine_message_attribution(
+                    transport_log_armed_, events_.active_generation(), target_generation);
+                if (attribution == EngineMessageAttribution::ActiveEntry &&
+                    !transport_classification_reported_ && target_) {
                     if (const auto classification = classify_transport_log(
                             message->text, target_->transport, file_loaded_,
                             target_->probed_format_forced)) {
@@ -598,9 +623,32 @@ void MpvPlayer::pump() {
                         }
                     }
                 }
-                // mpv warnings can embed authenticated stream URLs. Preserve
-                // the component and severity but never persist raw transport text.
-                log::warn("mpv/{} warning (details redacted)", message->prefix);
+                // mpv warnings can embed authenticated stream URLs, headers
+                // and query tokens. Preserve only closed categories; neither
+                // prefix nor message text crosses this event turn.
+                const auto warning = sanitize_engine_warning(
+                    message->prefix, message->text, message->level);
+                if (attribution == EngineMessageAttribution::ActiveEntry) {
+                    diagnostics_.last_engine_message = warning;
+                    ++diagnostics_.engine_message_count;
+                } else {
+                    diagnostics_.last_unattributed_engine_message = warning;
+                    ++diagnostics_.unattributed_engine_message_count;
+                }
+                if (!engine_diagnostic_log_gate_.first_occurrence(attribution, warning)) break;
+
+                const std::string generation =
+                    attribution == EngineMessageAttribution::ActiveEntry && target_
+                        ? std::format("{}", target_->generation.value())
+                        : "unattributed";
+                const std::string summary = std::format(
+                    "mpv diagnostic generation={} attribution={} severity={} "
+                    "component={} category={}",
+                    generation, to_string(attribution), to_string(warning.severity),
+                    to_string(warning.component), to_string(warning.category));
+                if (warning.severity == EngineLogSeverity::Error ||
+                    warning.severity == EngineLogSeverity::Fatal) log::error("{}", summary);
+                else log::warn("{}", summary);
                 break;
             }
             case MPV_EVENT_QUEUE_OVERFLOW:
