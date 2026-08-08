@@ -453,6 +453,37 @@ monotonic time:
 abs((currentPlayback - previousPlayback) - elapsed) > 1 second
 ```
 
+The fold now retains the inputs to that comparison before applying `abs()`.
+`BufferHealthSnapshot::timeline` is reset for every load and carries the load
+generation. Its optional measurements use seconds and these conventions:
+
+| Field | Definition and sign |
+|---|---|
+| `elapsed_seconds` | Nonnegative monotonic time from the previous health sample to this one |
+| `playback_movement_seconds` | `current playback-time - previous playback-time`; positive advances, zero stops and negative moves backward |
+| `playback_deviation_seconds` | `playback_movement_seconds - elapsed_seconds`; positive is ahead of wall-clock expectation and negative is behind, including a backward reset |
+| `cache_end_movement_seconds` | `current demuxer-cache-end - previous demuxer-cache-end`; positive extends the reported cache end and negative moves it backward |
+
+Movement and deviation are unavailable unless both adjacent playback-time
+samples exist; cache-end movement is unavailable unless both adjacent
+cache-end samples exist. A missing endpoint never becomes zero. The existing
+nonnegative `input_realtime_ratio` remains a separate derived control input, so
+clamping that ratio no longer destroys the signed cache evidence. A generation
+mismatch rejects the complete observation before it can alter the current
+load's snapshot. Separate control baselines still retain the last usable
+playback/cache values across an unreadable sample, preserving the pre-existing
+health verdict and stall behavior; the raw evidence never borrows those values.
+
+The portable player layer presents the evidence as `normal-advance`,
+`forward-jump`, `forward-lag`, `backward`, `no-progress`,
+`paused-no-progress` or `resume-lag`. The last two use current and previous
+`paused-for-cache` levels; they are presentation categories, not recovery
+policy. The F1 diagnostics panel shows the raw values and category. The session
+log writes a generation-scoped debug line for every health sample and a warning
+line for each existing discontinuity, including signed movements, pause
+context, the count of engine warnings since the preceding sample and the most
+recent warning's sanitized component/category.
+
 Forward discontinuities that still make progress can be diagnostic only. A
 backward or no-progress discontinuity can classify the sample as degraded,
 publish an unhealthy level, restart or hold the steady window while still in
@@ -585,14 +616,50 @@ thus a Steady-state replay policy, not merely a new event path.
 
 Restarting on a count of generic discontinuities is not an acceptable fix.
 Live MPEG-TS can contain legitimate timestamp resets, splices and damage. The
-current fold reduces signed playback movement to a boolean discontinuity and
-also clamps the cache-end delta with `max(0, delta / elapsed)`. A backwards
-cache-end jump therefore becomes a zero input ratio, loses its sign and
-magnitude, and changes the degraded-reason classification. Preserve signed
-playback movement and deviation as well as signed cache-end movement; retain a
-nonnegative delivery rate only as a separately derived value. Correlate those
-signals with the load epoch, recovery history, cache state and sanitized engine
-warnings before defining a replay threshold.
+health fold previously reduced signed playback movement to a boolean
+discontinuity and clamped the cache-end delta with `max(0, delta / elapsed)`.
+The raw signed values are now retained as described above while the clamped
+delivery rate remains separately available. This makes a backward cache-end
+jump and a zero delivery ratio distinguishable without changing the existing
+health or recovery decisions. Recovery history still needs to be correlated
+with these measurements and field observations before defining a replay
+threshold.
+
+#### Warning and request observability
+
+The pinned mpv log path still passes raw warning text directly to the exact
+transport-failure classifier for the duration of one event turn, but no raw
+text or raw prefix is persisted. A second portable classifier retains only a
+closed component (`player`, `demuxer`, video/audio decoder, `stream`, `http` or
+`other`) and category (authentication, HTTP failure, timeout, HLS
+playlist/segment, format probe, timestamp discontinuity, non-monotonic
+timestamp, continuity error, corrupt packet, decode error or `other`). The
+category and generation are logged when the warning arrives; the latest
+category and per-load warning count are also shown in diagnostics and
+correlated with the next health observation. Fixtures include authenticated
+URLs, userinfo, query tokens and an Authorization header and assert that none
+can survive in retained output.
+
+A fresh channel selection was verified in code and tests to hand libmpv this
+command shape: `loadfile`, the target argument, and `replace`, with the
+progressive Xtream load recorded as `transport=mpeg-ts` and no forced demuxer
+format. Runtime logging deliberately replaces the target argument with only
+`scheme=https|http`, `target=xtream-live|hls-playlist|media-path|opaque`, and
+boolean query/userinfo-presence markers. It also distinguishes
+`fresh-selection`, `recovery-reopen` and `player-recreation`. No host, path,
+query value, URL, credential or header value is retained.
+
+This is command-boundary evidence, not a wire capture. No credential-safe
+provider field run was available for this change, so the HTTP method, `Range`
+header, other request headers, connection reuse and returned-byte identity
+remain unverified below libmpv. The exact outstanding field step is to route one
+fresh selection and one immediate reopen through a user-controlled TLS
+terminating capture that writes only: method; a credential-masked path shape;
+query presence; `Range` presence and numeric interval (never cookies,
+Authorization or query values); connection identity; response status; and
+fixed-size response-body chunk hashes. Compare those hashes and request shapes,
+then delete the raw proxy capture before retaining the sanitized record. Until
+that is done, reopening cannot be claimed to request new bytes.
 
 Replay recovery also needs its own episode invariant. Today
 `steady-confirmed` resets `attempt` to zero and clears `recovery_started_at`.
@@ -731,7 +798,7 @@ progressive-live and replay comparison refreshed on 2026-08-07:
 | ~~P1~~ Fixed on 2026-08-08 | ~~Stop co-incident initial-fill and first-frame signals from counting as a rebuffer~~ | Done. Arming is the supervisor's steady confirmation, cleared for every load by `begin_health_load()` rather than by `LiveSyncGate::reset()`, which deliberately does not run on ordinary reopens. A first frame, and a momentary unpaused turn after it, were both tried and both falsified against the runtime |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Add an application-level test for player-event, pause-property and live-sync sequencing~~ | Done. `player::LiveSyncTurn` holds the per-load flags, the generation-filtered event drain and the sample assembly; `App` delegates to it, and the portable cases drive the same object in the same order, including both sequences that defeated the earlier guards and one that drives the real supervisor and deadline rather than setting the arming flag by hand |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Make `Steady` mean five continuously clean seconds rather than five seconds since a first frame~~ | Done in three passes. The deadline could confirm mid-fill because the fold's interrupted edge never fires for a pause that predates the window; the first repair then let a held deadline carry credit for time spent filling, so both cache-state edges now restart the window. The final repair made the fold's last determinate health verdict supervisor state: otherwise a non-cache degradation could remain unhealthy without another edge, confirm at five seconds and clear an attempt just before the six-second decode-stall recovery. `Unknown` remains neutral, so missing playback-time telemetry neither invents nor clears an unhealthy condition. Found by hanging live-sync arming off `Steady`; it also had `apply_buffer_phase(Steady)` switching to steady buffer targets while playback was unhealthy |
-| P1 | Make advancing replay observable before deciding any policy for it | Record signed playback and cache-end deviation plus sanitized engine warning text, and capture the request the stack sends on a fresh selection. The 2026-08-08 session showed the present counter scores a cache pause and a backward jump identically, so no threshold can be derived from it yet, and a fresh user request reproduced the replayed section — which makes reopening a doubtful remedy. Retain the episode across `steady-confirmed` and keep the attempt and wall-clock ceilings so repeated replay cannot retry forever, but do not assume the retries help |
+| ~~P1~~ Fixed in this change | ~~Make advancing replay observable before deciding any policy for it~~ | Signed adjacent-sample playback movement, expected-movement deviation and cache-end movement now survive in a generation-scoped snapshot, log and diagnostics panel. Pause, resume, stopped playback, forward jumps and backward movement have distinct presentation categories. Engine warnings survive only as credential-safe structured context, and URL-free instrumentation records the exact `loadfile replace` command shape. The backend's HTTP method/range/headers and byte identity remain honestly field-unverified, so no replay threshold or recovery action was added |
 | P2 | Decide and document target decay semantics | The present controller intentionally or accidentally retains every 500ms concession until reset; it does not reproduce ExoPlayer's adaptive target |
 | P2 now; P1 before HLS support | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Avoids standards-disfavored edge startup and makes the currently unreachable recovery branch real |
 | P2 | Remove HLS connection overrides unless reproduced provider evidence requires them; define one error-retry budget across FFmpeg and Coax | Preserves normal playlist refresh and avoids mistaking connection strategy for retry control |
@@ -754,13 +821,9 @@ settings on the same representative channel set and record:
 - signed playback movement versus monotonic expected movement and signed
   cache-end movement, correlated with load epoch, time since recovery and cache
   state; retain the clamped delivery rate as a distinct derived measurement;
-- credential-safe engine warning details or structured warning categories,
-  correlated with the health sample that follows them; the current adapter
-  discards all warning text, leaving thousands of component-only lines that
-  cannot attribute the next discontinuity. The 2026-08-08 session put a cost on
-  this: the components alone already separate a replaying load from a merely
-  noisy one, and the messages that would name the cause were the ones thrown
-  away;
+- credential-safe structured engine-warning categories, now correlated with
+  the health sample that follows them; extend the closed taxonomy against the
+  pinned runtime only when a field warning cannot be classified usefully;
 - a persistent session log. `coax.log` is opened truncating, so each launch
   destroys the previous session, and architecture-audit finding 10 records that
   an installed build under Program Files likely has no log at all. Both replay

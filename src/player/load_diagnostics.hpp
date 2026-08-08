@@ -6,6 +6,7 @@
 
 #include "core/playback_types.hpp"
 #include "player/buffer_phase_gate.hpp"
+#include "player/playback_observability.hpp"
 
 namespace coax::player {
 
@@ -58,6 +59,9 @@ struct Diagnostics {
     // timeline deviations. They are not interchangeable counters.
     int mpv_playback_restart_events = 0;
     int health_discontinuities = 0;
+    std::uint64_t engine_warning_count = 0;
+    std::optional<SanitizedEngineWarning> last_engine_warning;
+    std::optional<SanitizedRequestShape> request_shape;
 
     core::BufferPhase buffer_phase = core::BufferPhase::Zap;
     BufferPhaseCommandState buffer_phase_command_state =

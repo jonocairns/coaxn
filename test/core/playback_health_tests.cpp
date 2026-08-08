@@ -15,7 +15,8 @@ constexpr double kContainerFps = 25.0;
 const Duration kInterval = kDefaultHealthPolicy.sample_interval;
 
 PlaybackHealthObservation healthy() {
-    return {.av_sync_seconds = 0.0, .buffer_seconds = 8.0, .cache_end_seconds = 8.0,
+    return {.generation = Generation{1}, .av_sync_seconds = 0.0,
+            .buffer_seconds = 8.0, .cache_end_seconds = 8.0,
             .cache_paused = false, .input_rate_bytes_per_second = 240'000.0,
             .ipc_round_trip_ms = 1.2, .playback_time_seconds = 0.0,
             .video_fps_estimate = kContainerFps};
@@ -63,10 +64,13 @@ struct ReplayResult {
 
 ReplayResult replay(const std::vector<PlaybackHealthObservation>& values,
                     bool first_frame = true, TimePoint load_at = TimePoint{}) {
-    auto state = initial_playback_health(BufferPhase::Zap, load_at);
+    auto state = initial_playback_health(Generation{1}, BufferPhase::Zap, load_at);
     auto at = load_at;
     std::vector<PlaybackHealthFold> folds;
-    for (const auto& value : values) {
+    for (auto value : values) {
+        // Fixtures that exercise unavailable opening telemetry use default
+        // observations; the helper attaches them to its current load.
+        if (value.generation == Generation{}) value.generation = Generation{1};
         at += kInterval;
         PlaybackHealthFoldOptions options;
         options.container_fps = kContainerFps;
@@ -240,6 +244,135 @@ TEST_CASE("discontinuity is deviation from elapsed progress in either direction"
     for (const auto& fold : replay(values).folds) CHECK_FALSE(fold.discontinuity);
 }
 
+TEST_CASE("timeline evidence preserves signed movement and deviation") {
+    const auto ordinary = replay(advancing(3));
+    const auto& normal = ordinary.state.snapshot.timeline;
+    REQUIRE(normal.elapsed_seconds);
+    REQUIRE(normal.playback_movement_seconds);
+    REQUIRE(normal.playback_deviation_seconds);
+    CHECK(*normal.elapsed_seconds == Approx(kInterval.count()));
+    CHECK(*normal.playback_movement_seconds == Approx(kInterval.count()));
+    CHECK(*normal.playback_deviation_seconds == Approx(0.0).margin(1e-9));
+
+    auto first = healthy();
+    first.playback_time_seconds = 10.0;
+    first.cache_end_seconds = 20.0;
+    auto forward = first;
+    forward.playback_time_seconds = 13.0;
+    forward.cache_end_seconds = 23.0;
+    auto result = replay({first, forward});
+    REQUIRE(result.state.snapshot.timeline.playback_deviation_seconds);
+    CHECK(*result.state.snapshot.timeline.playback_deviation_seconds > 0.0);
+
+    auto backward = first;
+    backward.playback_time_seconds = 8.0;
+    backward.cache_end_seconds = 18.0;
+    result = replay({first, backward});
+    REQUIRE(result.state.snapshot.timeline.playback_movement_seconds);
+    REQUIRE(result.state.snapshot.timeline.playback_deviation_seconds);
+    REQUIRE(result.state.snapshot.timeline.cache_end_movement_seconds);
+    // Falsification: flattening either delta with abs() makes these fail.
+    CHECK(*result.state.snapshot.timeline.playback_movement_seconds == Approx(-2.0));
+    CHECK(*result.state.snapshot.timeline.playback_deviation_seconds == Approx(-2.5));
+    CHECK(*result.state.snapshot.timeline.cache_end_movement_seconds == Approx(-2.0));
+    // The nonnegative control ratio is still separate from the raw signed delta.
+    CHECK(result.state.snapshot.input_realtime_ratio == Approx(0.0));
+}
+
+TEST_CASE("stopped playback remains distinct from backward playback") {
+    auto first = healthy();
+    first.playback_time_seconds = 10.0;
+    auto stopped = first;
+    auto backward = first;
+    backward.playback_time_seconds = 9.5;
+
+    const auto stopped_result = replay({first, stopped});
+    const auto backward_result = replay({first, backward});
+    REQUIRE(stopped_result.state.snapshot.timeline.playback_movement_seconds);
+    REQUIRE(backward_result.state.snapshot.timeline.playback_movement_seconds);
+    CHECK(*stopped_result.state.snapshot.timeline.playback_movement_seconds == Approx(0.0));
+    CHECK(*backward_result.state.snapshot.timeline.playback_movement_seconds == Approx(-0.5));
+}
+
+TEST_CASE("missing timeline telemetry stays unavailable instead of becoming zero") {
+    auto present = healthy();
+    present.playback_time_seconds = 10.0;
+    present.cache_end_seconds = 20.0;
+    auto missing = present;
+    missing.playback_time_seconds.reset();
+    missing.cache_end_seconds.reset();
+    auto result = replay({present, missing});
+    CHECK_FALSE(result.state.snapshot.timeline.playback_movement_seconds);
+    CHECK_FALSE(result.state.snapshot.timeline.playback_deviation_seconds);
+    CHECK_FALSE(result.state.snapshot.timeline.cache_end_movement_seconds);
+
+    result = replay({missing, present});
+    // Falsification: converting either absent endpoint to 0.0 makes these
+    // available and manufactures very large signed movements.
+    CHECK_FALSE(result.state.snapshot.timeline.playback_movement_seconds);
+    CHECK_FALSE(result.state.snapshot.timeline.playback_deviation_seconds);
+    CHECK_FALSE(result.state.snapshot.timeline.cache_end_movement_seconds);
+}
+
+TEST_CASE("pause resume and backward replay retain different evidence") {
+    auto baseline = healthy();
+    baseline.playback_time_seconds = 10.0;
+    baseline.cache_end_seconds = 20.0;
+    auto state = initial_playback_health(Generation{1}, BufferPhase::Zap, TimePoint{});
+    PlaybackHealthFoldOptions options;
+    options.first_frame_seen = true;
+
+    state = fold_playback_health(state, baseline, TimePoint{} + seconds(0.5), options).state;
+    auto paused = baseline;
+    paused.cache_paused = true;
+    auto pause_fold = fold_playback_health(
+        state, paused, TimePoint{} + seconds(2.0), options);
+    REQUIRE(pause_fold.discontinuity);
+    CHECK(pause_fold.state.snapshot.timeline.playback_movement_seconds == Approx(0.0));
+    CHECK(pause_fold.state.snapshot.timeline.cache_paused);
+
+    auto resumed = baseline;
+    resumed.playback_time_seconds = 10.5;
+    auto resume_fold = fold_playback_health(
+        pause_fold.state, resumed, TimePoint{} + seconds(4.0), options);
+    REQUIRE(resume_fold.discontinuity);
+    CHECK(resume_fold.state.snapshot.timeline.playback_movement_seconds == Approx(0.5));
+    CHECK(resume_fold.state.snapshot.timeline.previous_cache_paused == true);
+    CHECK_FALSE(resume_fold.state.snapshot.timeline.cache_paused);
+
+    auto replayed = resumed;
+    replayed.playback_time_seconds = 8.0;
+    const auto replay_fold = fold_playback_health(
+        resume_fold.state, replayed, TimePoint{} + seconds(4.5), options);
+    REQUIRE(replay_fold.discontinuity);
+    REQUIRE(replay_fold.state.snapshot.timeline.playback_movement_seconds);
+    CHECK(*replay_fold.state.snapshot.timeline.playback_movement_seconds < 0.0);
+    CHECK(replay_fold.state.snapshot.timeline.playback_movement_seconds !=
+          resume_fold.state.snapshot.timeline.playback_movement_seconds);
+}
+
+TEST_CASE("stale generations cannot alter current-load timeline evidence") {
+    auto current = healthy();
+    current.generation = Generation{9};
+    auto state = initial_playback_health(Generation{9}, BufferPhase::Zap, TimePoint{});
+    PlaybackHealthFoldOptions options;
+    options.first_frame_seen = true;
+    state = fold_playback_health(
+        state, current, TimePoint{} + seconds(0.5), options).state;
+
+    auto stale = current;
+    stale.generation = Generation{8};
+    stale.playback_time_seconds = -500.0;
+    stale.cache_end_seconds = -500.0;
+    const auto rejected = fold_playback_health(
+        state, stale, TimePoint{} + seconds(1.0), options);
+    CHECK_FALSE(rejected.observation_accepted);
+    CHECK(rejected.state.generation == Generation{9});
+    CHECK(rejected.state.discontinuities == state.discontinuities);
+    CHECK(rejected.state.snapshot.timeline.playback_movement_seconds ==
+          state.snapshot.timeline.playback_movement_seconds);
+}
+
 TEST_CASE("degraded classification separates throttling decode damage and unknown fps") {
     auto values = advancing(4);
     std::vector<PlaybackHealthObservation> throttled;
@@ -261,7 +394,7 @@ TEST_CASE("degraded classification separates throttling decode damage and unknow
     REQUIRE(result.state.snapshot.video_fps_shortfall);
     CHECK(*result.state.snapshot.video_fps_shortfall > kDefaultHealthPolicy.decode_shortfall_ratio);
 
-    auto state = initial_playback_health(BufferPhase::Zap, TimePoint{});
+    auto state = initial_playback_health(Generation{1}, BufferPhase::Zap, TimePoint{});
     TimePoint at{};
     for (const auto& value : values) {
         at += kInterval;

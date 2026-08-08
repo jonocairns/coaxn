@@ -20,6 +20,9 @@ void reset_load_observations(Diagnostics& diagnostics) {
     diagnostics.paused_for_cache = false;
     diagnostics.last_load_seconds = 0.0;
     diagnostics.health_discontinuities = 0;
+    diagnostics.engine_warning_count = 0;
+    diagnostics.last_engine_warning.reset();
+    diagnostics.request_shape.reset();
     diagnostics.buffer_phase = core::BufferPhase::Zap;
     diagnostics.buffer_phase_command_state = BufferPhaseCommandState::Unissued;
     diagnostics.av_sync_seconds.reset();

@@ -13,6 +13,7 @@
 #include "player/buffer_phase_gate.hpp"
 #include "player/load_diagnostics.hpp"
 #include "player/player_event_adapter.hpp"
+#include "player/playback_observability.hpp"
 #include "win/com_ptr.hpp"
 
 struct mpv_handle;
@@ -105,7 +106,7 @@ private:
     // across which an address can be reused by a different object.
     void bump_swapchain_epoch();
     std::uint64_t next_request_id();
-    bool issue_load(bool force_probed_format);
+    bool issue_load(bool force_probed_format, LoadRequestIntent intent);
     bool issue_buffer_property(core::Generation generation, core::BufferPhase phase,
                                BufferProperty property, double value);
 

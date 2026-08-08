@@ -7,6 +7,7 @@
 #include "player/buffer_phase_gate.hpp"
 #include "player/load_diagnostics.hpp"
 #include "player/player_event_adapter.hpp"
+#include "player/playback_observability.hpp"
 #include "player/recovery_effect_executor.hpp"
 #include "player/transport_log_classifier.hpp"
 
@@ -235,6 +236,14 @@ TEST_CASE("new loads clear observations but retain lifetime diagnostics") {
     diagnostics.buffer_phase = core::BufferPhase::Steady;
     diagnostics.buffer_commands_accepted = 7;
     diagnostics.mpv_playback_restart_events = 3;
+    diagnostics.engine_warning_count = 12;
+    diagnostics.last_engine_warning = player::SanitizedEngineWarning{
+        player::EngineWarningComponent::Demuxer,
+        player::EngineWarningCategory::CorruptPacket};
+    diagnostics.request_shape = player::inspect_request_shape(
+        "https://user:secret@example.invalid/live/u/p/123.ts?token=secret",
+        player::LoadRequestIntent::FreshSelection,
+        core::RecoveryTransport::MpegTs, false);
 
     player::reset_load_observations(diagnostics);
 
@@ -254,6 +263,87 @@ TEST_CASE("new loads clear observations but retain lifetime diagnostics") {
           player::BufferPhaseCommandState::Unissued);
     CHECK(diagnostics.buffer_commands_accepted == 7);
     CHECK(diagnostics.mpv_playback_restart_events == 3);
+    CHECK(diagnostics.engine_warning_count == 0);
+    CHECK_FALSE(diagnostics.last_engine_warning);
+    CHECK_FALSE(diagnostics.request_shape);
+}
+
+TEST_CASE("timeline presentation distinguishes jumps stops pauses and resumes") {
+    core::TimelineEvidence evidence;
+    evidence.elapsed_seconds = 2.0;
+    evidence.playback_movement_seconds = -1.0;
+    evidence.playback_deviation_seconds = -3.0;
+    CHECK(player::classify_timeline(evidence) == player::TimelineClassification::Backward);
+
+    evidence.playback_movement_seconds = 0.0;
+    evidence.playback_deviation_seconds = -2.0;
+    CHECK(player::classify_timeline(evidence) == player::TimelineClassification::NoProgress);
+    evidence.cache_paused = true;
+    CHECK(player::classify_timeline(evidence) ==
+          player::TimelineClassification::PausedNoProgress);
+
+    evidence.cache_paused = false;
+    evidence.previous_cache_paused = true;
+    evidence.playback_movement_seconds = 0.25;
+    evidence.playback_deviation_seconds = -1.75;
+    CHECK(player::classify_timeline(evidence) == player::TimelineClassification::ResumeLag);
+
+    evidence.previous_cache_paused = false;
+    evidence.playback_movement_seconds = 3.0;
+    evidence.playback_deviation_seconds = 1.5;
+    CHECK(player::classify_timeline(evidence) == player::TimelineClassification::ForwardJump);
+    evidence.playback_deviation_seconds = 0.0;
+    CHECK(player::classify_timeline(evidence) == player::TimelineClassification::NormalAdvance);
+}
+
+TEST_CASE("engine warning summaries retain context without provider data") {
+    const std::string raw =
+        "Continuity check failed for pid 17 at "
+        "https://alice:password@provider.invalid/live/alice/password/42.ts?token=secret "
+        "Authorization: Bearer super-secret";
+    const auto warning = player::sanitize_engine_warning("ffmpeg/demuxer", raw);
+    CHECK(warning.component == player::EngineWarningComponent::Demuxer);
+    CHECK(warning.category == player::EngineWarningCategory::ContinuityError);
+
+    const std::string retained = std::string(player::to_string(warning.component)) + "/" +
+                                 player::to_string(warning.category);
+    for (const std::string_view forbidden : {
+             "provider.invalid", "alice", "password", "token", "secret",
+             "Authorization", "Bearer", "https://"}) {
+        CHECK(retained.find(forbidden) == std::string::npos);
+    }
+
+    CHECK(player::sanitize_engine_warning(
+              "ffmpeg/video", "Non-monotonous DTS in output stream https://host/?key=x")
+              .category == player::EngineWarningCategory::NonMonotonicTimestamp);
+    CHECK(player::sanitize_engine_warning(
+              "ffmpeg/demuxer", "PES packet size mismatch at http://u:p@host/live/u/p/1.ts")
+              .category == player::EngineWarningCategory::CorruptPacket);
+    CHECK(player::sanitize_engine_warning(
+              "ffmpeg/demuxer",
+              "hls: keepalive request failed when opening url https://u:p@host/s.ts?token=x")
+              .category == player::EngineWarningCategory::HlsSegment);
+}
+
+TEST_CASE("fresh selection request shape is useful and URL free") {
+    const std::string raw =
+        "https://alice:password@provider.invalid/live/alice/password/42.ts?token=secret";
+    const auto shape = player::inspect_request_shape(
+        raw, player::LoadRequestIntent::FreshSelection,
+        core::RecoveryTransport::MpegTs, false);
+    CHECK(shape.intent == player::LoadRequestIntent::FreshSelection);
+    CHECK(shape.scheme == player::RequestScheme::Https);
+    CHECK(shape.target == player::RequestTargetShape::XtreamLive);
+    CHECK(shape.query_present);
+    CHECK(shape.userinfo_present);
+    CHECK_FALSE(shape.forced_format);
+
+    const std::string retained = std::string(player::to_string(shape.intent)) + "/" +
+        player::to_string(shape.scheme) + "/" + player::to_string(shape.target);
+    for (const std::string_view forbidden : {
+             "provider.invalid", "alice", "password", "token", "secret", "https://"}) {
+        CHECK(retained.find(forbidden) == std::string::npos);
+    }
 }
 
 TEST_CASE("recovery effect executor routes every native action and settles outcomes") {

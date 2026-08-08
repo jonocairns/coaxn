@@ -105,6 +105,14 @@ std::string elide(const std::string& text, float width) {
     return text.substr(0, cut) + std::string(kEllipsis);
 }
 
+std::string signed_seconds(std::optional<double> value) {
+    return value ? std::format("{:+.3f}s", *value) : "unavailable";
+}
+
+const char* optional_pause(std::optional<bool> value) {
+    return !value ? "unavailable" : (*value ? "yes" : "no");
+}
+
 }  // namespace
 
 App::App()
@@ -470,7 +478,7 @@ void App::play(const core::Channel& channel) {
 void App::begin_health_load() {
     const auto now = supervisor_clock_.now();
     const auto target = core::buffer_phase_targets(core::BufferPhase::Zap);
-    playback_health_ = core::initial_playback_health(core::BufferPhase::Zap, now,
+    playback_health_ = core::initial_playback_health(generation_, core::BufferPhase::Zap, now,
                                                      target.cache_seconds);
     health_snapshot_ = playback_health_->snapshot;
     next_health_sample_ = now + core::kDefaultHealthPolicy.sample_interval;
@@ -481,6 +489,7 @@ void App::begin_health_load() {
     stall_reported_ = false;
     decode_stall_reported_ = false;
     exact_failure_reported_ = false;
+    last_health_warning_count_ = 0;
     last_cache_state_dispatched_.reset();
     player_.set_health_discontinuities(0);
 }
@@ -611,18 +620,45 @@ void App::sample_playback_health() {
 
     const auto& diagnostics = player_.diagnostics();
     const auto target = core::buffer_phase_targets(diagnostics.buffer_phase);
+    const auto observation = player_.health_observation();
     const auto fold = core::fold_playback_health(
-        *playback_health_, player_.health_observation(), now,
+        *playback_health_, observation, now,
         {.container_fps = diagnostics.container_fps,
          .first_frame_seen = live_sync_turn_.first_frame_seen(),
          .main_process_cpu_percent = std::nullopt,
          .phase = diagnostics.buffer_phase,
          .target_seconds = target.cache_seconds});
+    if (!fold.observation_accepted) {
+        log::warn("Dropped stale health observation generation {} while generation {} is active",
+                  observation.generation.value(), playback_health_->generation.value());
+        return;
+    }
     playback_health_ = fold.state;
     health_snapshot_ = fold.state.snapshot;
     player_.set_health_discontinuities(fold.state.discontinuities);
 
     const auto generation = player_.current_target()->generation;
+    const auto warning_count = diagnostics.engine_warning_count;
+    const auto warnings_since_sample = warning_count >= last_health_warning_count_
+        ? warning_count - last_health_warning_count_ : warning_count;
+    last_health_warning_count_ = warning_count;
+    const auto classification = player::classify_timeline(health_snapshot_.timeline);
+    const auto warning_component = warnings_since_sample > 0 && diagnostics.last_engine_warning
+        ? player::to_string(diagnostics.last_engine_warning->component) : "none";
+    const auto warning_category = warnings_since_sample > 0 && diagnostics.last_engine_warning
+        ? player::to_string(diagnostics.last_engine_warning->category) : "none";
+    log::debug(
+        "Timeline sample generation {} kind={} elapsed={} playback-move={} "
+        "playback-deviation={} cache-end-move={} cache-paused={} previous-cache-paused={} "
+        "warnings-since-sample={} warning-component={} warning-category={}",
+        generation.value(), player::to_string(classification),
+        signed_seconds(health_snapshot_.timeline.elapsed_seconds),
+        signed_seconds(health_snapshot_.timeline.playback_movement_seconds),
+        signed_seconds(health_snapshot_.timeline.playback_deviation_seconds),
+        signed_seconds(health_snapshot_.timeline.cache_end_movement_seconds),
+        health_snapshot_.timeline.cache_paused ? "yes" : "no",
+        optional_pause(health_snapshot_.timeline.previous_cache_paused),
+        warnings_since_sample, warning_component, warning_category);
     // Publish determinate levels rather than an interruption edge, so a
     // sustained degradation can hold the steady deadline. Unknown is absence
     // of playback-time evidence: it must neither create nor clear an unhealthy
@@ -633,8 +669,16 @@ void App::sample_playback_health() {
             generation, fold.state.verdict != core::PlaybackHealthVerdict::Healthy});
     }
     if (fold.discontinuity) {
-        log::warn("Timeline discontinuity #{} generation {} (classified by progress deviation)",
-                  fold.state.discontinuities, generation.value());
+        log::warn(
+            "Timeline discontinuity #{} generation {} kind={} playback-move={} "
+            "playback-deviation={} cache-end-move={} warnings-since-sample={} "
+            "warning-component={} warning-category={}",
+            fold.state.discontinuities, generation.value(),
+            player::to_string(classification),
+            signed_seconds(health_snapshot_.timeline.playback_movement_seconds),
+            signed_seconds(health_snapshot_.timeline.playback_deviation_seconds),
+            signed_seconds(health_snapshot_.timeline.cache_end_movement_seconds),
+            warnings_since_sample, warning_component, warning_category);
     }
     if (fold.stalled && !stall_reported_) {
         stall_reported_ = true;
@@ -1515,6 +1559,31 @@ void App::draw_diagnostics() {
                              : (*health_snapshot_.progressing ? "yes" : "no"));
     field("Input advancing", !health_snapshot_.input_advancing ? "unknown"
                                  : (*health_snapshot_.input_advancing ? "yes" : "no"));
+    field("Timeline kind", player::to_string(player::classify_timeline(
+                               health_snapshot_.timeline)));
+    field("Sample elapsed", signed_seconds(health_snapshot_.timeline.elapsed_seconds));
+    field("Playback movement",
+          signed_seconds(health_snapshot_.timeline.playback_movement_seconds));
+    field("Playback deviation",
+          signed_seconds(health_snapshot_.timeline.playback_deviation_seconds));
+    field("Cache-end movement",
+          signed_seconds(health_snapshot_.timeline.cache_end_movement_seconds));
+    field("Previous cache pause",
+          optional_pause(health_snapshot_.timeline.previous_cache_paused));
+    field("Last engine warning",
+          d.last_engine_warning
+              ? std::format("{} / {}", player::to_string(d.last_engine_warning->component),
+                            player::to_string(d.last_engine_warning->category))
+              : std::string("-"));
+    field("Warnings this load", std::format("{}", d.engine_warning_count));
+    if (d.request_shape) {
+        field("Request shape",
+              std::format("{} / {} / {}", player::to_string(d.request_shape->intent),
+                          player::to_string(d.request_shape->scheme),
+                          player::to_string(d.request_shape->target)));
+    } else {
+        field("Request shape", "-");
+    }
 
     theme::separator_label("SUPERVISOR");
     field("State", core::to_string(supervisor_stats.state));
