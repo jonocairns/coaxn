@@ -7,6 +7,7 @@
 #include <format>
 
 #include "core/policy.hpp"
+#include "core/supervisor.hpp"
 #include "util/log.hpp"
 #include "player/transport_log_classifier.hpp"
 
@@ -166,9 +167,10 @@ void MpvPlayer::destroy_backend() {
 std::uint64_t MpvPlayer::next_request_id() { return ++request_sequence_; }
 
 bool MpvPlayer::play(const std::string& url, core::Generation generation,
-                     core::RecoveryTransport transport, bool force_probed_format) {
+                     core::RecoveryTransport transport, bool force_probed_format,
+                     SourceCorrelation correlation) {
     if (!mpv_) return false;
-    target_ = PlaybackTarget{url, generation, transport, force_probed_format};
+    target_ = PlaybackTarget{url, generation, transport, force_probed_format, correlation};
     reset_load_observations(diagnostics_);
     buffer_phase_gate_.begin_load(generation);
     apply_buffer_phase(generation, core::BufferPhase::Zap);
@@ -178,13 +180,16 @@ bool MpvPlayer::play(const std::string& url, core::Generation generation,
 bool MpvPlayer::issue_load(bool force_probed_format, LoadRequestIntent intent) {
     if (!mpv_ || !target_) return false;
     diagnostics_.request_shape = inspect_request_shape(
-        target_->url, intent, target_->transport, force_probed_format);
+        target_->url, intent, target_->transport, force_probed_format,
+        target_->correlation);
     const auto& request = *diagnostics_.request_shape;
     log::info(
-        "Load request generation {} intent={} command=loadfile mode=replace transport={} "
+        "Load request generation {} provider-session={} channel-session={} "
+        "intent={} command=loadfile mode=replace transport={} "
         "scheme={} target={} query={} userinfo={} forced-format={}; "
         "HTTP method/range/headers unobserved below libmpv",
-        target_->generation.value(), to_string(request.intent),
+        target_->generation.value(), request.correlation.provider_session,
+        request.correlation.channel_session, to_string(request.intent),
         core::to_string(request.transport), to_string(request.scheme),
         to_string(request.target), request.query_present ? "present" : "absent",
         request.userinfo_present ? "present" : "absent",
@@ -615,12 +620,21 @@ void MpvPlayer::pump() {
                 // mpv warnings can embed authenticated stream URLs, headers
                 // and query tokens. Preserve only closed categories; neither
                 // prefix nor message text crosses this event turn.
-                const auto warning = sanitize_engine_warning(message->prefix, message->text);
-                diagnostics_.last_engine_warning = warning;
-                ++diagnostics_.engine_warning_count;
-                log::warn("mpv warning generation {} component={} category={}",
-                          target_ ? target_->generation.value() : 0,
-                          to_string(warning.component), to_string(warning.category));
+                const auto warning = sanitize_engine_warning(
+                    message->prefix, message->text, message->level);
+                diagnostics_.last_engine_message = warning;
+                ++diagnostics_.engine_message_count;
+                const auto generation = target_ ? target_->generation.value() : 0;
+                if (warning.severity == EngineLogSeverity::Error ||
+                    warning.severity == EngineLogSeverity::Fatal) {
+                    log::error("mpv diagnostic generation {} severity={} component={} category={}",
+                               generation, to_string(warning.severity),
+                               to_string(warning.component), to_string(warning.category));
+                } else {
+                    log::warn("mpv diagnostic generation {} severity={} component={} category={}",
+                              generation, to_string(warning.severity),
+                              to_string(warning.component), to_string(warning.category));
+                }
                 break;
             }
             case MPV_EVENT_QUEUE_OVERFLOW:

@@ -118,6 +118,12 @@ PlaybackHealthFold fold_playback_health(const PlaybackHealthState& previous,
             ? std::optional<double>{*control_playback_movement -
                                     *timeline.elapsed_seconds}
             : std::nullopt;
+    timeline.control_playback_movement_seconds = control_playback_movement;
+    timeline.control_playback_deviation_seconds = control_playback_deviation;
+    if (control_playback_movement) {
+        timeline.control_baseline_retained =
+            !previous.previous_sample_playback_time_seconds;
+    }
     const bool discontinuity = control_playback_deviation &&
         std::abs(*control_playback_deviation) >
             policy.discontinuity_jump_seconds;

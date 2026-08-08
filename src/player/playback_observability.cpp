@@ -69,10 +69,16 @@ const char* to_string(TimelineClassification value) {
 }
 
 SanitizedEngineWarning sanitize_engine_warning(std::string_view prefix,
-                                                std::string_view text) {
+                                                std::string_view text,
+                                                std::string_view level) {
     const std::string component = lower(prefix);
     const std::string message = lower(text);
     SanitizedEngineWarning result;
+    const std::string severity = lower(level);
+
+    if (severity == "warn") result.severity = EngineLogSeverity::Warning;
+    else if (severity == "error") result.severity = EngineLogSeverity::Error;
+    else if (severity == "fatal") result.severity = EngineLogSeverity::Fatal;
 
     if (contains(component, "cplayer")) result.component = EngineWarningComponent::Player;
     else if (contains(component, "demux")) result.component = EngineWarningComponent::Demuxer;
@@ -104,7 +110,7 @@ SanitizedEngineWarning sanitize_engine_warning(std::string_view prefix,
     } else if (contains(message, "timed out") || contains(message, "error number -138")) {
         result.category = EngineWarningCategory::NetworkTimeout;
     } else if (contains(message, "hls: keepalive request failed") &&
-               contains(message, "playlist")) {
+               contains(message, "when parsing playlist")) {
         result.category = EngineWarningCategory::HlsPlaylist;
     } else if (((contains(message, "failed to open") || contains(message, "unable to open")) &&
                 contains(message, "segment")) ||
@@ -153,13 +159,25 @@ const char* to_string(EngineWarningCategory value) {
     return "other";
 }
 
+const char* to_string(EngineLogSeverity value) {
+    switch (value) {
+        case EngineLogSeverity::Warning: return "warning";
+        case EngineLogSeverity::Error: return "error";
+        case EngineLogSeverity::Fatal: return "fatal";
+        case EngineLogSeverity::Other: return "other";
+    }
+    return "other";
+}
+
 SanitizedRequestShape inspect_request_shape(
     std::string_view target, LoadRequestIntent intent,
-    core::RecoveryTransport transport, bool forced_format) {
+    core::RecoveryTransport transport, bool forced_format,
+    SourceCorrelation correlation) {
     SanitizedRequestShape shape;
     shape.intent = intent;
     shape.transport = transport;
     shape.forced_format = forced_format;
+    shape.correlation = correlation;
     shape.query_present = target.find_first_of("?#") != std::string_view::npos;
 
     const std::string folded = lower(target);

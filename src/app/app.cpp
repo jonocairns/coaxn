@@ -113,6 +113,10 @@ const char* optional_pause(std::optional<bool> value) {
     return !value ? "unavailable" : (*value ? "yes" : "no");
 }
 
+const char* control_baseline(std::optional<bool> retained) {
+    return !retained ? "unavailable" : (*retained ? "retained" : "adjacent");
+}
+
 }  // namespace
 
 App::App()
@@ -196,7 +200,8 @@ bool App::initialize(std::string& error) {
         generation_ = core::Generation{generation_.value() + 1};
         supervisor_.dispatch(core::ChannelRequested{generation_});
         begin_health_load();
-        player_.play(direct_media_, generation_, core::RecoveryTransport::MpegTs);
+        player_.play(direct_media_, generation_, core::RecoveryTransport::MpegTs,
+                     false, {.provider_session = 0, .channel_session = 1});
     } else {
         load_saved_portal();
     }
@@ -446,6 +451,8 @@ void App::finish_connect() {
 
     client_ = std::make_unique<xtream::Client>(credentials_);
     channels_.reset(std::move(catalog.categories), std::move(catalog.channels));
+    const auto provider_session = target_registry_.begin_provider_session();
+    log::info("Provider session {} connected", provider_session);
     stage_  = Stage::Browsing;
     set_status(std::format("{} channels", channels_.channel_count()));
     save_portal();
@@ -466,11 +473,16 @@ void App::play(const core::Channel& channel) {
     player_.set_speed(1.0);
 
     generation_ = core::Generation{generation_.value() + 1};
+    const auto correlation = target_registry_.identify_channel(channel.id);
+    log::info("Channel selected generation {} provider-session={} channel-session={}",
+              generation_.value(), correlation.provider_session,
+              correlation.channel_session);
     supervisor_.dispatch(core::ChannelRequested{generation_});
     begin_health_load();
     // Xtream resolves this endpoint as a continuous .ts request; transport is
     // therefore resolved with the load rather than guessed from HTTP(S).
-    player_.play(client_->stream_url(channel), generation_, core::RecoveryTransport::MpegTs);
+    player_.play(client_->stream_url(channel), generation_,
+                 core::RecoveryTransport::MpegTs, false, correlation);
     apply_vsr();
     set_status(std::format("Playing {}", channel.name));
 }
@@ -481,6 +493,7 @@ void App::begin_health_load() {
     playback_health_ = core::initial_playback_health(generation_, core::BufferPhase::Zap, now,
                                                      target.cache_seconds);
     health_snapshot_ = playback_health_->snapshot;
+    timeline_classification_ = player::TimelineClassification::Unavailable;
     next_health_sample_ = now + core::kDefaultHealthPolicy.sample_interval;
     // Every load starts unestablished, so no load can concede latency for its
     // own opening fill. Recovery reopens reach here too, which is why this and
@@ -489,7 +502,7 @@ void App::begin_health_load() {
     stall_reported_ = false;
     decode_stall_reported_ = false;
     exact_failure_reported_ = false;
-    last_health_warning_count_ = 0;
+    last_health_engine_message_count_ = 0;
     last_cache_state_dispatched_.reset();
     player_.set_health_discontinuities(0);
 }
@@ -621,13 +634,15 @@ void App::sample_playback_health() {
     const auto& diagnostics = player_.diagnostics();
     const auto target = core::buffer_phase_targets(diagnostics.buffer_phase);
     const auto observation = player_.health_observation();
+    const core::PlaybackHealthFoldOptions fold_options{
+        .container_fps = diagnostics.container_fps,
+        .first_frame_seen = live_sync_turn_.first_frame_seen(),
+        .main_process_cpu_percent = std::nullopt,
+        .phase = diagnostics.buffer_phase,
+        .target_seconds = target.cache_seconds,
+    };
     const auto fold = core::fold_playback_health(
-        *playback_health_, observation, now,
-        {.container_fps = diagnostics.container_fps,
-         .first_frame_seen = live_sync_turn_.first_frame_seen(),
-         .main_process_cpu_percent = std::nullopt,
-         .phase = diagnostics.buffer_phase,
-         .target_seconds = target.cache_seconds});
+        *playback_health_, observation, now, fold_options);
     if (!fold.observation_accepted) {
         log::warn("Dropped stale health observation generation {} while generation {} is active",
                   observation.generation.value(), playback_health_->generation.value());
@@ -637,28 +652,41 @@ void App::sample_playback_health() {
     health_snapshot_ = fold.state.snapshot;
     player_.set_health_discontinuities(fold.state.discontinuities);
 
-    const auto generation = player_.current_target()->generation;
-    const auto warning_count = diagnostics.engine_warning_count;
-    const auto warnings_since_sample = warning_count >= last_health_warning_count_
-        ? warning_count - last_health_warning_count_ : warning_count;
-    last_health_warning_count_ = warning_count;
-    const auto classification = player::classify_timeline(health_snapshot_.timeline);
-    const auto warning_component = warnings_since_sample > 0 && diagnostics.last_engine_warning
-        ? player::to_string(diagnostics.last_engine_warning->component) : "none";
-    const auto warning_category = warnings_since_sample > 0 && diagnostics.last_engine_warning
-        ? player::to_string(diagnostics.last_engine_warning->category) : "none";
+    const auto generation = health_snapshot_.timeline.generation;
+    const auto engine_message_count = diagnostics.engine_message_count;
+    const auto engine_messages_since_sample =
+        engine_message_count >= last_health_engine_message_count_
+            ? engine_message_count - last_health_engine_message_count_
+            : engine_message_count;
+    last_health_engine_message_count_ = engine_message_count;
+    timeline_classification_ = player::classify_timeline(
+        health_snapshot_.timeline, fold_options.policy);
+    const auto warning_component = engine_messages_since_sample > 0 &&
+            diagnostics.last_engine_message
+        ? player::to_string(diagnostics.last_engine_message->component) : "none";
+    const auto warning_category = engine_messages_since_sample > 0 &&
+            diagnostics.last_engine_message
+        ? player::to_string(diagnostics.last_engine_message->category) : "none";
+    const auto warning_severity = engine_messages_since_sample > 0 &&
+            diagnostics.last_engine_message
+        ? player::to_string(diagnostics.last_engine_message->severity) : "none";
     log::debug(
         "Timeline sample generation {} kind={} elapsed={} playback-move={} "
-        "playback-deviation={} cache-end-move={} cache-paused={} previous-cache-paused={} "
-        "warnings-since-sample={} warning-component={} warning-category={}",
-        generation.value(), player::to_string(classification),
+        "playback-deviation={} cache-end-move={} control-playback-move={} "
+        "control-playback-deviation={} control-baseline={} cache-paused={} "
+        "previous-cache-paused={} engine-messages-since-sample={} warning-severity={} "
+        "warning-component={} warning-category={}",
+        generation.value(), player::to_string(timeline_classification_),
         signed_seconds(health_snapshot_.timeline.elapsed_seconds),
         signed_seconds(health_snapshot_.timeline.playback_movement_seconds),
         signed_seconds(health_snapshot_.timeline.playback_deviation_seconds),
         signed_seconds(health_snapshot_.timeline.cache_end_movement_seconds),
+        signed_seconds(health_snapshot_.timeline.control_playback_movement_seconds),
+        signed_seconds(health_snapshot_.timeline.control_playback_deviation_seconds),
+        control_baseline(health_snapshot_.timeline.control_baseline_retained),
         health_snapshot_.timeline.cache_paused ? "yes" : "no",
         optional_pause(health_snapshot_.timeline.previous_cache_paused),
-        warnings_since_sample, warning_component, warning_category);
+        engine_messages_since_sample, warning_severity, warning_component, warning_category);
     // Publish determinate levels rather than an interruption edge, so a
     // sustained degradation can hold the steady deadline. Unknown is absence
     // of playback-time evidence: it must neither create nor clear an unhealthy
@@ -671,14 +699,19 @@ void App::sample_playback_health() {
     if (fold.discontinuity) {
         log::warn(
             "Timeline discontinuity #{} generation {} kind={} playback-move={} "
-            "playback-deviation={} cache-end-move={} warnings-since-sample={} "
-            "warning-component={} warning-category={}",
+            "playback-deviation={} cache-end-move={} control-playback-move={} "
+            "control-playback-deviation={} control-baseline={} "
+            "engine-messages-since-sample={} "
+            "warning-severity={} warning-component={} warning-category={}",
             fold.state.discontinuities, generation.value(),
-            player::to_string(classification),
+            player::to_string(timeline_classification_),
             signed_seconds(health_snapshot_.timeline.playback_movement_seconds),
             signed_seconds(health_snapshot_.timeline.playback_deviation_seconds),
             signed_seconds(health_snapshot_.timeline.cache_end_movement_seconds),
-            warnings_since_sample, warning_component, warning_category);
+            signed_seconds(health_snapshot_.timeline.control_playback_movement_seconds),
+            signed_seconds(health_snapshot_.timeline.control_playback_deviation_seconds),
+            control_baseline(health_snapshot_.timeline.control_baseline_retained),
+            engine_messages_since_sample, warning_severity, warning_component, warning_category);
     }
     if (fold.stalled && !stall_reported_) {
         stall_reported_ = true;
@@ -1559,8 +1592,7 @@ void App::draw_diagnostics() {
                              : (*health_snapshot_.progressing ? "yes" : "no"));
     field("Input advancing", !health_snapshot_.input_advancing ? "unknown"
                                  : (*health_snapshot_.input_advancing ? "yes" : "no"));
-    field("Timeline kind", player::to_string(player::classify_timeline(
-                               health_snapshot_.timeline)));
+    field("Timeline kind", player::to_string(timeline_classification_));
     field("Sample elapsed", signed_seconds(health_snapshot_.timeline.elapsed_seconds));
     field("Playback movement",
           signed_seconds(health_snapshot_.timeline.playback_movement_seconds));
@@ -1568,17 +1600,27 @@ void App::draw_diagnostics() {
           signed_seconds(health_snapshot_.timeline.playback_deviation_seconds));
     field("Cache-end movement",
           signed_seconds(health_snapshot_.timeline.cache_end_movement_seconds));
+    field("Health movement",
+          signed_seconds(health_snapshot_.timeline.control_playback_movement_seconds));
+    field("Health deviation",
+          signed_seconds(health_snapshot_.timeline.control_playback_deviation_seconds));
+    field("Health baseline",
+          control_baseline(health_snapshot_.timeline.control_baseline_retained));
     field("Previous cache pause",
           optional_pause(health_snapshot_.timeline.previous_cache_paused));
-    field("Last engine warning",
-          d.last_engine_warning
-              ? std::format("{} / {}", player::to_string(d.last_engine_warning->component),
-                            player::to_string(d.last_engine_warning->category))
+    field("Last engine message",
+          d.last_engine_message
+              ? std::format("{} / {} / {}", player::to_string(d.last_engine_message->severity),
+                            player::to_string(d.last_engine_message->component),
+                            player::to_string(d.last_engine_message->category))
               : std::string("-"));
-    field("Warnings this load", std::format("{}", d.engine_warning_count));
+    field("Engine messages this load", std::format("{}", d.engine_message_count));
     if (d.request_shape) {
         field("Request shape",
-              std::format("{} / {} / {}", player::to_string(d.request_shape->intent),
+              std::format("p{} / c{} / {} / {} / {}",
+                          d.request_shape->correlation.provider_session,
+                          d.request_shape->correlation.channel_session,
+                          player::to_string(d.request_shape->intent),
                           player::to_string(d.request_shape->scheme),
                           player::to_string(d.request_shape->target)));
     } else {

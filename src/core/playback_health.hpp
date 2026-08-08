@@ -33,6 +33,13 @@ struct TimelineEvidence {
     std::optional<double> playback_movement_seconds;
     std::optional<double> playback_deviation_seconds;
     std::optional<double> cache_end_movement_seconds;
+    // The health fold deliberately retains the last readable playback value
+    // across missing telemetry. These expose the signed measurement used by
+    // the existing discontinuity decision when it differs from the adjacent-
+    // sample evidence above.
+    std::optional<double> control_playback_movement_seconds;
+    std::optional<double> control_playback_deviation_seconds;
+    std::optional<bool> control_baseline_retained;
     std::optional<bool> previous_cache_paused;
     bool cache_paused = false;
 };

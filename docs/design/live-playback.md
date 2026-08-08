@@ -463,6 +463,9 @@ generation. Its optional measurements use seconds and these conventions:
 | `playback_movement_seconds` | `current playback-time - previous playback-time`; positive advances, zero stops and negative moves backward |
 | `playback_deviation_seconds` | `playback_movement_seconds - elapsed_seconds`; positive is ahead of wall-clock expectation and negative is behind, including a backward reset |
 | `cache_end_movement_seconds` | `current demuxer-cache-end - previous demuxer-cache-end`; positive extends the reported cache end and negative moves it backward |
+| `control_playback_movement_seconds` | The same signed movement from the health fold's last readable playback baseline; normally identical to adjacent movement |
+| `control_playback_deviation_seconds` | Control movement minus elapsed; this is the signed value to which the existing discontinuity threshold is applied |
+| `control_baseline_retained` | True when missing telemetry made the health fold use its retained readable baseline, false for an adjacent baseline and unavailable when no comparison exists |
 
 Movement and deviation are unavailable unless both adjacent playback-time
 samples exist; cache-end movement is unavailable unless both adjacent
@@ -473,16 +476,26 @@ mismatch rejects the complete observation before it can alter the current
 load's snapshot. Separate control baselines still retain the last usable
 playback/cache values across an unreadable sample, preserving the pre-existing
 health verdict and stall behavior; the raw evidence never borrows those values.
+Both forms are logged, so a discontinuity after missing telemetry no longer
+reports only `kind=unavailable`: it also identifies the retained baseline and
+the signed control deviation that triggered the warning.
 
 The portable player layer presents the evidence as `normal-advance`,
 `forward-jump`, `forward-lag`, `backward`, `no-progress`,
 `paused-no-progress` or `resume-lag`. The last two use current and previous
 `paused-for-cache` levels; they are presentation categories, not recovery
-policy. The F1 diagnostics panel shows the raw values and category. The session
+policy. Classification consumes the exact `HealthPolicy` used for that fold;
+it has no independent default. `forward-lag` and `resume-lag` mean a negative
+deviation beyond the one-second discontinuity threshold. At the scheduled
+500ms cadence they therefore normally require a delayed application turn and
+must not be read as generic sub-threshold stream lag; the signed deviation is
+the primary observation. The F1 diagnostics panel shows the raw values and category. The session
 log writes a generation-scoped debug line for every health sample and a warning
 line for each existing discontinuity, including signed movements, pause
-context, the count of engine warnings since the preceding sample and the most
-recent warning's sanitized component/category.
+context, the count of engine messages since the preceding sample and the
+most recent diagnostic's sanitized severity/component/category. The generation
+printed on those lines comes from the evidence snapshot itself rather than
+being looked up again from the current target.
 
 Forward discontinuities that still make progress can be diagnostic only. A
 backward or no-progress discontinuity can classify the sample as degraded,
@@ -630,15 +643,18 @@ threshold.
 The pinned mpv log path still passes raw warning text directly to the exact
 transport-failure classifier for the duration of one event turn, but no raw
 text or raw prefix is persisted. A second portable classifier retains only a
-closed component (`player`, `demuxer`, video/audio decoder, `stream`, `http` or
-`other`) and category (authentication, HTTP failure, timeout, HLS
+closed severity (`warning`, `error`, `fatal` or `other`), component (`player`,
+`demuxer`, video/audio decoder, `stream`, `http` or `other`) and category
+(authentication, HTTP failure, timeout, HLS
 playlist/segment, format probe, timestamp discontinuity, non-monotonic
 timestamp, continuity error, corrupt packet, decode error or `other`). The
-category and generation are logged when the warning arrives; the latest
-category and per-load warning count are also shown in diagnostics and
+severity, category and generation are logged when the message arrives; the
+latest summary and per-load message count are also shown in diagnostics and
 correlated with the next health observation. Fixtures include authenticated
 URLs, userinfo, query tokens and an Authorization header and assert that none
-can survive in retained output.
+can survive in retained output. HLS keepalive roles match the explicit pinned
+phrases `when parsing playlist` and `when opening url`; a provider URL that
+happens to contain `playlist` cannot decide the category.
 
 A fresh channel selection was verified in code and tests to hand libmpv this
 command shape: `loadfile`, the target argument, and `replace`, with the
@@ -648,6 +664,16 @@ format. Runtime logging deliberately replaces the target argument with only
 boolean query/userinfo-presence markers. It also distinguishes
 `fresh-selection`, `recovery-reopen` and `player-recreation`. No host, path,
 query value, URL, credential or header value is retained.
+
+Each successful provider connection also starts an opaque process-local
+`provider-session` namespace. Normalized channel IDs are assigned sequential
+`channel-session` numbers inside it. Re-selecting the same channel therefore
+reuses the same pair in the log, while changing providers starts a new pair;
+the registry never receives a URL, channel name or credentials. This restores
+the ability to correlate generations and reopens without weakening the
+explicit no-stream-URL boundary. The former stream-URL redactor and its dead
+production API were removed rather than kept as an attractive way around that
+boundary.
 
 This is command-boundary evidence, not a wire capture. No credential-safe
 provider field run was available for this change, so the HTTP method, `Range`

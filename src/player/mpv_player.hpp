@@ -41,6 +41,7 @@ struct PlaybackTarget {
     core::Generation generation;
     core::RecoveryTransport transport = core::RecoveryTransport::MpegTs;
     bool probed_format_forced = false;
+    SourceCorrelation correlation;
 };
 
 // RAII libmpv owner. The UI thread is the sole caller.
@@ -59,7 +60,8 @@ public:
 
     bool initialize(const PlayerConfig& config, std::string& error);
     bool play(const std::string& url, core::Generation generation,
-              core::RecoveryTransport transport, bool force_probed_format = false);
+              core::RecoveryTransport transport, bool force_probed_format = false,
+              SourceCorrelation correlation = {});
     void stop(core::Generation generation);
 
     [[nodiscard]] std::optional<core::RecoveryTransport> reopen_current(

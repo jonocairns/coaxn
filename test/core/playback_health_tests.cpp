@@ -306,6 +306,17 @@ TEST_CASE("missing timeline telemetry stays unavailable instead of becoming zero
     CHECK_FALSE(result.state.snapshot.timeline.playback_deviation_seconds);
     CHECK_FALSE(result.state.snapshot.timeline.cache_end_movement_seconds);
 
+    auto resumed = present;
+    resumed.playback_time_seconds = 12.0;
+    result = replay({present, missing, resumed});
+    CHECK_FALSE(result.state.snapshot.timeline.playback_movement_seconds);
+    REQUIRE(result.state.snapshot.timeline.control_playback_movement_seconds);
+    REQUIRE(result.state.snapshot.timeline.control_playback_deviation_seconds);
+    CHECK(*result.state.snapshot.timeline.control_playback_movement_seconds == Approx(2.0));
+    CHECK(*result.state.snapshot.timeline.control_playback_deviation_seconds == Approx(1.5));
+    CHECK(result.state.snapshot.timeline.control_baseline_retained);
+    CHECK(result.folds.back().discontinuity);
+
     result = replay({missing, present});
     // Falsification: converting either absent endpoint to 0.0 makes these
     // available and manufactures very large signed movements.
@@ -368,6 +379,7 @@ TEST_CASE("stale generations cannot alter current-load timeline evidence") {
         state, stale, TimePoint{} + seconds(1.0), options);
     CHECK_FALSE(rejected.observation_accepted);
     CHECK(rejected.state.generation == Generation{9});
+    CHECK(rejected.state.snapshot.timeline.generation == Generation{9});
     CHECK(rejected.state.discontinuities == state.discontinuities);
     CHECK(rejected.state.snapshot.timeline.playback_movement_seconds ==
           state.snapshot.timeline.playback_movement_seconds);
