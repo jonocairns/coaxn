@@ -447,7 +447,8 @@ A provider session captured on 2026-08-07 exposed a different failure from the
 unsafe FFmpeg reconnect described under Transport recovery. The user-visible
 symptom was the same short section of video repeating until the stream was
 requested again. The log corroborates media-timeline discontinuities; by itself
-it cannot prove that the pictures repeated. The application leaves
+it could not prove that the pictures repeated, and the 2026-08-08 observations
+recorded below supply that link for one later instance. The application leaves
 `PlayerConfig::transport_reconnect` at its `false` default, but the session log
 does not record the evaluated option or active network backend.
 
@@ -492,6 +493,67 @@ can change latency and playback rate and must be isolated experimentally, but it
 does not by itself explain backwards media movement. The later user request's
 success is evidence for timing or state-reset sensitivity, not proof that
 incrementing the generation fixed the stream.
+
+A second session against the same provider on 2026-08-08, captured while the
+live-sync arming work was verified, supplies the screen observation the first
+one lacked. The viewer confirmed repeating pictures while a `Timeline
+discontinuity` line was being written, so for that instance the log signal and
+the reported symptom are the same event. Three further observations each narrow
+the problem differently, and none of them settles the cause:
+
+- **Replay occurred with no preceding recovery.** Generation 2 was an ordinary
+  user-requested load that reached `steady-confirmed` and recorded its first
+  discontinuity 24.8 seconds later, with no recovery anywhere in the session to
+  that point. Generation 5 repeated the shape 25.5 seconds after its own
+  confirmation and went on to record fourteen. Recovery proximity is therefore
+  not a precondition, and a classifier keyed on it would have missed both.
+- **A fresh user request reproduced the same section.** The viewer reported that
+  re-selecting the channel replayed content it had just shown. A user request is
+  a new generation, a new `loadfile replace` and a new HTTP request, with
+  `LiveSync`, the gate, the rebuffer count and speed all reset, and Coax retains
+  no media. That is evidence against Coax's own orchestration holding the
+  repeated bytes. It does **not** distinguish the provider, an intermediate
+  cache, or the HTTP client below mpv: a client reopening with a range against a
+  server-side buffer would look identical from here. The 2026-08-07 session's
+  generation 18 appeared to recover on a user request, so the two sessions
+  disagree and neither is decisive.
+- **Replay is not confined to unstable streams.** The viewer reports the same
+  symptom on otherwise stable streams. Two of the eight loads in this session
+  showed it and six did not, which is sampling rather than a property of bad
+  channels.
+
+The same session demonstrated that the discontinuity counter cannot serve as a
+replay signal without the signed-movement work required above. Generation 5's
+second discontinuity was written 270ms after its `Rebuffer #1`: a cache pause
+longer than `discontinuity_jump_seconds` makes playback lag the wall clock,
+which the fold classifies as a discontinuity in the forward direction. Stalls
+and backward replay are counted together today, so any threshold derived from
+that counter measures both at once.
+
+Intervals within generation 5 were 28.2, 19.7, 6.6, 2.5, 1.0, 16.6, 0.5, 4.5,
+6.0, 15.6 and 4.5 seconds — bursts separated by quiet rather than a cadence,
+which strengthens the existing rule against hard-coding a spacing.
+
+One correlation is worth carrying into the next capture rather than acting on.
+Sanitized warning components differ between affected and unaffected loads in a
+way volume alone does not explain: generation 3 logged 301 `mpv/ffmpeg/video`
+warnings and recorded no discontinuity, while generation 5 logged 24 of those
+but 63 `mpv/cplayer` and 12 `mpv/ffmpeg/demuxer`. No `mpv/stream` or `mpv/http`
+warning appeared anywhere in the session, which is weak evidence against a
+visible transport-layer reconnection but proves nothing while the active network
+backend goes unrecorded. The adapter discards message text, so the lines most
+likely to name the cause are precisely the ones that cannot be read.
+
+Together these change what a replay fix should attempt. The framing below
+assumes reopening is the remedy; if a fresh request can return the same section,
+an episode that spends five attempts reopening arrives at the same picture with
+its budget gone. Detection, and reporting the condition honestly, may be the
+whole of the useful behaviour. The terminal invariant is still required so that
+repeated replay cannot retry forever, but the retry policy it bounds must not be
+assumed to help. Deciding that needs an observation Coax cannot currently make:
+the request its stack actually sends on a fresh selection, and whether the
+response carries the same bytes. That is a capture at the wire, not more log
+reading.
 
 This condition escapes the present health policy. Playback advances normally
 while each repeated section is shown, so those samples are healthy and the
@@ -594,6 +656,19 @@ deadline defect: the gate's rules can be right, the turn assembly can be right,
 and the whole thing still concedes latency because the signal it arms on does
 not mean what its name says.
 
+A 2026-08-08 session against the provider exercised eight loads across five
+channels and is the first end-to-end check of this behaviour outside tests. No
+load conceded latency for its opening fill; every one held the 4.0-second
+opening target through first frame. The momentary unpause appeared roughly a
+millisecond after first frame on several different channels, so it is a property
+of the runtime rather than of one source. Steady confirmation landed 5.00
+seconds after the last observed cache edge on five consecutive loads. Four
+genuine underruns after confirmation were charged normally, with the interval
+between them widening from 5 to 23 seconds as the target grew, so the mechanism
+still adapts rather than having been disabled. `cache-pause-restarted-steady-window`
+and `cache-resume-restarted-steady-window` were both observed;
+`steady-window-held-by-cache-pause` was not, and remains covered only by tests.
+
 Primary-source web and code fact-check was performed on 2026-08-05, with the
 progressive-live and replay comparison refreshed on 2026-08-07:
 
@@ -615,7 +690,7 @@ progressive-live and replay comparison refreshed on 2026-08-07:
 | ~~P1~~ Fixed on 2026-08-08 | ~~Stop co-incident initial-fill and first-frame signals from counting as a rebuffer~~ | Done. Arming is the supervisor's steady confirmation, cleared for every load by `begin_health_load()` rather than by `LiveSyncGate::reset()`, which deliberately does not run on ordinary reopens. A first frame, and a momentary unpaused turn after it, were both tried and both falsified against the runtime |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Add an application-level test for player-event, pause-property and live-sync sequencing~~ | Done. `player::LiveSyncTurn` holds the per-load flags, the generation-filtered event drain and the sample assembly; `App` delegates to it, and the portable cases drive the same object in the same order, including both sequences that defeated the earlier guards and one that drives the real supervisor and deadline rather than setting the arming flag by hand |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Make `Steady` mean five continuously clean seconds rather than five seconds since a first frame~~ | Done in two passes. The deadline could confirm mid-fill because the fold's interrupted edge never fires for a pause that predates the window; the first repair then let a held deadline carry credit for time spent filling, so a fill clearing just before it expired still confirmed early. Both cache-state edges now restart the window. Found by hanging live-sync arming off `Steady`; it also had `apply_buffer_phase(Steady)` switching to steady buffer targets while the cache was still filling |
-| P1 | Make advancing replay observable and terminally bounded without treating every discontinuity as fatal | Record signed playback and cache-end deviation plus sanitized engine evidence; reproduce advancing playback separated by backward resets; retain the episode across `steady-confirmed`; and end repeated replay at the attempt or wall-clock ceiling |
+| P1 | Make advancing replay observable before deciding any policy for it | Record signed playback and cache-end deviation plus sanitized engine warning text, and capture the request the stack sends on a fresh selection. The 2026-08-08 session showed the present counter scores a cache pause and a backward jump identically, so no threshold can be derived from it yet, and a fresh user request reproduced the replayed section — which makes reopening a doubtful remedy. Retain the episode across `steady-confirmed` and keep the attempt and wall-clock ceilings so repeated replay cannot retry forever, but do not assume the retries help |
 | P2 | Decide and document target decay semantics | The present controller intentionally or accidentally retains every 500ms concession until reset; it does not reproduce ExoPlayer's adaptive target |
 | P2 now; P1 before HLS support | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Avoids standards-disfavored edge startup and makes the currently unreachable recovery branch real |
 | P2 | Remove HLS connection overrides unless reproduced provider evidence requires them; define one error-retry budget across FFmpeg and Coax | Preserves normal playlist refresh and avoids mistaking connection strategy for retry control |
@@ -641,7 +716,14 @@ settings on the same representative channel set and record:
 - credential-safe engine warning details or structured warning categories,
   correlated with the health sample that follows them; the current adapter
   discards all warning text, leaving thousands of component-only lines that
-  cannot attribute the next discontinuity;
+  cannot attribute the next discontinuity. The 2026-08-08 session put a cost on
+  this: the components alone already separate a replaying load from a merely
+  noisy one, and the messages that would name the cause were the ones thrown
+  away;
+- a persistent session log. `coax.log` is opened truncating, so each launch
+  destroys the previous session, and architecture-audit finding 10 records that
+  an installed build under Program Files likely has no log at all. Both replay
+  captures so far survive only as copies taken by hand before the next launch;
 - buffered-duration availability, controller speed duty cycle and target
   changes, without relabelling the proxy as measured live offset;
 - dropped/late frames, decode degradation and A/V sync while speed correction
