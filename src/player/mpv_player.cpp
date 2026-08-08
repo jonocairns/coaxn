@@ -199,6 +199,7 @@ bool MpvPlayer::issue_load(bool force_probed_format, LoadRequestIntent intent) {
     file_loaded_ = false;
     transport_log_armed_ = false;
     transport_classification_reported_ = false;
+    engine_diagnostic_log_gate_.reset();
     target_->probed_format_forced = force_probed_format;
 
     const std::uint64_t request_id = next_request_id();
@@ -603,7 +604,12 @@ void MpvPlayer::pump() {
             }
             case MPV_EVENT_LOG_MESSAGE: {
                 const auto* message = static_cast<mpv_event_log_message*>(event->data);
-                if (transport_log_armed_ && !transport_classification_reported_ && target_) {
+                const std::optional<core::Generation> target_generation = target_
+                    ? std::optional{target_->generation} : std::nullopt;
+                const auto attribution = classify_engine_message_attribution(
+                    transport_log_armed_, events_.active_generation(), target_generation);
+                if (attribution == EngineMessageAttribution::ActiveEntry &&
+                    !transport_classification_reported_ && target_) {
                     if (const auto classification = classify_transport_log(
                             message->text, target_->transport, file_loaded_,
                             target_->probed_format_forced)) {
@@ -622,19 +628,27 @@ void MpvPlayer::pump() {
                 // prefix nor message text crosses this event turn.
                 const auto warning = sanitize_engine_warning(
                     message->prefix, message->text, message->level);
-                diagnostics_.last_engine_message = warning;
-                ++diagnostics_.engine_message_count;
-                const auto generation = target_ ? target_->generation.value() : 0;
-                if (warning.severity == EngineLogSeverity::Error ||
-                    warning.severity == EngineLogSeverity::Fatal) {
-                    log::error("mpv diagnostic generation {} severity={} component={} category={}",
-                               generation, to_string(warning.severity),
-                               to_string(warning.component), to_string(warning.category));
+                if (attribution == EngineMessageAttribution::ActiveEntry) {
+                    diagnostics_.last_engine_message = warning;
+                    ++diagnostics_.engine_message_count;
                 } else {
-                    log::warn("mpv diagnostic generation {} severity={} component={} category={}",
-                              generation, to_string(warning.severity),
-                              to_string(warning.component), to_string(warning.category));
+                    diagnostics_.last_unattributed_engine_message = warning;
+                    ++diagnostics_.unattributed_engine_message_count;
                 }
+                if (!engine_diagnostic_log_gate_.first_occurrence(attribution, warning)) break;
+
+                const std::string generation =
+                    attribution == EngineMessageAttribution::ActiveEntry && target_
+                        ? std::format("{}", target_->generation.value())
+                        : "unattributed";
+                const std::string summary = std::format(
+                    "mpv diagnostic generation={} attribution={} severity={} "
+                    "component={} category={}",
+                    generation, to_string(attribution), to_string(warning.severity),
+                    to_string(warning.component), to_string(warning.category));
+                if (warning.severity == EngineLogSeverity::Error ||
+                    warning.severity == EngineLogSeverity::Fatal) log::error("{}", summary);
+                else log::warn("{}", summary);
                 break;
             }
             case MPV_EVENT_QUEUE_OVERFLOW:

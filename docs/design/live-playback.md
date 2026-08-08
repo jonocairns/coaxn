@@ -492,11 +492,11 @@ must not be read as generic sub-threshold stream lag; the signed deviation is
 the primary observation. The F1 diagnostics panel shows the raw values and
 category. The session log writes a generation-scoped debug line for every
 health sample and a warning line for each existing discontinuity, including
-signed movements, pause context, the count of engine messages since the
-preceding sample and the most recent diagnostic's sanitized
-severity/component/category. The generation printed on those lines comes from
-the evidence snapshot itself rather than being looked up again from the current
-target.
+signed movements, pause context, the active-entry and unattributed engine-message
+counts since the preceding sample, and the most recent active-entry diagnostic's
+sanitized severity/component/category. The generation printed on those lines
+comes from the evidence snapshot itself rather than being looked up again from
+the current target.
 
 Forward discontinuities that still make progress can be diagnostic only. A
 backward or no-progress discontinuity can classify the sample as degraded,
@@ -649,22 +649,32 @@ closed severity (`warning`, `error`, `fatal` or `other`), component (`player`,
 (authentication, HTTP failure, timeout, HLS
 playlist/segment, format probe, timestamp discontinuity, non-monotonic
 timestamp, continuity error, corrupt packet, decode error or `other`). The
-severity, category and generation are logged when the message arrives; the
-latest summary and per-load message count are also shown in diagnostics and
-correlated with the next health observation. Fixtures include authenticated
-URLs, userinfo, query tokens and an Authorization header and assert that none
-can survive in retained output. HLS keepalive roles match the explicit pinned
-phrases `when parsing playlist` and `when opening url`; a provider URL that
-happens to contain `playlist` cannot decide the category.
+severity and category are logged with either active-entry generation context or
+an explicit `unattributed` status. The latest active-entry summary and both
+per-load message counts are also shown in diagnostics and correlated with the
+next health observation. Because `MPV_EVENT_LOG_MESSAGE` carries no request or
+playlist-entry identity, active-entry attribution begins only after `START_FILE`
+and only when the adapter's active generation matches the current target.
+Messages observed during a replacement or recovery handover remain visible in
+the separate `unattributed` count and cannot enter the active load's warning
+summary. Neither bucket proves which backend request produced a message; it
+records the active-entry context at observation time. Every message is counted,
+while only the first distinct severity/component/category triple per load and
+attribution bucket writes a session-log line. Fixtures include
+authenticated URLs, userinfo, query tokens and an Authorization header and
+assert that none can survive in retained output. HLS keepalive roles match the
+explicit pinned phrases `when parsing playlist` and `when opening url`; a
+provider URL that happens to contain `playlist` cannot decide the category.
 
 A fresh channel selection was verified in code and tests to hand libmpv this
 command shape: `loadfile`, the target argument, and `replace`, with the
 progressive Xtream load recorded as `transport=mpeg-ts` and no forced demuxer
 format. Runtime logging deliberately replaces the target argument with only
-`scheme=https|http`, `target=xtream-live|hls-playlist|media-path|opaque`, and
-boolean query/userinfo-presence markers. It also distinguishes
-`fresh-selection`, `recovery-reopen` and `player-recreation`. No host, path,
-query value, URL, credential or header value is retained.
+`scheme=https|http|local-file|other`,
+`target=xtream-live|hls-playlist|media-path|opaque`, and boolean
+query/userinfo-presence markers. It also distinguishes `fresh-selection`,
+`recovery-reopen` and `player-recreation`. No host, path, query value, URL,
+credential or header value is retained.
 
 Each successful provider connection also starts an opaque process-local
 `provider-session` namespace. Normalized channel IDs are assigned sequential

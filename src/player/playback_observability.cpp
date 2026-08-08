@@ -169,6 +169,33 @@ const char* to_string(EngineLogSeverity value) {
     return "other";
 }
 
+EngineMessageAttribution classify_engine_message_attribution(
+    bool start_file_seen,
+    std::optional<core::Generation> active_generation,
+    std::optional<core::Generation> target_generation) {
+    return start_file_seen && active_generation && target_generation &&
+                   *active_generation == *target_generation
+               ? EngineMessageAttribution::ActiveEntry
+               : EngineMessageAttribution::Unattributed;
+}
+
+const char* to_string(EngineMessageAttribution value) {
+    switch (value) {
+        case EngineMessageAttribution::ActiveEntry: return "active-entry";
+        case EngineMessageAttribution::Unattributed: return "unattributed";
+    }
+    return "unattributed";
+}
+
+bool EngineDiagnosticLogGate::first_occurrence(
+    EngineMessageAttribution attribution,
+    const SanitizedEngineWarning& warning) {
+    const Entry entry{attribution, warning};
+    if (std::find(seen_.begin(), seen_.end(), entry) != seen_.end()) return false;
+    seen_.push_back(entry);
+    return true;
+}
+
 SanitizedRequestShape inspect_request_shape(
     std::string_view target, LoadRequestIntent intent,
     core::RecoveryTransport transport, bool forced_format,

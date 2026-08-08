@@ -211,6 +211,7 @@ private:
     bool decode_stall_reported_ = false;
     bool exact_failure_reported_ = false;
     std::uint64_t last_health_engine_message_count_ = 0;
+    std::uint64_t last_health_unattributed_engine_message_count_ = 0;
     std::optional<bool> last_cache_state_dispatched_;
 
     struct PendingStreamEnd {

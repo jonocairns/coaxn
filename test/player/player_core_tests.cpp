@@ -241,6 +241,10 @@ TEST_CASE("new loads clear observations but retain lifetime diagnostics") {
     diagnostics.last_engine_message = player::SanitizedEngineWarning{
         player::EngineWarningComponent::Demuxer,
         player::EngineWarningCategory::CorruptPacket};
+    diagnostics.unattributed_engine_message_count = 4;
+    diagnostics.last_unattributed_engine_message = player::SanitizedEngineWarning{
+        player::EngineWarningComponent::Http,
+        player::EngineWarningCategory::NetworkTimeout};
     diagnostics.request_shape = player::inspect_request_shape(
         "https://user:secret@example.invalid/live/u/p/123.ts?token=secret",
         player::LoadRequestIntent::FreshSelection,
@@ -266,6 +270,8 @@ TEST_CASE("new loads clear observations but retain lifetime diagnostics") {
     CHECK(diagnostics.mpv_playback_restart_events == 3);
     CHECK(diagnostics.engine_message_count == 0);
     CHECK_FALSE(diagnostics.last_engine_message);
+    CHECK(diagnostics.unattributed_engine_message_count == 0);
+    CHECK_FALSE(diagnostics.last_unattributed_engine_message);
     CHECK_FALSE(diagnostics.request_shape);
 }
 
@@ -351,6 +357,55 @@ TEST_CASE("engine warning summaries retain context without provider data") {
     CHECK(player::sanitize_engine_warning(
               "ffmpeg/demuxer", "hls: keepalive request failed when parsing playlist", "warn")
               .category == player::EngineWarningCategory::HlsPlaylist);
+}
+
+TEST_CASE("engine messages stay unattributed until the target entry is active") {
+    const auto old_generation = std::optional{core::Generation{4}};
+    const auto new_generation = std::optional{core::Generation{5}};
+
+    CHECK(player::classify_engine_message_attribution(
+              false, old_generation, new_generation) ==
+          player::EngineMessageAttribution::Unattributed);
+    // Recovery keeps the generation, so the START_FILE fence is independently
+    // necessary to distinguish its handover window.
+    CHECK(player::classify_engine_message_attribution(
+              false, new_generation, new_generation) ==
+          player::EngineMessageAttribution::Unattributed);
+    CHECK(player::classify_engine_message_attribution(
+              true, old_generation, new_generation) ==
+          player::EngineMessageAttribution::Unattributed);
+    CHECK(player::classify_engine_message_attribution(
+              true, new_generation, new_generation) ==
+          player::EngineMessageAttribution::ActiveEntry);
+    CHECK(player::classify_engine_message_attribution(
+              true, std::nullopt, new_generation) ==
+          player::EngineMessageAttribution::Unattributed);
+}
+
+TEST_CASE("engine diagnostic logging keeps one line per triple and attribution") {
+    player::EngineDiagnosticLogGate gate;
+    const player::SanitizedEngineWarning warning{
+        player::EngineWarningComponent::Demuxer,
+        player::EngineWarningCategory::CorruptPacket,
+        player::EngineLogSeverity::Warning};
+
+    CHECK(gate.first_occurrence(player::EngineMessageAttribution::Unattributed,
+                                warning));
+    CHECK_FALSE(gate.first_occurrence(player::EngineMessageAttribution::Unattributed,
+                                      warning));
+    CHECK(gate.first_occurrence(player::EngineMessageAttribution::ActiveEntry,
+                                warning));
+
+    auto error = warning;
+    error.severity = player::EngineLogSeverity::Error;
+    CHECK(gate.first_occurrence(player::EngineMessageAttribution::ActiveEntry,
+                                error));
+    CHECK_FALSE(gate.first_occurrence(player::EngineMessageAttribution::ActiveEntry,
+                                      error));
+
+    gate.reset();
+    CHECK(gate.first_occurrence(player::EngineMessageAttribution::ActiveEntry,
+                                warning));
 }
 
 TEST_CASE("fresh selection request shape is useful and URL free") {

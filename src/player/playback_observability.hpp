@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 #include "core/playback_health.hpp"
 #include "core/playback_types.hpp"
@@ -59,6 +60,8 @@ struct SanitizedEngineWarning {
     EngineWarningComponent component = EngineWarningComponent::Other;
     EngineWarningCategory category = EngineWarningCategory::Other;
     EngineLogSeverity severity = EngineLogSeverity::Other;
+
+    bool operator==(const SanitizedEngineWarning&) const = default;
 };
 
 SanitizedEngineWarning sanitize_engine_warning(std::string_view prefix,
@@ -67,6 +70,37 @@ SanitizedEngineWarning sanitize_engine_warning(std::string_view prefix,
 const char* to_string(EngineWarningComponent value);
 const char* to_string(EngineWarningCategory value);
 const char* to_string(EngineLogSeverity value);
+
+// mpv log messages carry no request or playlist-entry identity. Attribute one
+// to the active entry only after START_FILE and only while the adapter's active
+// generation agrees with the current target; the replacement window stays
+// explicitly unattributed.
+enum class EngineMessageAttribution { ActiveEntry, Unattributed };
+
+EngineMessageAttribution classify_engine_message_attribution(
+    bool start_file_seen,
+    std::optional<core::Generation> active_generation,
+    std::optional<core::Generation> target_generation);
+const char* to_string(EngineMessageAttribution value);
+
+// Limits the session log to the first occurrence of each closed diagnostic
+// triple per load and attribution class. Counters and latest-message fields are
+// updated separately for every event, including suppressed duplicates.
+class EngineDiagnosticLogGate {
+public:
+    bool first_occurrence(EngineMessageAttribution attribution,
+                          const SanitizedEngineWarning& warning);
+    void reset() { seen_.clear(); }
+
+private:
+    struct Entry {
+        EngineMessageAttribution attribution;
+        SanitizedEngineWarning warning;
+
+        bool operator==(const Entry&) const = default;
+    };
+    std::vector<Entry> seen_;
+};
 
 enum class LoadRequestIntent { FreshSelection, RecoveryReopen, PlayerRecreation };
 enum class RequestScheme { Http, Https, LocalFile, Other };

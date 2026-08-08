@@ -22,6 +22,8 @@ void reset_load_observations(Diagnostics& diagnostics) {
     diagnostics.health_discontinuities = 0;
     diagnostics.engine_message_count = 0;
     diagnostics.last_engine_message.reset();
+    diagnostics.unattributed_engine_message_count = 0;
+    diagnostics.last_unattributed_engine_message.reset();
     diagnostics.request_shape.reset();
     diagnostics.buffer_phase = core::BufferPhase::Zap;
     diagnostics.buffer_phase_command_state = BufferPhaseCommandState::Unissued;

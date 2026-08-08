@@ -137,6 +137,7 @@ private:
     bool file_loaded_ = false;
     bool transport_log_armed_ = false;
     bool transport_classification_reported_ = false;
+    EngineDiagnosticLogGate engine_diagnostic_log_gate_;
 
     double vsr_scale_ = 1.0;
     bool vsr_enabled_ = false;

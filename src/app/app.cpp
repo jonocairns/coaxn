@@ -504,6 +504,7 @@ void App::begin_health_load() {
     decode_stall_reported_ = false;
     exact_failure_reported_ = false;
     last_health_engine_message_count_ = 0;
+    last_health_unattributed_engine_message_count_ = 0;
     last_cache_state_dispatched_.reset();
     player_.set_health_discontinuities(0);
 }
@@ -653,13 +654,24 @@ void App::sample_playback_health() {
     health_snapshot_ = fold.state.snapshot;
     player_.set_health_discontinuities(fold.state.discontinuities);
 
-    const auto generation = health_snapshot_.timeline.generation;
+    const auto evidence_generation = health_snapshot_.timeline.generation;
+    const auto state_generation = fold.state.generation;
     const auto engine_message_count = diagnostics.engine_message_count;
     const auto engine_messages_since_sample =
         engine_message_count >= last_health_engine_message_count_
             ? engine_message_count - last_health_engine_message_count_
             : engine_message_count;
     last_health_engine_message_count_ = engine_message_count;
+    const auto unattributed_engine_message_count =
+        diagnostics.unattributed_engine_message_count;
+    const auto unattributed_engine_messages_since_sample =
+        unattributed_engine_message_count >=
+                last_health_unattributed_engine_message_count_
+            ? unattributed_engine_message_count -
+                last_health_unattributed_engine_message_count_
+            : unattributed_engine_message_count;
+    last_health_unattributed_engine_message_count_ =
+        unattributed_engine_message_count;
     timeline_classification_ = player::classify_timeline(
         health_snapshot_.timeline, fold_options.policy);
     const auto warning_component = engine_messages_since_sample > 0 &&
@@ -675,9 +687,10 @@ void App::sample_playback_health() {
         "Timeline sample generation {} kind={} elapsed={} playback-move={} "
         "playback-deviation={} cache-end-move={} control-playback-move={} "
         "control-playback-deviation={} control-baseline={} cache-paused={} "
-        "previous-cache-paused={} engine-messages-since-sample={} warning-severity={} "
+        "previous-cache-paused={} engine-messages-since-sample={} "
+        "unattributed-engine-messages-since-sample={} warning-severity={} "
         "warning-component={} warning-category={}",
-        generation.value(), player::to_string(timeline_classification_),
+        evidence_generation.value(), player::to_string(timeline_classification_),
         signed_seconds(health_snapshot_.timeline.elapsed_seconds),
         signed_seconds(health_snapshot_.timeline.playback_movement_seconds),
         signed_seconds(health_snapshot_.timeline.playback_deviation_seconds),
@@ -687,7 +700,8 @@ void App::sample_playback_health() {
         control_baseline(health_snapshot_.timeline.control_baseline_retained),
         health_snapshot_.timeline.cache_paused ? "yes" : "no",
         optional_pause(health_snapshot_.timeline.previous_cache_paused),
-        engine_messages_since_sample, warning_severity, warning_component, warning_category);
+        engine_messages_since_sample, unattributed_engine_messages_since_sample,
+        warning_severity, warning_component, warning_category);
     // Publish determinate levels rather than an interruption edge, so a
     // sustained degradation can hold the steady deadline. Unknown is absence
     // of playback-time evidence: it must neither create nor clear an unhealthy
@@ -695,7 +709,7 @@ void App::sample_playback_health() {
     // playback-time is unavailable throughout.
     if (fold.state.verdict != core::PlaybackHealthVerdict::Unknown) {
         supervisor_.dispatch(core::PlaybackHealthObserved{
-            generation, fold.state.verdict != core::PlaybackHealthVerdict::Healthy});
+            state_generation, fold.state.verdict != core::PlaybackHealthVerdict::Healthy});
     }
     if (fold.discontinuity) {
         log::warn(
@@ -703,8 +717,9 @@ void App::sample_playback_health() {
             "playback-deviation={} cache-end-move={} control-playback-move={} "
             "control-playback-deviation={} control-baseline={} "
             "engine-messages-since-sample={} "
+            "unattributed-engine-messages-since-sample={} "
             "warning-severity={} warning-component={} warning-category={}",
-            fold.state.discontinuities, generation.value(),
+            fold.state.discontinuities, evidence_generation.value(),
             player::to_string(timeline_classification_),
             signed_seconds(health_snapshot_.timeline.playback_movement_seconds),
             signed_seconds(health_snapshot_.timeline.playback_deviation_seconds),
@@ -712,17 +727,18 @@ void App::sample_playback_health() {
             signed_seconds(health_snapshot_.timeline.control_playback_movement_seconds),
             signed_seconds(health_snapshot_.timeline.control_playback_deviation_seconds),
             control_baseline(health_snapshot_.timeline.control_baseline_retained),
-            engine_messages_since_sample, warning_severity, warning_component, warning_category);
+            engine_messages_since_sample, unattributed_engine_messages_since_sample,
+            warning_severity, warning_component, warning_category);
     }
     if (fold.stalled && !stall_reported_) {
         stall_reported_ = true;
         supervisor_.dispatch(core::PlaybackStalled{
-            generation,
+            state_generation,
             fold.state.verdict == core::PlaybackHealthVerdict::OpenStalled
                 ? core::StallKind::Open : core::StallKind::Progress});
     } else if (fold.decode_stalled && !decode_stall_reported_) {
         decode_stall_reported_ = true;
-        supervisor_.dispatch(core::DecodeStalled{generation});
+        supervisor_.dispatch(core::DecodeStalled{state_generation});
     }
 }
 
@@ -1609,13 +1625,22 @@ void App::draw_diagnostics() {
           control_baseline(health_snapshot_.timeline.control_baseline_retained));
     field("Previous cache pause",
           optional_pause(health_snapshot_.timeline.previous_cache_paused));
-    field("Last engine message",
+    field("Last active-entry engine message",
           d.last_engine_message
               ? std::format("{} / {} / {}", player::to_string(d.last_engine_message->severity),
                             player::to_string(d.last_engine_message->component),
                             player::to_string(d.last_engine_message->category))
               : std::string("-"));
-    field("Engine messages this load", std::format("{}", d.engine_message_count));
+    field("Active-entry engine messages", std::format("{}", d.engine_message_count));
+    field("Last unattributed engine message",
+          d.last_unattributed_engine_message
+              ? std::format("{} / {} / {}",
+                            player::to_string(d.last_unattributed_engine_message->severity),
+                            player::to_string(d.last_unattributed_engine_message->component),
+                            player::to_string(d.last_unattributed_engine_message->category))
+              : std::string("-"));
+    field("Unattributed engine messages",
+          std::format("{}", d.unattributed_engine_message_count));
     if (d.request_shape) {
         field("Request shape",
               std::format("p{} / c{} / {} / {} / {}",
