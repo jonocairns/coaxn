@@ -24,6 +24,7 @@ SupervisorState reach_steady(Generation generation = Generation{1},
     auto state = step(initial_supervisor_state(), ChannelRequested{generation}, 0.0);
     state = step(state, StreamLoadIssued{generation, transport}, 0.01);
     state = step(state, FirstFrame{generation}, 1.0);
+    state = step(state, PlaybackHealthObserved{generation, true}, 1.0);
     return step(state, DeadlineReached{}, 6.0);
 }
 RecoveryAction recovery(const SupervisorState& state) {
@@ -55,6 +56,7 @@ TEST_CASE("idle owns no stream and clean playback reaches steady after five seco
     state = step(state, StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs}, .01);
     CHECK(state.name == SupervisorStateName::Zap);
     state = step(state, FirstFrame{Generation{1}}, 1);
+    state = step(state, PlaybackHealthObserved{Generation{1}, true}, 1);
     CHECK(next_deadline_at(state) == at(6));
     CHECK_FALSE(apply(state, DeadlineReached{}, 5.999).transition);
     state = step(state, DeadlineReached{}, 6);
@@ -83,6 +85,7 @@ TEST_CASE("attempt budget resets only after recovered playback is steady") {
     state = step(state, DeadlineReached{}, 10.5);
     state = step(state, StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs}, 10.51);
     state = step(state, FirstFrame{Generation{1}}, 11.2);
+    state = step(state, PlaybackHealthObserved{Generation{1}, true}, 11.2);
     CHECK(state.attempt == 1);
     state = step(state, DeadlineReached{}, 16.2);
     CHECK(state.name == SupervisorStateName::Steady);
@@ -222,12 +225,14 @@ TEST_CASE("terminal auth and source failures wait for a newer generation") {
 
 TEST_CASE("all stale edges and duplicate requests are discarded") {
     const auto state = step(reach_steady(), ChannelRequested{Generation{2}}, 7);
-    const std::array<SupervisorEvent, 10> stale{
+    const std::array<SupervisorEvent, 11> stale{
         StreamEnded{Generation{1}, EndReason::Error, {}}, FirstFrame{Generation{1}},
         ProcessExited{Generation{1}}, IpcUnresponsive{Generation{1}},
         AuthRejected{Generation{1}}, CacheState{Generation{1}, true},
-        StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs}, SourceFailed{Generation{1}},
-        PlaybackStalled{Generation{1}, StallKind::Progress}, DecodeStalled{Generation{1}}};
+        PlaybackHealthObserved{Generation{1}, true},
+        StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs},
+        SourceFailed{Generation{1}}, PlaybackStalled{Generation{1}, StallKind::Progress},
+        DecodeStalled{Generation{1}}};
     for (const auto& event : stale) {
         const auto result = apply(state, event, 8);
         CHECK_FALSE(result.transition);
@@ -284,19 +289,61 @@ TEST_CASE("transitions and diagnostics carry generation transport budget and pol
     CHECK_FALSE(idle_stats.reason);
 }
 
-TEST_CASE("healthy steady window restarts only while armed and phase changes once") {
+TEST_CASE("steady window follows the current playback health level") {
     auto state = step(initial_supervisor_state(), ChannelRequested{Generation{1}}, 0);
     state = step(state, StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs}, .01);
-    CHECK_FALSE(apply(state, PlaybackInterrupted{Generation{1}}, 2).transition);
     state = step(state, FirstFrame{Generation{1}}, 1);
+    state = step(state, PlaybackHealthObserved{Generation{1}, true}, 1);
     CHECK(next_deadline_at(state) == at(6));
-    auto result = apply(state, PlaybackInterrupted{Generation{1}}, 4);
-    CHECK(result.transition->reason == "steady-window-restarted");
+
+    auto result = apply(state, PlaybackHealthObserved{Generation{1}, false}, 4);
+    CHECK(result.transition->reason == "playback-unhealthy-restarted-steady-window");
     CHECK(next_deadline_at(result.state) == at(9));
-    CHECK_FALSE(apply(result.state, DeadlineReached{}, 6).transition);
-    state = step(result.state, DeadlineReached{}, 9);
+
+    // A persistent unhealthy verdict has no further edge. The deadline must
+    // consult the level or it would confirm here anyway.
+    result = apply(result.state, DeadlineReached{}, 9);
+    CHECK(result.state.name == SupervisorStateName::Zap);
+    CHECK(result.transition->reason == "steady-window-held-by-unhealthy-playback");
+    CHECK(next_deadline_at(result.state) == at(14));
+
+    // The full clean interval starts at the healthy edge, not at the held
+    // deadline or at the first frame.
+    result = apply(result.state, PlaybackHealthObserved{Generation{1}, true}, 10);
+    CHECK(result.transition->reason == "playback-health-restarted-steady-window");
+    CHECK(next_deadline_at(result.state) == at(15));
+    CHECK_FALSE(apply(result.state, DeadlineReached{}, 14).transition);
+    state = step(result.state, DeadlineReached{}, 15);
     CHECK(state.name == SupervisorStateName::Steady);
-    CHECK_FALSE(apply(state, PlaybackInterrupted{Generation{1}}, 12).transition);
+
+    // Outside Zap the level is still recorded, but there is no window to arm.
+    result = apply(state, PlaybackHealthObserved{Generation{1}, false}, 16);
+    CHECK(result.state.name == SupervisorStateName::Steady);
+    CHECK_FALSE(result.state.playback_healthy);
+    CHECK_FALSE(next_deadline_at(result.state));
+}
+
+TEST_CASE("sustained degradation cannot clear a recovery attempt before stall recovery") {
+    auto state = step(reach_steady(), StreamEnded{Generation{1}, EndReason::Error, {}}, 10);
+    REQUIRE(state.attempt == 1);
+    state = step(state, DeadlineReached{}, 10.5);
+    state = step(state, StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs}, 10.51);
+    state = step(state, FirstFrame{Generation{1}}, 11);
+
+    // The recovered load remains degraded. There is no later interruption
+    // edge, but its attempt must not be laundered at the steady deadline.
+    state = step(state, PlaybackHealthObserved{Generation{1}, false}, 11.5);
+    auto held = apply(state, DeadlineReached{}, 16);
+    CHECK(held.state.name == SupervisorStateName::Zap);
+    CHECK(held.state.attempt == 1);
+    CHECK(held.transition->reason == "steady-window-held-by-unhealthy-playback");
+
+    // When the decode-stall threshold fires, this is attempt two in the same
+    // recovery episode, rather than a fresh attempt one.
+    state = step(held.state, DecodeStalled{Generation{1}}, 17);
+    CHECK(state.name == SupervisorStateName::Recovering);
+    CHECK(state.attempt == 2);
+    CHECK(state.detection == DetectionReason::DecodeStall);
 }
 
 TEST_CASE("steady is not confirmed while the cache is still holding playback back") {
@@ -305,8 +352,7 @@ TEST_CASE("steady is not confirmed while the cache is still holding playback bac
 
     // The opening fill starts before anything is shown, so the health fold has
     // already classified the load degraded by the time a frame arrives. There
-    // is no healthy-to-degraded transition left, and PlaybackInterrupted is the
-    // only other thing that restarts the window.
+    // is no healthy-to-degraded transition left to announce the condition.
     state = step(state, CacheState{Generation{1}, true}, 1);
     state = step(state, FirstFrame{Generation{1}}, 2);
     CHECK(next_deadline_at(state) == at(7));
@@ -330,7 +376,7 @@ TEST_CASE("steady is not confirmed while the cache is still holding playback bac
     CHECK(resumed.transition->reason == "cache-resume-restarted-steady-window");
     CHECK(next_deadline_at(resumed.state) == at(18));
 
-    state = resumed.state;
+    state = step(resumed.state, PlaybackHealthObserved{Generation{1}, true}, 13);
     CHECK_FALSE(apply(state, DeadlineReached{}, 17).transition);
     state = step(state, DeadlineReached{}, 18);
     CHECK(state.name == SupervisorStateName::Steady);
@@ -345,6 +391,7 @@ TEST_CASE("a fill clearing just before the deadline still buys a full clean wind
     // The whole window is spent filling, and the fill clears with 100ms to go.
     state = step(state, CacheState{Generation{1}, true}, 1.5);
     state = step(state, CacheState{Generation{1}, false}, 5.9);
+    state = step(state, PlaybackHealthObserved{Generation{1}, true}, 5.9);
     CHECK(next_deadline_at(state) == at(10.9));
 
     // Nothing has played cleanly for five seconds yet, so nothing is confirmed.
@@ -357,6 +404,7 @@ TEST_CASE("entering the cache pause restarts the steady window") {
     auto state = step(initial_supervisor_state(), ChannelRequested{Generation{1}}, 0);
     state = step(state, StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs}, .01);
     state = step(state, FirstFrame{Generation{1}}, 1);
+    state = step(state, PlaybackHealthObserved{Generation{1}, true}, 1);
     CHECK(next_deadline_at(state) == at(6));
 
     // A fill entered after the window is armed interrupts the evidence it is
@@ -437,6 +485,7 @@ TEST_CASE("reachable supervisor states keep deadline kinds paired with their own
     step(ChannelRequested{Generation{1}}, 0.0);
     step(StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs}, 0.0);
     step(FirstFrame{Generation{1}}, 0.1);
+    step(PlaybackHealthObserved{Generation{1}, true}, 0.1);
     step(DeadlineReached{}, 5.1);
     step(StreamEnded{Generation{1}, EndReason::Error, {}}, 6.0);
     step(DeadlineReached{}, 6.5);

@@ -116,16 +116,20 @@ SupervisorReduction reduce_deadline(const SupervisorState& state, TimePoint now,
                                     const RecoveryPolicy& policy) {
     if (state.name == SupervisorStateName::Zap && state.deadlines.steady_at &&
         now >= *state.deadlines.steady_at) {
-        // The window is evidence of continuous playback, so it cannot expire
-        // while the cache is still holding playback back. PlaybackInterrupted
-        // alone does not cover this: the fold emits it on a healthy-to-degraded
-        // transition, and an opening fill that began before first frame is
-        // already degraded when the window is armed, so it produces no later
-        // edge and the window would otherwise run out mid-fill.
+        // The window is evidence of continuous healthy playback, so it cannot
+        // expire while the cache is holding playback back or the health fold's
+        // current verdict is not Healthy. An interruption edge alone cannot
+        // establish that: a sustained unhealthy run produces no later edge to
+        // stop the deadline.
         if (state.cache_paused) {
             auto next = state;
             next.deadlines.steady_at = now + policy.steady_healthy_window;
             return settle(state, next, "steady-window-held-by-cache-pause", now, policy);
+        }
+        if (!state.playback_healthy) {
+            auto next = state;
+            next.deadlines.steady_at = now + policy.steady_healthy_window;
+            return settle(state, next, "steady-window-held-by-unhealthy-playback", now, policy);
         }
         auto next = state;
         next.attempt = 0;
@@ -224,6 +228,21 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
                               now, policy);
             }
             return settle(state, next, "cache-state-observed", now, policy);
+        } else if constexpr (std::is_same_v<T, PlaybackHealthObserved>) {
+            if (state.playback_healthy == value.healthy) return ignore(state);
+            auto next = state;
+            next.playback_healthy = value.healthy;
+            // Both edges restart the evidence window. Becoming unhealthy
+            // invalidates what was counted; becoming healthy is the instant a
+            // new continuous healthy interval can begin.
+            if (state.name == SupervisorStateName::Zap && state.deadlines.steady_at) {
+                next.deadlines.steady_at = now + policy.steady_healthy_window;
+                return settle(state, next,
+                              value.healthy ? "playback-health-restarted-steady-window"
+                                            : "playback-unhealthy-restarted-steady-window",
+                              now, policy);
+            }
+            return settle(state, next, "playback-health-observed", now, policy);
         } else if constexpr (std::is_same_v<T, AuthRejected>) {
             if (state.name == SupervisorStateName::Idle) return ignore(state);
             return terminal(state, state.detection, FailureReason::AuthRejected,
@@ -235,13 +254,6 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
                               .steady_at = now + policy.steady_healthy_window};
             next.first_frame_at = now;
             return settle(state, next, "first-frame", now, policy);
-        } else if constexpr (std::is_same_v<T, PlaybackInterrupted>) {
-            if (state.name != SupervisorStateName::Zap || !state.deadlines.steady_at) {
-                return ignore(state);
-            }
-            auto next = state;
-            next.deadlines.steady_at = now + policy.steady_healthy_window;
-            return settle(state, next, "steady-window-restarted", now, policy);
         } else if constexpr (std::is_same_v<T, DecodeStalled>) {
             return recover(state, DetectionReason::DecodeStall, reopen_action(state), now, policy);
         } else if constexpr (std::is_same_v<T, PlaybackStalled>) {
@@ -278,6 +290,8 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
             auto next = state;
             next.deadlines = {};
             next.first_frame_at.reset();
+            next.cache_paused = false;
+            next.playback_healthy = false;
             next.name = SupervisorStateName::Zap;
             next.transport = value.transport;
             return settle(state, next, "stream-load-issued", now, policy);

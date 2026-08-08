@@ -509,9 +509,9 @@ TEST_CASE("a first frame belonging to a superseded load is not this load's") {
 // LiveSyncTurn its arming decision directly, which is the right shape for the
 // gate's own rules but assumes the supervisor's steady confirmation means what
 // it claims. It has to be driven for real: `Steady` is reached by a deadline,
-// and the fold that would otherwise restart that deadline emits its interrupted
-// edge only on a healthy-to-degraded transition. An opening fill that begins
-// before first frame is already degraded when the window is armed.
+// while cache and playback health arrive as levels before the poll. An opening
+// fill that begins before first frame is already degraded when the window is
+// armed, and a sustained decode degradation has no later edge to announce it.
 
 namespace {
 
@@ -523,9 +523,9 @@ public:
 
 // App::run()'s frame loop, reduced to the parts that decide whether a turn may
 // concede latency, in the order run() uses them: the player-event drain, the
-// cache-state dispatch, the supervisor poll, and the live-sync update. The
-// dispatch precedes the poll, as it does in the application, so a deadline
-// evaluated this turn sees this turn's cache state.
+// cache-state dispatch, a health sample, the supervisor poll, and the live-sync
+// update. Both observations precede the poll, as they do in the application,
+// so a deadline evaluated this turn sees this turn's evidence.
 struct AppLoop {
     FrameClock                clock;
     player::LiveSyncTurn      turn;
@@ -556,7 +556,8 @@ struct AppLoop {
         last_cache_state_dispatched.reset();
     }
 
-    void tick(double at, const player::Diagnostics& diagnostics, bool frame_started = false) {
+    void tick(double at, const player::Diagnostics& diagnostics, bool frame_started = false,
+              std::optional<bool> health_healthy = std::nullopt) {
         clock.current = core::TimePoint{core::seconds(at)};
 
         if (frame_started) {
@@ -569,6 +570,11 @@ struct AppLoop {
             *last_cache_state_dispatched != diagnostics.paused_for_cache) {
             last_cache_state_dispatched = diagnostics.paused_for_cache;
             supervisor.dispatch(core::CacheState{generation, diagnostics.paused_for_cache});
+        }
+
+        // App::sample_playback_health() publishes the fold's current level.
+        if (health_healthy) {
+            supervisor.dispatch(core::PlaybackHealthObserved{generation, *health_healthy});
         }
 
         supervisor.poll();
@@ -598,8 +604,8 @@ TEST_CASE("an opening fill that outlasts the steady window still concedes nothin
     REQUIRE(app.turn.first_frame_seen());
 
     // The fill outlasts that window. There is no healthy-to-degraded transition
-    // left to emit, so PlaybackInterrupted never restarts it; only the reducer
-    // refusing to confirm while the cache is paused keeps the load unconfirmed.
+    // left to emit; the reducer must consult the current cache and health
+    // levels to keep the load unconfirmed.
     for (double t = 7.0; t < 14.0; t += 0.5) app.tick(t, filling());
     CHECK_FALSE(app.turn.playback_established());
 
@@ -618,7 +624,8 @@ TEST_CASE("an opening fill that outlasts the steady window still concedes nothin
     // from the last one at 15.0 rather than from the first clearing at 14.0.
     // Sampling cache state on the health interval could not see the 1ms blips
     // at all, and would have confirmed a second early.
-    for (double t = 15.0; t < 19.5; t += 0.5) app.tick(t, unpaused(4.0));
+    app.tick(15.0, unpaused(4.0), false, true);
+    for (double t = 15.5; t < 19.5; t += 0.5) app.tick(t, unpaused(4.0));
     CHECK_FALSE(app.turn.playback_established());
 
     app.tick(20.0, unpaused(4.0));
@@ -635,7 +642,8 @@ TEST_CASE("a fill entered just before the deadline is not outrun by the poll") {
     app.play();
 
     // A clean load: the picture comes up and playback runs.
-    app.tick(0.5, unpaused(std::nullopt), /*frame_started=*/true);
+    app.tick(0.5, unpaused(std::nullopt), /*frame_started=*/true,
+             /*health_healthy=*/true);
     for (double t = 1.0; t < 5.4; t += 0.1) app.tick(t, unpaused(4.0));
     CHECK_FALSE(app.turn.playback_established());
 
@@ -652,4 +660,25 @@ TEST_CASE("a fill entered just before the deadline is not outrun by the poll") {
     app.tick(6.01, filling());
     CHECK(app.rebuffers == 0);
     CHECK(app.sync.target_offset_seconds() == Approx(4.0));
+}
+
+TEST_CASE("a sustained unhealthy level cannot be outrun by the steady poll") {
+    AppLoop app;
+    app.play();
+
+    // A frame arrives, but decode progress remains degraded throughout the
+    // first window. No new interruption edge is available at its deadline.
+    app.tick(0.5, unpaused(std::nullopt), /*frame_started=*/true,
+             /*health_healthy=*/false);
+    app.tick(5.5, unpaused(4.0), false, false);
+    CHECK_FALSE(app.turn.playback_established());
+
+    // Establishment requires a complete window beginning with an observed
+    // Healthy level.
+    app.tick(6.0, unpaused(4.0), false, true);
+    app.tick(10.5, unpaused(4.0), false, true);
+    CHECK_FALSE(app.turn.playback_established());
+    app.tick(11.0, unpaused(4.0), false, true);
+    CHECK(app.turn.playback_established());
+    CHECK(app.rebuffers == 0);
 }

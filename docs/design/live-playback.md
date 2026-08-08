@@ -316,43 +316,55 @@ after the recovered load produces a first frame and then remains healthy for
 five seconds. A first frame by itself is not recovery evidence.
 
 Until 2026-08-08 that last sentence was a claim the reducer did not enforce. A
-first frame armed the five-second deadline, and `PlaybackInterrupted` was the
-only thing that restarted it — but the fold emits that on a healthy-to-degraded
-*transition*, so a `paused-for-cache` fill that began before first frame is
-already degraded when the window is armed and produces no later edge. The
-deadline then expired mid-fill and confirmed `Steady` while the cache was still
-holding playback back.
+first frame armed the five-second deadline, and the fold's `interrupted` signal
+was the only thing that restarted it — but that signal is a
+healthy-to-degraded *transition*. A `paused-for-cache` fill that began before
+first frame was already degraded when the window was armed and produced no
+later edge. The deadline then expired mid-fill and confirmed `Steady` while the
+cache was still holding playback back.
 
-Three rules now close it. The deadline cannot confirm `Steady` while
-`cache_paused` is set; it restarts instead. Entering a cache pause in Zap
-restarts the window, because it interrupts the evidence being counted. And
-leaving one restarts it too, because that is where clean playback actually
+The cache-specific repair added three rules. The deadline cannot confirm
+`Steady` while `cache_paused` is set; it restarts instead. Entering a cache pause
+in Zap restarts the window because it interrupts the evidence being counted.
+Leaving one restarts it too, because that is where clean playback actually
 begins — without that rule a held deadline carries credit for time spent
 filling, so a fill clearing just before it expires confirms almost immediately
-and the oscillation at the end of that same fill is charged as a rebuffer. A
-repeated observation of playing is not an edge and restarts nothing, or a load
-reporting steady good news could never confirm.
+and the oscillation at the end of that same fill is charged as a rebuffer.
 
-Confirmation therefore means five seconds of continuously clean playback, timed
-from the last observed cache-state edge. Cache state is published to the
-supervisor every turn rather than on the health-sample interval, because the
-deadline is evaluated against it: at 500ms resolution a fill entered just after
-a sample was invisible to the poll, which confirmed `Steady` mid-fill on a stale
-"playing" reading, and brief oscillations were never seen at all. `App` now
-dispatches the change immediately before the poll, so the supervisor and the
-live-sync gate read the same pause state within a turn.
+That repair exposed the same edge-versus-level defect outside cache pauses. A
+decode degradation can produce one interruption edge, remain unhealthy, and
+then silently outlive the restarted window. Worse, the five-second deadline is
+shorter than the six-second decode-stall threshold: `Steady` could clear a
+recovery attempt immediately before the continuing degradation triggered the
+next recovery, laundering attempt two back into attempt one.
+
+The supervisor therefore stores the health fold's current level as
+`PlaybackHealthObserved`, not only its transition. Both health edges restart an
+armed window: becoming unhealthy invalidates the elapsed evidence, and becoming
+healthy starts a new clean interval. At the deadline, a non-Healthy level holds
+and restarts the window even when there has been no further edge. Repeated
+same-level observations do not restart anything, or periodic good news would
+prevent a healthy load from ever confirming.
+
+Confirmation now means five continuously clean seconds at the health sampler's
+500ms resolution, timed from the latest cache-state or health-level edge. Cache
+state is still published every turn because brief mpv pause oscillations occur
+far below that resolution. `App` publishes a due health sample and then polls,
+so a deadline sees the latest observed health verdict; cache state is dispatched
+immediately before both, so the supervisor and live-sync gate read the same
+pause state within a turn.
 
 All of this was found because live-sync arming was hung off `Steady` and
 inherited the bug; `apply_buffer_phase(Steady)` was also switching to steady
 buffer targets mid-fill.
 
-The consequence is that a load which never manages five seconds without a fill
-never confirms, so it never clears an attempt count, never moves to steady
-buffer targets, and never concedes live latency. For a channel in that state the
-supervisor's stall detection and recovery are the relevant machinery, not a
-500ms target nudge — but it does mean the rebuffer concession cannot help a
-channel that has never once played cleanly. Revisit alongside the target decay
-semantics in the priority table.
+The consequence is that a load which never manages five observed Healthy
+seconds without a fill never confirms, so it never clears an attempt count,
+never moves to steady buffer targets, and never concedes live latency. For a
+channel in that state the supervisor's stall detection and recovery are the
+relevant machinery, not a 500ms target nudge — but it does mean the rebuffer
+concession cannot help a channel that has never once played cleanly. Revisit
+alongside the target decay semantics in the priority table.
 
 The base schedule is truncated exponential backoff, but it is deterministic.
 Network retry guidance recommends adding jitter so many clients do not retry a
@@ -436,10 +448,10 @@ abs((currentPlayback - previousPlayback) - elapsed) > 1 second
 
 Forward discontinuities that still make progress can be diagnostic only. A
 backward or no-progress discontinuity can classify the sample as degraded,
-emit `PlaybackInterrupted`, restart the steady window while still in Zap and,
-if degradation continues, contribute to decode-stall recovery. The health
-discontinuity counter resets per load and remains distinct from the number of
-`MPV_EVENT_PLAYBACK_RESTART` edges reported by mpv.
+publish an unhealthy level, restart or hold the steady window while still in
+Zap and, if degradation continues, contribute to decode-stall recovery. The
+health discontinuity counter resets per load and remains distinct from the
+number of `MPV_EVENT_PLAYBACK_RESTART` edges reported by mpv.
 
 #### Advancing replay is not a stall
 
@@ -558,12 +570,11 @@ reading.
 This condition escapes the present health policy. Playback advances normally
 while each repeated section is shown, so those samples are healthy and the
 cache can remain fed. Only the boundary that jumps backwards is degraded. The
-healthy-to-degraded edge already reaches the supervisor: the fold emits
-`interrupted`, and the application dispatches `PlaybackInterrupted`. The
-supervisor only acts on that event in Zap while a steady deadline exists, so it
-ignores the same edge after `steady-confirmed`. The next advancing sample also
-clears the continuous decode-degradation timer. The missing behavior is thus a
-Steady-state replay policy, not merely a new event path.
+unhealthy level already reaches the supervisor from the fold's verdict. The
+supervisor uses that level to govern confirmation only while in Zap, so it does
+not recover a backward jump after `steady-confirmed`. The next advancing sample
+also clears the continuous decode-degradation timer. The missing behavior is
+thus a Steady-state replay policy, not merely a new event path.
 
 Restarting on a count of generic discontinuities is not an acceptable fix.
 Live MPEG-TS can contain legitimate timestamp resets, splices and damage. The
@@ -668,6 +679,8 @@ between them widening from 5 to 23 seconds as the target grew, so the mechanism
 still adapts rather than having been disabled. `cache-pause-restarted-steady-window`
 and `cache-resume-restarted-steady-window` were both observed;
 `steady-window-held-by-cache-pause` was not, and remains covered only by tests.
+The later current-health guard was also forced only in portable tests; these
+provider runs did not sustain a non-cache degradation across the deadline.
 
 Primary-source web and code fact-check was performed on 2026-08-05, with the
 progressive-live and replay comparison refreshed on 2026-08-07:
@@ -689,7 +702,7 @@ progressive-live and replay comparison refreshed on 2026-08-07:
 | ~~P1~~ Fixed at `5388982` | ~~Preserve unavailable cache duration and hold `1.0x` until valid telemetry arrives~~ | Done. The flattened copy is gone, so an unavailable mpv property can no longer install `0.97x` and accumulate live latency |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Stop co-incident initial-fill and first-frame signals from counting as a rebuffer~~ | Done. Arming is the supervisor's steady confirmation, cleared for every load by `begin_health_load()` rather than by `LiveSyncGate::reset()`, which deliberately does not run on ordinary reopens. A first frame, and a momentary unpaused turn after it, were both tried and both falsified against the runtime |
 | ~~P1~~ Fixed on 2026-08-08 | ~~Add an application-level test for player-event, pause-property and live-sync sequencing~~ | Done. `player::LiveSyncTurn` holds the per-load flags, the generation-filtered event drain and the sample assembly; `App` delegates to it, and the portable cases drive the same object in the same order, including both sequences that defeated the earlier guards and one that drives the real supervisor and deadline rather than setting the arming flag by hand |
-| ~~P1~~ Fixed on 2026-08-08 | ~~Make `Steady` mean five continuously clean seconds rather than five seconds since a first frame~~ | Done in two passes. The deadline could confirm mid-fill because the fold's interrupted edge never fires for a pause that predates the window; the first repair then let a held deadline carry credit for time spent filling, so a fill clearing just before it expired still confirmed early. Both cache-state edges now restart the window. Found by hanging live-sync arming off `Steady`; it also had `apply_buffer_phase(Steady)` switching to steady buffer targets while the cache was still filling |
+| ~~P1~~ Fixed on 2026-08-08 | ~~Make `Steady` mean five continuously clean seconds rather than five seconds since a first frame~~ | Done in three passes. The deadline could confirm mid-fill because the fold's interrupted edge never fires for a pause that predates the window; the first repair then let a held deadline carry credit for time spent filling, so both cache-state edges now restart the window. The final repair made the fold's current health verdict supervisor state: otherwise a non-cache degradation could remain unhealthy without another edge, confirm at five seconds and clear an attempt just before the six-second decode-stall recovery. Found by hanging live-sync arming off `Steady`; it also had `apply_buffer_phase(Steady)` switching to steady buffer targets while playback was unhealthy |
 | P1 | Make advancing replay observable before deciding any policy for it | Record signed playback and cache-end deviation plus sanitized engine warning text, and capture the request the stack sends on a fresh selection. The 2026-08-08 session showed the present counter scores a cache pause and a backward jump identically, so no threshold can be derived from it yet, and a fresh user request reproduced the replayed section — which makes reopening a doubtful remedy. Retain the episode across `steady-confirmed` and keep the attempt and wall-clock ceilings so repeated replay cannot retry forever, but do not assume the retries help |
 | P2 | Decide and document target decay semantics | The present controller intentionally or accidentally retains every 500ms concession until reset; it does not reproduce ExoPlayer's adaptive target |
 | P2 now; P1 before HLS support | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Avoids standards-disfavored edge startup and makes the currently unreachable recovery branch real |

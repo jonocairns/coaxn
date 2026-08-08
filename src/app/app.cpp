@@ -623,12 +623,14 @@ void App::sample_playback_health() {
     player_.set_health_discontinuities(fold.state.discontinuities);
 
     const auto generation = player_.current_target()->generation;
+    // Publish the level rather than relying on fold.interrupted. The latter is
+    // deliberately an edge, so a degradation that remains active cannot by
+    // itself prevent a later steady deadline from expiring.
+    supervisor_.dispatch(core::PlaybackHealthObserved{
+        generation, fold.state.verdict == core::PlaybackHealthVerdict::Healthy});
     if (fold.discontinuity) {
         log::warn("Timeline discontinuity #{} generation {} (classified by progress deviation)",
                   fold.state.discontinuities, generation.value());
-    }
-    if (fold.interrupted) {
-        supervisor_.dispatch(core::PlaybackInterrupted{generation});
     }
     if (fold.stalled && !stall_reported_) {
         stall_reported_ = true;
@@ -1638,8 +1640,11 @@ int App::run() {
         // Before the poll, so a deadline evaluated this turn sees this turn's
         // cache state rather than the last sampled one.
         dispatch_cache_state();
-        supervisor_.poll();
+        // Health is sampled before the poll for the same reason: a deadline
+        // due this turn must see this turn's health level, not the previous
+        // sample's verdict.
         sample_playback_health();
+        supervisor_.poll();
 
         // Video dimensions arrive after the load completes, and can change
         // mid-stream when the provider switches encoder profile. Either way
