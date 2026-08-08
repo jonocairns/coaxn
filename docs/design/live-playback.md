@@ -692,10 +692,14 @@ three loads across three channels. All three reached Steady, none conceded for
 startup, two post-Steady underruns were charged normally and moved the target
 from 4.0 through 4.5 to 5.0 seconds, and no recovery or failure occurred. Once
 past first-load jank, confirmation arrived 5.002 seconds after the determinate
-Healthy edge. That edge followed cache resume by 150–250ms because health is
-sampled every 500ms while cache state is published every turn. The small delay
-is intentional: the clock now begins with confirmed progress rather than merely
-with the end of a fill.
+Healthy edge. That edge trailed cache resume by 249ms, 146ms and 742ms across
+the three loads. The lag is bounded by the sampling arrangement rather than
+fixed: cache state is published every turn while health is sampled every 500ms,
+and the fold needs two playback-time readings before it can report progress at
+all, so the edge can arrive up to roughly two sample intervals after the fill
+ends. The delay is intentional — the clock now begins with confirmed progress
+rather than merely with the end of a fill — but it is a range set by the sample
+interval, not a constant, and three loads are too few to bound it tightly.
 
 Neither `steady-window-held-by-cache-pause` nor
 `steady-window-held-by-unhealthy-playback` fired in the final session, so both
