@@ -343,51 +343,89 @@ void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_ri
 
 namespace {
 
-// One arm of the mark: a stroked spiral of `kSweep` radians whose radius eases
-// from the outer edge down to the inner curl, with a disc at each end. The
-// discs are the round caps — ImGui strokes a path with square ends, and a
-// spiral that stops square looks cut rather than finished.
-void draw_spiral_arm(ImDrawList* draw_list, ImVec2 centre, float radius,
-                     float start, ImU32 color) {
-    // A little under three quarters of a turn. Enough that the arm reads as
-    // wound rather than as a bent line, and not so much that it laps its own
-    // other half: the two arms are one sweep apart in phase, so the further
-    // this goes the closer their turns run to each other.
-    constexpr float kSweep    = 4.7f;
-    constexpr int   kSegments = 56;
+// Proportions of the mark, as fractions of its radius. scripts/make-icon.py
+// carries the same numbers and the two are meant to agree: change one and the
+// icon and the README's SVGs stop matching what the window draws.
+constexpr float kFacetRadius = 0.95f;        // circumradius; the gap takes the rest
+constexpr float kCutAngle    = 0.48869219f;  // 28 degrees
+constexpr float kCutOffset   = 0.20f;        // how far the cut sits off centre
+constexpr float kCutGap      = 0.11f;        // how far apart the pieces are pushed
+constexpr int   kFacetSides  = 6;
 
-    const float outer  = radius * 0.80f;
-    const float inner  = radius * 0.20f;
-    const float stroke = radius * 0.32f;
+// A convex polygon clipped by a half plane stays convex and gains at most one
+// vertex, so seven is the most either piece can ever need.
+constexpr int kMaxCorners = kFacetSides + 1;
 
-    ImVec2 first(0.0f, 0.0f);
-    ImVec2 last(0.0f, 0.0f);
-    for (int segment = 0; segment <= kSegments; ++segment) {
-        const float t     = static_cast<float>(segment) / kSegments;
-        const float angle = start + kSweep * t;
-        const float reach = outer + (inner - outer) * t;
-        const ImVec2 point(centre.x + std::cos(angle) * reach,
-                           centre.y + std::sin(angle) * reach);
-        draw_list->PathLineTo(point);
-        if (segment == 0) {
-            first = point;
+// The part of `corners` on one side of the cut, written into `out`. Standard
+// Sutherland-Hodgman: `keep` is +1 for the side the normal points at and -1
+// for the other. Returns how many vertices were written.
+int clip_to_cut(const ImVec2* corners, int count, ImVec2 normal, float distance,
+                float keep, ImVec2* out) {
+    const auto side = [&](ImVec2 point) {
+        return keep * (normal.x * point.x + normal.y * point.y - distance);
+    };
+    const auto crossing = [](ImVec2 a, ImVec2 b, float was, float now) {
+        const float t = was / (was - now);
+        return ImVec2(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+    };
+
+    int    written  = 0;
+    ImVec2 previous = corners[count - 1];
+    float  was      = side(previous);
+    for (int corner = 0; corner < count; ++corner) {
+        const ImVec2 point = corners[corner];
+        const float  now   = side(point);
+        if (now >= 0.0f) {
+            if (was < 0.0f) {
+                out[written++] = crossing(previous, point, was, now);
+            }
+            out[written++] = point;
+        } else if (was >= 0.0f) {
+            out[written++] = crossing(previous, point, was, now);
         }
-        last = point;
+        previous = point;
+        was      = now;
     }
-    draw_list->PathStroke(color, ImDrawFlags_None, stroke);
-    draw_list->AddCircleFilled(first, stroke * 0.5f, color, 16);
-    draw_list->AddCircleFilled(last, stroke * 0.5f, color, 16);
+    return written;
+}
+
+// One piece of the cut hexagon, slid clear of the other along the cut's normal.
+void draw_piece(ImDrawList* draw_list, const ImVec2* corners, ImVec2 normal,
+                float distance, float keep, float shift, ImU32 color) {
+    ImVec2    piece[kMaxCorners];
+    const int written = clip_to_cut(corners, kFacetSides, normal, distance, keep, piece);
+    for (int corner = 0; corner < written; ++corner) {
+        piece[corner].x += normal.x * shift * keep;
+        piece[corner].y += normal.y * shift * keep;
+    }
+    // Convex by construction, so this takes the cheap fill.
+    draw_list->AddConvexPolyFilled(piece, written, color);
 }
 
 }  // namespace
 
 void draw_logo(ImDrawList* draw_list, ImVec2 centre, float radius) {
-    // Two arms about one centre, half a turn apart. Because both wind the same
-    // way and start opposite each other, they never cross: at any angle one is
-    // always outside the other, which is what makes the pair read as
-    // interlocked without either having to be drawn over the top of the other.
-    draw_spiral_arm(draw_list, centre, radius, 0.0f, kLogoArm);
-    draw_spiral_arm(draw_list, centre, radius, 3.14159265f, kAccent);
+    // A hexagon cut once and pulled apart. Pointy top rather than a circle:
+    // every circular mark sits in the most crowded neighbourhood there is, and
+    // the silhouette is the part that survives to a taskbar. The gap is what
+    // makes it read as cut rather than as two colours of one shape.
+    constexpr float kFirst = -1.57079633f;  // first vertex straight up
+    constexpr float kStep  = 1.04719755f;   // 60 degrees
+
+    ImVec2 corners[kFacetSides];
+    for (int corner = 0; corner < kFacetSides; ++corner) {
+        const float angle = kFirst + kStep * static_cast<float>(corner);
+        corners[corner] = ImVec2(centre.x + std::cos(angle) * kFacetRadius * radius,
+                                 centre.y + std::sin(angle) * kFacetRadius * radius);
+    }
+
+    const ImVec2 normal(std::sin(kCutAngle), -std::cos(kCutAngle));
+    const float  distance =
+        normal.x * centre.x + normal.y * centre.y + kCutOffset * radius;
+    const float shift = kCutGap * radius * 0.5f;
+
+    draw_piece(draw_list, corners, normal, distance, -1.0f, shift, kLogoBody);
+    draw_piece(draw_list, corners, normal, distance, 1.0f, shift, kAccent);
 }
 
 void draw_play_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color) {
