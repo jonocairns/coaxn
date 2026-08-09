@@ -13,6 +13,18 @@ namespace coax::core {
 
 enum class SupervisorStateName { Idle, Loading, Zap, Steady, Recovering, Failed };
 enum class RecoveryAction { ReopenStream, ReloadHlsLive, ReopenProbed, RecreatePlayer };
+enum class RecoveryEscalation { None, SourceReopen, PlayerRecreation };
+enum class RecoveryOutcome {
+    None,
+    FaultDecided,
+    CommandIssued,
+    FirstFrame,
+    LateFirstFrame,
+    CleanProbation,
+    RenewedStall,
+    RenewedEof,
+    TerminalFailure,
+};
 enum class TransportFailureReason {
     FormatProbeRequired,
     HlsPlaylistFailed,
@@ -20,6 +32,7 @@ enum class TransportFailureReason {
     HttpRequestTimeout,
 };
 enum class DetectionReason {
+    CacheStall,
     DecodeStall,
     FormatProbeRequired,
     HlsPlaylistFailed,
@@ -36,7 +49,7 @@ enum class DetectionReason {
 };
 enum class FailureReason { AttemptsExhausted, AuthRejected, BudgetExpired, SourceUnavailable };
 enum class EndReason { Eof, Error, Unknown };
-enum class StallKind { Open, Progress };
+enum class StallKind { Cache, Open, Progress };
 
 struct SupervisorDeadlines {
     std::optional<TimePoint> retry_at;
@@ -54,20 +67,36 @@ struct SupervisorState {
     std::optional<FailureReason> failure;
     std::optional<TimePoint> first_frame_at;
     Generation generation;
+    LoadAttempt load_attempt;
+    LoadIntent load_intent = LoadIntent::FreshSelection;
+    std::optional<TimePoint> load_command_at;
+    std::optional<TimePoint> last_forward_progress_at;
     SupervisorStateName name = SupervisorStateName::Idle;
+    std::optional<LoadAttempt> pending_load_attempt;
+    std::optional<LoadIntent> pending_load_intent;
     std::optional<RecoveryAction> recovery;
     std::optional<TimePoint> recovery_started_at;
+    std::optional<TimePoint> fault_decided_at;
+    std::size_t short_recovery_load_failures = 0;
+    std::optional<LoadAttempt> last_short_recovery_failure_attempt;
+    bool short_load_recreation_used = false;
+    // Command exhaustion may leave the exact current load running. Only an
+    // opening-stalled load that has not produced a frame can consume this
+    // one-shot admission back into probation.
+    bool late_completion_available = false;
+    bool late_completion_probation = false;
     std::optional<RecoveryTransport> transport;
 };
 
 struct DeadlineReached {};
-struct CacheState { Generation generation; bool paused; };
-struct AuthRejected { Generation generation; };
-struct DecodeStalled { Generation generation; };
-struct FirstFrame { Generation generation; };
-struct IpcUnresponsive { Generation generation; };
+struct CacheState { Generation generation; LoadAttempt load_attempt; bool paused; };
+struct AuthRejected { Generation generation; LoadAttempt load_attempt; };
+struct DecodeStalled { Generation generation; LoadAttempt load_attempt; };
+struct FirstFrame { Generation generation; LoadAttempt load_attempt; };
+struct IpcUnresponsive { Generation generation; LoadAttempt load_attempt; };
 struct ChannelRequested { Generation generation; };
-struct PlaybackHealthObserved { Generation generation; bool unhealthy; };
+struct PlaybackHealthObserved { Generation generation; LoadAttempt load_attempt; bool unhealthy; };
+struct ForwardProgressObserved { Generation generation; LoadAttempt load_attempt; };
 struct PlaybackStopped { Generation generation; };
 // The graphics device the video is presented through went away. mpv's own
 // device dies with it, so the stream has to be reopened on a rebuilt one —
@@ -75,19 +104,26 @@ struct PlaybackStopped { Generation generation; };
 // rather than recovering beside the supervisor is what gives presentation loss
 // the same bounded attempts and the same generation fence as every other fault.
 struct PresentationLost { Generation generation; };
-struct ProcessExited { Generation generation; };
-struct SourceFailed { Generation generation; };
-struct PlaybackStalled { Generation generation; StallKind stall; };
+struct ProcessExited { Generation generation; LoadAttempt load_attempt; };
+struct SourceFailed { Generation generation; LoadAttempt load_attempt; };
+struct PlaybackStalled { Generation generation; LoadAttempt load_attempt; StallKind stall; };
 struct StreamEnded {
     Generation generation;
+    LoadAttempt load_attempt;
     EndReason end_reason;
     std::optional<TransportFailureReason> failure_reason;
 };
-struct StreamLoadIssued { Generation generation; RecoveryTransport transport; };
+struct StreamLoadIssued {
+    Generation generation;
+    LoadAttempt load_attempt;
+    LoadIntent intent;
+    RecoveryTransport transport;
+};
 
 using SupervisorEvent = std::variant<
     DeadlineReached, CacheState, AuthRejected, DecodeStalled, FirstFrame,
-    IpcUnresponsive, ChannelRequested, PlaybackHealthObserved, PlaybackStopped,
+    IpcUnresponsive, ChannelRequested, PlaybackHealthObserved, ForwardProgressObserved,
+    PlaybackStopped,
     PresentationLost, ProcessExited, SourceFailed, PlaybackStalled, StreamEnded,
     StreamLoadIssued>;
 
@@ -99,6 +135,7 @@ using SupervisorEffectPayload = std::variant<ReopenStream, ReloadHlsLive, Reopen
                                              RecreatePlayer>;
 struct SupervisorEffect {
     Generation generation;
+    LoadAttempt load_attempt;
     SupervisorEffectPayload payload;
 };
 
@@ -107,6 +144,15 @@ struct SupervisorTransition {
     Duration elapsed_budget{};
     SupervisorStateName from = SupervisorStateName::Idle;
     Generation generation;
+    LoadAttempt load_attempt;
+    LoadIntent load_intent = LoadIntent::FreshSelection;
+    RecoveryEscalation escalation = RecoveryEscalation::None;
+    RecoveryOutcome outcome = RecoveryOutcome::None;
+    std::optional<Duration> last_progress_to_decision;
+    std::optional<Duration> decision_to_command;
+    std::optional<Duration> command_to_first_frame;
+    std::optional<Duration> first_frame_to_outcome;
+    std::optional<Duration> recovered_load_lifetime;
     std::string_view policy_version;
     std::string reason;
     SupervisorStateName to = SupervisorStateName::Idle;
@@ -128,10 +174,15 @@ struct SupervisorStatsSnapshot {
     std::optional<std::string> reason;
     SupervisorStateName state = SupervisorStateName::Idle;
     std::optional<RecoveryTransport> transport;
+    LoadAttempt load_attempt;
+    LoadIntent load_intent = LoadIntent::FreshSelection;
+    bool short_load_recreation_used = false;
 };
 
 [[nodiscard]] SupervisorState initial_supervisor_state();
 [[nodiscard]] bool supervisor_deadlines_valid(const SupervisorState& state);
+[[nodiscard]] bool supervisor_health_supervision_enabled(
+    SupervisorStateName state);
 [[nodiscard]] std::optional<TimePoint> next_deadline_at(const SupervisorState& state);
 [[nodiscard]] SupervisorReduction reduce_supervisor_state(
     const SupervisorState& state, const SupervisorEvent& event, TimePoint now,
@@ -143,6 +194,9 @@ struct SupervisorStatsSnapshot {
 const char* to_string(SupervisorStateName value);
 const char* to_string(RecoveryTransport value);
 const char* to_string(RecoveryAction value);
+const char* to_string(RecoveryEscalation value);
+const char* to_string(RecoveryOutcome value);
+const char* to_string(LoadIntent value);
 const char* to_string(DetectionReason value);
 const char* to_string(FailureReason value);
 const char* effect_name(const SupervisorEffectPayload& value);

@@ -167,28 +167,32 @@ void MpvPlayer::destroy_backend() {
 std::uint64_t MpvPlayer::next_request_id() { return ++request_sequence_; }
 
 bool MpvPlayer::play(const std::string& url, core::Generation generation,
-                     core::RecoveryTransport transport, bool force_probed_format,
+                     core::LoadAttempt load_attempt, core::RecoveryTransport transport,
+                     bool force_probed_format,
                      SourceCorrelation correlation) {
     if (!mpv_) return false;
-    target_ = PlaybackTarget{url, generation, transport, force_probed_format, correlation};
+    target_ = PlaybackTarget{url, generation, load_attempt, core::LoadIntent::FreshSelection,
+                             transport, force_probed_format, correlation};
     reset_load_observations(diagnostics_);
     buffer_phase_gate_.begin_load(generation);
     apply_buffer_phase(generation, core::BufferPhase::Zap);
-    return issue_load(force_probed_format, LoadRequestIntent::FreshSelection);
+    return issue_load(force_probed_format);
 }
 
-bool MpvPlayer::issue_load(bool force_probed_format, LoadRequestIntent intent) {
+bool MpvPlayer::issue_load(bool force_probed_format) {
     if (!mpv_ || !target_) return false;
     diagnostics_.request_shape = inspect_request_shape(
-        target_->url, intent, target_->transport, force_probed_format,
+        target_->url, target_->load_intent, target_->load_attempt,
+        target_->transport, force_probed_format,
         target_->correlation);
     const auto& request = *diagnostics_.request_shape;
     log::info(
-        "Load request generation {} provider-session={} channel-session={} "
+        "Load request generation {} load-attempt={} provider-session={} channel-session={} "
         "intent={} command=loadfile mode=replace transport={} "
         "scheme={} target={} query={} userinfo={} forced-format={}; "
         "HTTP method/range/headers unobserved below libmpv",
-        target_->generation.value(), request.correlation.provider_session,
+        target_->generation.value(), target_->load_attempt.value(),
+        request.correlation.provider_session,
         request.correlation.channel_session, to_string(request.intent),
         core::to_string(request.transport), to_string(request.scheme),
         to_string(request.target), request.query_present ? "present" : "absent",
@@ -203,7 +207,7 @@ bool MpvPlayer::issue_load(bool force_probed_format, LoadRequestIntent intent) {
     target_->probed_format_forced = force_probed_format;
 
     const std::uint64_t request_id = next_request_id();
-    events_.track_load(request_id, target_->generation);
+    events_.track_load(request_id, target_->generation, target_->load_attempt);
 
     mpv_node command{};
     mpv_node values[5]{};
@@ -273,19 +277,24 @@ void MpvPlayer::stop(core::Generation generation) {
 }
 
 std::optional<core::RecoveryTransport> MpvPlayer::reopen_current(
-    core::Generation generation, bool force_probed_format, bool require_hls) {
+    core::Generation generation, core::LoadAttempt load_attempt,
+    bool force_probed_format, bool require_hls) {
     if (!target_ || target_->generation != generation || !mpv_ ||
+        load_attempt <= target_->load_attempt ||
         (require_hls && target_->transport != core::RecoveryTransport::Hls)) return std::nullopt;
+    target_->load_attempt = load_attempt;
+    target_->load_intent = core::LoadIntent::RecoveryReopen;
     reset_load_observations(diagnostics_);
     buffer_phase_gate_.begin_load(generation);
     apply_buffer_phase(generation, core::BufferPhase::Zap);
-    if (!issue_load(force_probed_format, LoadRequestIntent::RecoveryReopen)) return std::nullopt;
+    if (!issue_load(force_probed_format)) return std::nullopt;
     return target_->transport;
 }
 
 std::optional<core::RecoveryTransport> MpvPlayer::recreate_player(
-    core::Generation generation, std::string& error) {
-    if (!target_ || target_->generation != generation || !has_config_) return std::nullopt;
+    core::Generation generation, core::LoadAttempt load_attempt, std::string& error) {
+    if (!target_ || target_->generation != generation || !has_config_ ||
+        load_attempt <= target_->load_attempt) return std::nullopt;
     const auto target = *target_;
     destroy_backend();
     events_ = PlayerEventAdapter{};
@@ -293,11 +302,12 @@ std::optional<core::RecoveryTransport> MpvPlayer::recreate_player(
     // Synchronous UI-thread recreation cannot be superseded mid-call, but the
     // equality check is retained as the explicit replacement fence.
     if (!target_ || target_->generation != generation) return std::nullopt;
+    target_->load_attempt = load_attempt;
+    target_->load_intent = core::LoadIntent::PlayerRecreation;
     reset_load_observations(diagnostics_);
     buffer_phase_gate_.begin_load(generation);
     apply_buffer_phase(generation, core::BufferPhase::Zap);
-    if (!issue_load(target.probed_format_forced,
-                    LoadRequestIntent::PlayerRecreation)) {
+    if (!issue_load(target.probed_format_forced)) {
         return std::nullopt;
     }
     return target.transport;
@@ -538,6 +548,7 @@ void MpvPlayer::handle_property(std::uint64_t id, const mpv_event_property& prop
 
 core::PlaybackHealthObservation MpvPlayer::health_observation() const {
     return {.generation = target_ ? target_->generation : core::Generation{},
+            .load_attempt = target_ ? target_->load_attempt : core::LoadAttempt{},
             .av_sync_seconds = diagnostics_.av_sync_seconds,
             .buffer_seconds = diagnostics_.cache_duration_seconds,
             .cache_end_seconds = diagnostics_.cache_end_seconds,
@@ -615,10 +626,11 @@ void MpvPlayer::pump() {
                             target_->probed_format_forced)) {
                         transport_classification_reported_ = true;
                         if (std::holds_alternative<AuthenticationRejected>(*classification)) {
-                            events_.authentication_rejected(target_->generation);
+                            events_.authentication_rejected(target_->generation,
+                                                            target_->load_attempt);
                         } else {
                             events_.transport_failure(
-                                target_->generation,
+                                target_->generation, target_->load_attempt,
                                 std::get<core::TransportFailureReason>(*classification));
                         }
                     }
@@ -653,10 +665,12 @@ void MpvPlayer::pump() {
             }
             case MPV_EVENT_QUEUE_OVERFLOW:
                 events_.backend_failed(target_ ? target_->generation : core::Generation{},
+                                       target_ ? target_->load_attempt : core::LoadAttempt{},
                                        MPV_ERROR_EVENT_QUEUE_FULL);
                 break;
             case MPV_EVENT_SHUTDOWN:
                 events_.backend_failed(target_ ? target_->generation : core::Generation{},
+                                       target_ ? target_->load_attempt : core::LoadAttempt{},
                                        MPV_ERROR_UNINITIALIZED);
                 return;
             default: break;

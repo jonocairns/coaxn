@@ -365,7 +365,7 @@ namespace {
 constexpr core::Generation kLoad{7};
 
 player::PlayerEvent first_frame(core::Generation generation) {
-    return {generation, player::FirstPlaybackStart{}};
+    return {generation, core::LoadAttempt{1}, player::FirstPlaybackStart{}};
 }
 
 // The drain, for the turns where exactly one event lands.
@@ -402,12 +402,26 @@ player::Diagnostics unpaused(std::optional<double> buffered) {
 player::LiveSyncStep frame(player::LiveSyncTurn& turn, player::LiveSync& sync,
                            std::span<const player::PlayerEvent> events,
                            const player::Diagnostics& diagnostics, double now_seconds) {
-    turn.observe_events(events, kLoad);
+    turn.observe_events(events, kLoad, core::LoadAttempt{1});
     const auto step = turn.observe(diagnostics);
     if (step.rebuffered) sync.notify_rebuffer();
     if (step.hold_unity_speed) sync.hold_unity_speed();
     else if (step.control_input) sync.update(*step.control_input, now_seconds);
     return step;
+}
+
+TEST_CASE("live-sync ignores first frames from a replaced load attempt") {
+    player::LiveSyncTurn turn;
+    turn.begin_load();
+    const std::array events{
+        player::PlayerEvent{kLoad, core::LoadAttempt{1},
+                            player::FirstPlaybackStart{}},
+    };
+
+    turn.observe_events(events, kLoad, core::LoadAttempt{2});
+    CHECK_FALSE(turn.first_frame_seen());
+    turn.observe_events(events, kLoad, core::LoadAttempt{1});
+    CHECK(turn.first_frame_seen());
 }
 
 // The opening sequence the 2026-08-08 run produced against a live HLS source,
@@ -552,6 +566,8 @@ struct AppLoop {
     void play() {
         supervisor.dispatch(core::ChannelRequested{generation});
         supervisor.dispatch(core::StreamLoadIssued{generation,
+                                                   core::LoadAttempt{1},
+                                                   core::LoadIntent::FreshSelection,
                                                    core::RecoveryTransport::MpegTs});
         turn.begin_load();
         last_cache_state_dispatched.reset();
@@ -562,22 +578,25 @@ struct AppLoop {
         clock.current = core::TimePoint{core::seconds(at)};
 
         if (frame_started) {
-            turn.observe_events(drain(first_frame(generation)), generation);
-            supervisor.dispatch(core::FirstFrame{generation});
+            turn.observe_events(drain(first_frame(generation)), generation,
+                                core::LoadAttempt{1});
+            supervisor.dispatch(core::FirstFrame{generation, core::LoadAttempt{1}});
         }
 
         // App::dispatch_cache_state().
         if (!last_cache_state_dispatched ||
             *last_cache_state_dispatched != diagnostics.paused_for_cache) {
             last_cache_state_dispatched = diagnostics.paused_for_cache;
-            supervisor.dispatch(core::CacheState{generation, diagnostics.paused_for_cache});
+            supervisor.dispatch(core::CacheState{
+                generation, core::LoadAttempt{1}, diagnostics.paused_for_cache});
         }
 
         // App::sample_playback_health() publishes determinate fold levels and
         // retains the last one when playback-time evidence is unavailable.
         if (health_verdict && *health_verdict != core::PlaybackHealthVerdict::Unknown) {
             supervisor.dispatch(core::PlaybackHealthObserved{
-                generation, *health_verdict != core::PlaybackHealthVerdict::Healthy});
+                generation, core::LoadAttempt{1},
+                *health_verdict != core::PlaybackHealthVerdict::Healthy});
         }
 
         supervisor.poll();

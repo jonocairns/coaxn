@@ -49,15 +49,17 @@ double rounded(double value, double places) {
 
 }  // namespace
 
-PlaybackHealthState initial_playback_health(Generation generation, BufferPhase phase,
-                                            TimePoint load_issued_at,
+PlaybackHealthState initial_playback_health(Generation generation, LoadAttempt load_attempt,
+                                            BufferPhase phase, TimePoint load_issued_at,
                                             std::optional<double> target_seconds) {
     PlaybackHealthState state;
     state.generation = generation;
+    state.load_attempt = load_attempt;
     state.load_issued_at = load_issued_at;
     state.snapshot.phase = phase;
     state.snapshot.buffer_target_seconds = target_seconds;
     state.snapshot.timeline.generation = generation;
+    state.snapshot.timeline.load_attempt = state.load_attempt;
     return state;
 }
 
@@ -65,7 +67,8 @@ PlaybackHealthFold fold_playback_health(const PlaybackHealthState& previous,
                                         const PlaybackHealthObservation& observation,
                                         TimePoint now,
                                         const PlaybackHealthFoldOptions& options) {
-    if (observation.generation != previous.generation) {
+    if (observation.generation != previous.generation ||
+        observation.load_attempt != previous.load_attempt) {
         return PlaybackHealthFold{
             .observation_accepted = false,
             .state = previous,
@@ -76,6 +79,7 @@ PlaybackHealthFold fold_playback_health(const PlaybackHealthState& previous,
         ? std::optional<Duration>{now - *previous.observed_at} : std::nullopt;
     TimelineEvidence timeline;
     timeline.generation = previous.generation;
+    timeline.load_attempt = previous.load_attempt;
     timeline.elapsed_seconds = elapsed
         ? std::optional<double>{std::max(0.0, elapsed->count())} : std::nullopt;
     timeline.playback_movement_seconds = difference(
@@ -132,14 +136,34 @@ PlaybackHealthFold fold_playback_health(const PlaybackHealthState& previous,
     const auto av_sync = observation.av_sync_seconds
         ? observation.av_sync_seconds : previous.snapshot.av_sync_seconds;
     const auto shortfall = video_fps_shortfall(fps_estimate, options.container_fps);
+    const bool cache_pause_wedged = options.first_frame_seen &&
+        observation.cache_paused && progressing && !*progressing;
+    const std::optional<TimePoint> cache_pause_since = cache_pause_wedged
+        ? (previous.cache_pause_since ? previous.cache_pause_since
+                                      : std::optional<TimePoint>{now})
+        : std::nullopt;
+    const int cache_pause_observations = cache_pause_wedged
+        ? previous.cache_pause_observations + 1 : 0;
+    const bool cache_stalled = cache_pause_since &&
+        now - *cache_pause_since >= policy.cache_pause_grace &&
+        cache_pause_observations >= policy.min_cache_stall_observations;
 
     PlaybackHealthVerdict verdict;
     if (!options.first_frame_seen) {
-        verdict = !observation.playback_time_seconds && !input_is_delivering(input_ratio) &&
-                          (!observation.buffer_seconds ||
-                           *observation.buffer_seconds <= policy.depleted_buffer_seconds)
-                      ? PlaybackHealthVerdict::OpenStalled
-                      : PlaybackHealthVerdict::Unknown;
+        // First frame is the only evidence that an opening load has become
+        // presentable. Incoming bytes, a growing demuxer cache or a readable
+        // (possibly stale) playback timestamp cannot exempt it from the
+        // bounded open-stall clock: malformed TS can provide all three forever
+        // without producing a frame. The confirmation duration and observation
+        // count below still absorb ordinary startup latency.
+        verdict = PlaybackHealthVerdict::OpenStalled;
+    } else if (observation.cache_paused) {
+        // paused-for-cache is explicit evidence that mpv is absorbing jitter,
+        // so ordinary fills do not accrue either existing stall clock. A
+        // separate grace clock bounds that protection when playback itself is
+        // continuously readable but not moving.
+        verdict = cache_stalled ? PlaybackHealthVerdict::CacheStalled
+                                : PlaybackHealthVerdict::Degraded;
     } else if (!progressing) {
         verdict = PlaybackHealthVerdict::Unknown;
     } else if (*progressing) {
@@ -151,14 +175,19 @@ PlaybackHealthFold fold_playback_health(const PlaybackHealthState& previous,
     }
 
     std::optional<PlaybackDegradedReason> degraded_reason;
-    if (verdict == PlaybackHealthVerdict::Degraded) {
-        degraded_reason = classify_degraded(discontinuity, input_ratio, shortfall, policy);
+    if (verdict == PlaybackHealthVerdict::Degraded ||
+        verdict == PlaybackHealthVerdict::CacheStalled) {
+        degraded_reason = observation.cache_paused
+            ? PlaybackDegradedReason::CacheBuffering
+            : classify_degraded(discontinuity, input_ratio, shortfall, policy);
     }
 
     const bool continuing = verdict == previous.verdict;
     const int observations = continuing ? previous.observations + 1 : 1;
     std::optional<TimePoint> since;
-    if (verdict == PlaybackHealthVerdict::OpenStalled) {
+    if (verdict == PlaybackHealthVerdict::CacheStalled) {
+        since = cache_pause_since;
+    } else if (verdict == PlaybackHealthVerdict::OpenStalled) {
         since = previous.load_issued_at;
     } else if (verdict == PlaybackHealthVerdict::Stalled) {
         since = continuing && previous.since ? previous.since : std::optional<TimePoint>{now};
@@ -167,7 +196,8 @@ PlaybackHealthFold fold_playback_health(const PlaybackHealthState& previous,
         ? std::optional<Duration>{std::max(Duration::zero(), now - *since)} : std::nullopt;
 
     const bool decode_wedged = verdict == PlaybackHealthVerdict::Degraded &&
-        degraded_reason != PlaybackDegradedReason::InputThrottled;
+        degraded_reason != PlaybackDegradedReason::InputThrottled &&
+        degraded_reason != PlaybackDegradedReason::CacheBuffering;
     const std::optional<TimePoint> decode_since = decode_wedged
         ? (previous.decode_since ? previous.decode_since : std::optional<TimePoint>{now})
         : std::nullopt;
@@ -177,7 +207,7 @@ PlaybackHealthFold fold_playback_health(const PlaybackHealthState& previous,
         decode_observations >= policy.min_decode_stall_observations;
 
     const bool open = verdict == PlaybackHealthVerdict::OpenStalled;
-    const bool stalled = stalled_for &&
+    const bool ordinary_stalled = stalled_for &&
         *stalled_for >= (open ? policy.open_stall_confirmation
                              : policy.stall_confirmation) &&
         observations >= (open ? policy.min_open_stall_observations
@@ -186,10 +216,13 @@ PlaybackHealthFold fold_playback_health(const PlaybackHealthState& previous,
     PlaybackHealthState state;
     state.cache_end_seconds = observation.cache_end_seconds
         ? observation.cache_end_seconds : previous.cache_end_seconds;
+    state.cache_pause_observations = cache_pause_observations;
+    state.cache_pause_since = cache_pause_since;
     state.decode_since = decode_since;
     state.decode_observations = decode_observations;
     state.discontinuities = previous.discontinuities + (discontinuity ? 1 : 0);
     state.generation = previous.generation;
+    state.load_attempt = previous.load_attempt;
     state.load_issued_at = previous.load_issued_at;
     state.observations = observations;
     state.observed_at = now;
@@ -223,10 +256,11 @@ PlaybackHealthFold fold_playback_health(const PlaybackHealthState& previous,
         ? std::optional<double>{rounded(*shortfall, 1000.0)} : std::nullopt;
 
     return PlaybackHealthFold{
+        .cache_stalled = cache_stalled,
         .decode_stalled = decode_stalled,
         .discontinuity = discontinuity,
         .state = state,
-        .stalled = stalled,
+        .stalled = cache_stalled || ordinary_stalled,
     };
 }
 
@@ -235,6 +269,7 @@ const char* to_string(PlaybackHealthVerdict value) {
         case PlaybackHealthVerdict::Unknown: return "unknown";
         case PlaybackHealthVerdict::Healthy: return "healthy";
         case PlaybackHealthVerdict::Degraded: return "degraded";
+        case PlaybackHealthVerdict::CacheStalled: return "cache-stalled";
         case PlaybackHealthVerdict::OpenStalled: return "open-stalled";
         case PlaybackHealthVerdict::Stalled: return "stalled";
     }
@@ -243,6 +278,7 @@ const char* to_string(PlaybackHealthVerdict value) {
 
 const char* to_string(PlaybackDegradedReason value) {
     switch (value) {
+        case PlaybackDegradedReason::CacheBuffering: return "cache-buffering";
         case PlaybackDegradedReason::DecodeDamage: return "decode-damage";
         case PlaybackDegradedReason::Discontinuity: return "discontinuity";
         case PlaybackDegradedReason::InputThrottled: return "input-throttled";

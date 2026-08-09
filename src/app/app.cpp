@@ -128,11 +128,26 @@ App::App()
            .on_state_changed = [this](const core::SupervisorState& state) {
                on_supervisor_state_changed(state);
            },
-           .on_transition = [](const core::SupervisorTransition& transition) {
-               log::info("Supervisor {} -> {} generation {} attempt {} reason {} budget {:.0f}ms",
+           .on_transition = [this](const core::SupervisorTransition& transition) {
+               log::info("Supervisor {} -> {} generation {} load-attempt {} intent {} "
+                         "attempt {} reason {} budget {:.0f}ms",
                          core::to_string(transition.from), core::to_string(transition.to),
-                         transition.generation.value(), transition.attempt, transition.reason,
+                         transition.generation.value(), transition.load_attempt.value(),
+                         core::to_string(transition.load_intent), transition.attempt,
+                         transition.reason,
                          transition.elapsed_budget.count() * 1000.0);
+               if (transition.outcome != core::RecoveryOutcome::None) {
+                   const auto& diagnostics = player_.diagnostics();
+                   player::RecoveryDecisionEvidence evidence;
+                   evidence.cache_paused = diagnostics.paused_for_cache;
+                   evidence.playback_movement_seconds =
+                       health_snapshot_.timeline.playback_movement_seconds;
+                   evidence.cache_end_movement_seconds =
+                       health_snapshot_.timeline.cache_end_movement_seconds;
+                   evidence.engine_warning = diagnostics.last_engine_message;
+                   log::info("{}", player::format_recovery_telemetry(
+                       transition, diagnostics.request_shape, evidence));
+               }
            }}) {}
 
 App::~App() {
@@ -199,9 +214,17 @@ bool App::initialize(std::string& error) {
         set_status("Direct media");
         generation_ = core::Generation{generation_.value() + 1};
         supervisor_.dispatch(core::ChannelRequested{generation_});
-        begin_health_load();
-        player_.play(direct_media_, generation_, core::RecoveryTransport::MpegTs,
-                     false, {.provider_session = 0, .channel_session = 1});
+        const core::LoadAttempt load_attempt{1};
+        if (player_.play(direct_media_, generation_, load_attempt,
+                         core::RecoveryTransport::MpegTs, false,
+                         {.provider_session = 0, .channel_session = 1})) {
+            begin_health_load(load_attempt);
+            supervisor_.dispatch(core::StreamLoadIssued{
+                generation_, load_attempt, core::LoadIntent::FreshSelection,
+                core::RecoveryTransport::MpegTs});
+        } else {
+            supervisor_.dispatch(core::SourceFailed{generation_, load_attempt});
+        }
     } else {
         load_saved_portal();
     }
@@ -374,7 +397,7 @@ void App::load_saved_portal() {
     // pasting a link with credentials in its query into a box that asks for a
     // URL. Masking a string that turns out to have had no secret in it costs
     // nothing; the other way round cannot be undone.
-    log::info("Restored saved portal for {}", log::redact_portal_url(portal_url_));
+    log::info("Restored saved portal");
 }
 
 void App::save_portal() const {
@@ -445,15 +468,16 @@ void App::finish_connect() {
     if (!error.empty()) {
         stage_  = Stage::Login;
         set_status(error, true);
-        log::error("Connect failed: {}", error);
+        // The UI may present the actionable provider error, but the persistent
+        // session log must not inherit a WinHTTP error containing the origin.
+        log::error("Provider connection failed");
         return;
     }
 
     client_ = std::make_unique<xtream::Client>(credentials_);
     channels_.reset(std::move(catalog.categories), std::move(catalog.channels));
     const auto provider_session = target_registry_.begin_provider_session();
-    log::info("Provider session {} connected to {}", provider_session,
-              log::redact_portal_url(credentials_.base_url));
+    log::info("Provider session {} connected", provider_session);
     stage_  = Stage::Browsing;
     set_status(std::format("{} channels", channels_.channel_count()));
     save_portal();
@@ -479,32 +503,44 @@ void App::play(const core::Channel& channel) {
               generation_.value(), correlation.provider_session,
               correlation.channel_session);
     supervisor_.dispatch(core::ChannelRequested{generation_});
-    begin_health_load();
+    const core::LoadAttempt load_attempt{1};
     // Xtream resolves this endpoint as a continuous .ts request; transport is
     // therefore resolved with the load rather than guessed from HTTP(S).
-    player_.play(client_->stream_url(channel), generation_,
-                 core::RecoveryTransport::MpegTs, false, correlation);
+    if (player_.play(client_->stream_url(channel), generation_, load_attempt,
+                     core::RecoveryTransport::MpegTs, false, correlation)) {
+        begin_health_load(load_attempt);
+        supervisor_.dispatch(core::StreamLoadIssued{
+            generation_, load_attempt, core::LoadIntent::FreshSelection,
+            core::RecoveryTransport::MpegTs});
+    } else {
+        supervisor_.dispatch(core::SourceFailed{generation_, load_attempt});
+    }
     apply_vsr();
     set_status(std::format("Playing {}", channel.name));
 }
 
-void App::begin_health_load() {
-    const auto now = supervisor_clock_.now();
-    const auto target = core::buffer_phase_targets(core::BufferPhase::Zap);
-    playback_health_ = core::initial_playback_health(generation_, core::BufferPhase::Zap, now,
-                                                     target.cache_seconds);
-    health_snapshot_ = playback_health_->snapshot;
-    timeline_classification_ = player::TimelineClassification::Unavailable;
-    next_health_sample_ = now + core::kDefaultHealthPolicy.sample_interval;
+void App::begin_health_load(core::LoadAttempt load_attempt) {
+    restart_health_supervision(load_attempt);
     // Every load starts unestablished, so no load can concede latency for its
     // own opening fill. Recovery reopens reach here too, which is why this and
     // not LiveSyncGate::reset() owns that lifetime.
     live_sync_turn_.begin_load();
+}
+
+void App::restart_health_supervision(core::LoadAttempt load_attempt) {
+    const auto now = supervisor_clock_.now();
+    const auto target = core::buffer_phase_targets(core::BufferPhase::Zap);
+    playback_health_ = core::initial_playback_health(
+        generation_, load_attempt, core::BufferPhase::Zap, now, target.cache_seconds);
+    health_snapshot_ = playback_health_->snapshot;
+    timeline_classification_ = player::TimelineClassification::Unavailable;
+    next_health_sample_ = now + core::kDefaultHealthPolicy.sample_interval;
     stall_reported_ = false;
     decode_stall_reported_ = false;
     exact_failure_reported_ = false;
-    last_health_engine_message_count_ = 0;
-    last_health_unattributed_engine_message_count_ = 0;
+    last_health_engine_message_count_ = player_.diagnostics().engine_message_count;
+    last_health_unattributed_engine_message_count_ =
+        player_.diagnostics().unattributed_engine_message_count;
     last_cache_state_dispatched_.reset();
     player_.set_health_discontinuities(0);
 }
@@ -514,7 +550,10 @@ void App::process_player_events() {
     // Live-sync sees this turn's events before update_live_sync() reads this
     // turn's properties, which is the real ordering and the one the portable
     // LiveSyncTurn cases pin. Both signals can describe the same instant.
-    live_sync_turn_.observe_events(events, generation_);
+    if (const auto& target = player_.current_target()) {
+        live_sync_turn_.observe_events(
+            events, generation_, target->load_attempt);
+    }
 
     for (const auto& event : events) {
         std::visit(Overloaded{
@@ -522,23 +561,25 @@ void App::process_player_events() {
                 if (!result.accepted) {
                     log::warn("Load command rejected for generation {} with structured error {}",
                               event.generation.value(), result.error);
-                    supervisor_.dispatch(core::SourceFailed{event.generation});
-                    return;
+                    supervisor_.dispatch(core::SourceFailed{
+                        event.generation, event.load_attempt});
                 }
-                const auto& target = player_.current_target();
-                if (!target || target->generation != event.generation) return;
-                supervisor_.dispatch(core::StreamLoadIssued{event.generation,
-                                                            target->transport});
             },
             [&](const player::FirstPlaybackStart&) {
-                if (event.generation != generation_) return;
-                supervisor_.dispatch(core::FirstFrame{event.generation});
+                const auto& target = player_.current_target();
+                if (event.generation != generation_ || !target ||
+                    event.load_attempt != target->load_attempt) return;
+                supervisor_.dispatch(core::FirstFrame{
+                    event.generation, event.load_attempt});
             },
             [&](const player::EndFileEvent& ended) {
                 if (ended.reason == player::PlayerEndReason::Stop ||
                     ended.reason == player::PlayerEndReason::Quit ||
                     ended.reason == player::PlayerEndReason::Redirect) return;
-                if (event.generation == generation_ && exact_failure_reported_) return;
+                const auto& target = player_.current_target();
+                const bool current = event.generation == generation_ && target &&
+                    event.load_attempt == target->load_attempt;
+                if (current && exact_failure_reported_) return;
                 core::EndReason reason = core::EndReason::Unknown;
                 if (ended.reason == player::PlayerEndReason::Eof) reason = core::EndReason::Eof;
                 else if (ended.reason == player::PlayerEndReason::Error)
@@ -547,7 +588,7 @@ void App::process_player_events() {
                 // just after end-file. Hold the generic fallback briefly so
                 // one physical failure cannot spend two recovery attempts.
                 pending_stream_ends_.push_back({
-                    event.generation, reason,
+                    event.generation, event.load_attempt, reason,
                     supervisor_clock_.now() + core::milliseconds(50)});
             },
             [&](const player::PlaybackStopped& stopped) {
@@ -558,7 +599,8 @@ void App::process_player_events() {
             [&](const player::BackendFailed& failed) {
                 log::warn("libmpv backend failed for generation {} with structured error {}",
                           event.generation.value(), failed.error);
-                supervisor_.dispatch(core::ProcessExited{event.generation});
+                supervisor_.dispatch(core::ProcessExited{
+                    event.generation, event.load_attempt});
             },
             [&](const player::PropertyCommandResult& result) {
                 player_.observe_buffer_command_result(event.generation, result);
@@ -573,19 +615,27 @@ void App::process_player_events() {
                 }
             },
             [&](const player::PlayerAuthenticationRejected&) {
-                if (event.generation == generation_) exact_failure_reported_ = true;
+                const auto& target = player_.current_target();
+                if (event.generation == generation_ && target &&
+                    event.load_attempt == target->load_attempt) exact_failure_reported_ = true;
                 std::erase_if(pending_stream_ends_, [&](const auto& pending) {
-                    return pending.generation == event.generation;
+                    return pending.generation == event.generation &&
+                        pending.load_attempt == event.load_attempt;
                 });
-                supervisor_.dispatch(core::AuthRejected{event.generation});
+                supervisor_.dispatch(core::AuthRejected{
+                    event.generation, event.load_attempt});
             },
             [&](const player::TransportFailureDetected& failure) {
-                if (event.generation == generation_) exact_failure_reported_ = true;
+                const auto& target = player_.current_target();
+                if (event.generation == generation_ && target &&
+                    event.load_attempt == target->load_attempt) exact_failure_reported_ = true;
                 std::erase_if(pending_stream_ends_, [&](const auto& pending) {
-                    return pending.generation == event.generation;
+                    return pending.generation == event.generation &&
+                        pending.load_attempt == event.load_attempt;
                 });
                 supervisor_.dispatch(core::StreamEnded{
-                    event.generation, core::EndReason::Error, failure.reason});
+                    event.generation, event.load_attempt,
+                    core::EndReason::Error, failure.reason});
             }}, event.payload);
     }
     flush_pending_stream_ends();
@@ -599,7 +649,8 @@ void App::flush_pending_stream_ends() {
             continue;
         }
         supervisor_.dispatch(core::StreamEnded{
-            pending->generation, pending->reason, std::nullopt});
+            pending->generation, pending->load_attempt,
+            pending->reason, std::nullopt});
         pending = pending_stream_ends_.erase(pending);
     }
 }
@@ -617,18 +668,20 @@ void App::dispatch_cache_state() {
     // supervisor and the live-sync gate now read the same pause state within a
     // turn rather than readings up to a sample apart.
     if (!player_.current_target()) return;
-    if (supervisor_.current().name == core::SupervisorStateName::Idle ||
-        supervisor_.current().name == core::SupervisorStateName::Failed) return;
+    if (!core::supervisor_health_supervision_enabled(
+            supervisor_.current().name)) return;
     const bool paused = player_.diagnostics().paused_for_cache;
     if (last_cache_state_dispatched_ && *last_cache_state_dispatched_ == paused) return;
     last_cache_state_dispatched_ = paused;
-    supervisor_.dispatch(core::CacheState{player_.current_target()->generation, paused});
+    supervisor_.dispatch(core::CacheState{
+        player_.current_target()->generation,
+        player_.current_target()->load_attempt, paused});
 }
 
 void App::sample_playback_health() {
     if (!playback_health_ || !player_.current_target()) return;
-    if (supervisor_.current().name == core::SupervisorStateName::Idle ||
-        supervisor_.current().name == core::SupervisorStateName::Failed) return;
+    if (!core::supervisor_health_supervision_enabled(
+            supervisor_.current().name)) return;
     const auto now = supervisor_clock_.now();
     if (now < next_health_sample_) return;
     next_health_sample_ = now + core::kDefaultHealthPolicy.sample_interval;
@@ -684,13 +737,14 @@ void App::sample_playback_health() {
             diagnostics.last_engine_message
         ? player::to_string(diagnostics.last_engine_message->severity) : "none";
     log::debug(
-        "Timeline sample generation {} kind={} elapsed={} playback-move={} "
+        "Timeline sample generation {} load-attempt={} kind={} elapsed={} playback-move={} "
         "playback-deviation={} cache-end-move={} control-playback-move={} "
         "control-playback-deviation={} control-baseline={} cache-paused={} "
         "previous-cache-paused={} engine-messages-since-sample={} "
         "unattributed-engine-messages-since-sample={} warning-severity={} "
         "warning-component={} warning-category={}",
-        evidence_generation.value(), player::to_string(timeline_classification_),
+        evidence_generation.value(), health_snapshot_.timeline.load_attempt.value(),
+        player::to_string(timeline_classification_),
         signed_seconds(health_snapshot_.timeline.elapsed_seconds),
         signed_seconds(health_snapshot_.timeline.playback_movement_seconds),
         signed_seconds(health_snapshot_.timeline.playback_deviation_seconds),
@@ -702,6 +756,10 @@ void App::sample_playback_health() {
         optional_pause(health_snapshot_.timeline.previous_cache_paused),
         engine_messages_since_sample, unattributed_engine_messages_since_sample,
         warning_severity, warning_component, warning_category);
+    if (fold.state.snapshot.progressing && *fold.state.snapshot.progressing) {
+        supervisor_.dispatch(core::ForwardProgressObserved{
+            state_generation, fold.state.load_attempt});
+    }
     // Publish determinate levels rather than an interruption edge, so a
     // sustained degradation can hold the steady deadline. Unknown is absence
     // of playback-time evidence: it must neither create nor clear an unhealthy
@@ -709,17 +767,19 @@ void App::sample_playback_health() {
     // playback-time is unavailable throughout.
     if (fold.state.verdict != core::PlaybackHealthVerdict::Unknown) {
         supervisor_.dispatch(core::PlaybackHealthObserved{
-            state_generation, fold.state.verdict != core::PlaybackHealthVerdict::Healthy});
+            state_generation, fold.state.load_attempt,
+            fold.state.verdict != core::PlaybackHealthVerdict::Healthy});
     }
     if (fold.discontinuity) {
         log::warn(
-            "Timeline discontinuity #{} generation {} kind={} playback-move={} "
+            "Timeline discontinuity #{} generation {} load-attempt={} kind={} playback-move={} "
             "playback-deviation={} cache-end-move={} control-playback-move={} "
             "control-playback-deviation={} control-baseline={} "
             "engine-messages-since-sample={} "
             "unattributed-engine-messages-since-sample={} "
             "warning-severity={} warning-component={} warning-category={}",
             fold.state.discontinuities, evidence_generation.value(),
+            fold.state.load_attempt.value(),
             player::to_string(timeline_classification_),
             signed_seconds(health_snapshot_.timeline.playback_movement_seconds),
             signed_seconds(health_snapshot_.timeline.playback_deviation_seconds),
@@ -733,33 +793,39 @@ void App::sample_playback_health() {
     if (fold.stalled && !stall_reported_) {
         stall_reported_ = true;
         supervisor_.dispatch(core::PlaybackStalled{
-            state_generation,
-            fold.state.verdict == core::PlaybackHealthVerdict::OpenStalled
-                ? core::StallKind::Open : core::StallKind::Progress});
+            state_generation, fold.state.load_attempt,
+            fold.cache_stalled ? core::StallKind::Cache
+                : (fold.state.verdict == core::PlaybackHealthVerdict::OpenStalled
+                       ? core::StallKind::Open : core::StallKind::Progress)});
     } else if (fold.decode_stalled && !decode_stall_reported_) {
         decode_stall_reported_ = true;
-        supervisor_.dispatch(core::DecodeStalled{state_generation});
+        supervisor_.dispatch(core::DecodeStalled{
+            state_generation, fold.state.load_attempt});
     }
 }
 
 void App::execute_supervisor_effect(const core::SupervisorEffect& effect) {
     std::string error;
-    auto settle_load = [this](std::optional<core::RecoveryTransport> result) {
-        if (result) begin_health_load();
+    auto settle_load = [this](core::LoadAttempt load_attempt,
+                              std::optional<core::RecoveryTransport> result) {
+        if (result) begin_health_load(load_attempt);
         return result;
     };
     const player::RecoveryExecutor executor{
-        .reopen_stream = [&](core::Generation generation) {
-            return settle_load(player_.reopen_current(generation));
+        .reopen_stream = [&](core::Generation generation, core::LoadAttempt load_attempt) {
+            return settle_load(load_attempt,
+                               player_.reopen_current(generation, load_attempt));
         },
-        .reload_hls_live = [&](core::Generation generation) {
-            return settle_load(player_.reopen_current(generation, false, true));
+        .reload_hls_live = [&](core::Generation generation, core::LoadAttempt load_attempt) {
+            return settle_load(load_attempt,
+                               player_.reopen_current(generation, load_attempt, false, true));
         },
-        .reopen_probed = [&](core::Generation generation) {
-            return settle_load(player_.reopen_current(generation, true));
+        .reopen_probed = [&](core::Generation generation, core::LoadAttempt load_attempt) {
+            return settle_load(load_attempt,
+                               player_.reopen_current(generation, load_attempt, true));
         },
-        .recreate_player = [&](core::Generation generation) {
-            auto result = player_.recreate_player(generation, error);
+        .recreate_player = [&](core::Generation generation, core::LoadAttempt load_attempt) {
+            auto result = player_.recreate_player(generation, load_attempt, error);
             if (result) {
                 // The new backend starts at 1.0x. Reset the controller too so
                 // its cached old speed cannot suppress the write the new mpv needs.
@@ -771,7 +837,7 @@ void App::execute_supervisor_effect(const core::SupervisorEffect& effect) {
                 player_.set_paused(paused_);
                 apply_vsr();
             }
-            return settle_load(result);
+            return settle_load(load_attempt, result);
         },
     };
     player::execute_recovery_effect(
@@ -785,7 +851,18 @@ void App::execute_supervisor_effect(const core::SupervisorEffect& effect) {
 }
 
 void App::on_supervisor_state_changed(const core::SupervisorState& state) {
+    const auto previous_state = supervisor_snapshot_.state;
     supervisor_snapshot_ = core::project_supervisor_stats(state, supervisor_clock_.now());
+    if (previous_state == core::SupervisorStateName::Failed &&
+        state.name == core::SupervisorStateName::Zap &&
+        state.generation == generation_) {
+        // The same already-issued load was intentionally left alive after the
+        // command budget expired. Its first frame is a one-shot admission to
+        // probation, so restart the fold without resetting LiveSyncTurn's
+        // first-frame edge for this same physical load.
+        restart_health_supervision(state.load_attempt);
+        set_status("Playback resumed; confirming stability");
+    }
     if (state.name == core::SupervisorStateName::Steady) {
         player_.apply_buffer_phase(state.generation, core::BufferPhase::Steady);
         // Steady is a first frame plus a healthy window, which is the only
@@ -1643,10 +1720,11 @@ void App::draw_diagnostics() {
           std::format("{}", d.unattributed_engine_message_count));
     if (d.request_shape) {
         field("Request shape",
-              std::format("p{} / c{} / {} / {} / {}",
+              std::format("p{} / c{} / load {} / {} / {} / {}",
                           d.request_shape->correlation.provider_session,
                           d.request_shape->correlation.channel_session,
-                          player::to_string(d.request_shape->intent),
+                          d.request_shape->load_attempt.value(),
+                          core::to_string(d.request_shape->intent),
                           player::to_string(d.request_shape->scheme),
                           player::to_string(d.request_shape->target)));
     } else {
@@ -1659,6 +1737,11 @@ void App::draw_diagnostics() {
           supervisor_stats.transport ? core::to_string(*supervisor_stats.transport) : "-");
     field("Attempt", std::format("{} / {}", supervisor_stats.attempt,
                                  supervisor_stats.attempt_ceiling));
+    field("Load attempt", std::format("{} / {}",
+                                      supervisor_stats.load_attempt.value(),
+                                      core::to_string(supervisor_stats.load_intent)));
+    field("Player recreation used",
+          supervisor_stats.short_load_recreation_used ? "yes" : "no");
     field("Reason", supervisor_stats.reason ? std::string_view(*supervisor_stats.reason) : "-");
     field("Recovery budget",
           supervisor_stats.elapsed_budget

@@ -7,11 +7,25 @@
 
 namespace coax::core {
 
-enum class PlaybackHealthVerdict { Unknown, Healthy, Degraded, OpenStalled, Stalled };
-enum class PlaybackDegradedReason { DecodeDamage, Discontinuity, InputThrottled, Unclassified };
+enum class PlaybackHealthVerdict {
+    Unknown,
+    Healthy,
+    Degraded,
+    CacheStalled,
+    OpenStalled,
+    Stalled,
+};
+enum class PlaybackDegradedReason {
+    CacheBuffering,
+    DecodeDamage,
+    Discontinuity,
+    InputThrottled,
+    Unclassified,
+};
 
 struct PlaybackHealthObservation {
     Generation generation;
+    LoadAttempt load_attempt;
     std::optional<double> av_sync_seconds;
     std::optional<double> buffer_seconds;
     std::optional<double> cache_end_seconds;
@@ -29,6 +43,7 @@ struct PlaybackHealthObservation {
 // compute it were present; absence is never rewritten as zero.
 struct TimelineEvidence {
     Generation generation;
+    LoadAttempt load_attempt;
     std::optional<double> elapsed_seconds;
     std::optional<double> playback_movement_seconds;
     std::optional<double> playback_deviation_seconds;
@@ -67,10 +82,13 @@ struct BufferHealthSnapshot {
 
 struct PlaybackHealthState {
     std::optional<double> cache_end_seconds;
+    int cache_pause_observations = 0;
+    std::optional<TimePoint> cache_pause_since;
     std::optional<TimePoint> decode_since;
     int decode_observations = 0;
     int discontinuities = 0;
     Generation generation;
+    LoadAttempt load_attempt;
     TimePoint load_issued_at{};
     int observations = 0;
     std::optional<TimePoint> observed_at;
@@ -98,6 +116,7 @@ struct PlaybackHealthFoldOptions {
 };
 
 struct PlaybackHealthFold {
+    bool cache_stalled = false;
     bool decode_stalled = false;
     bool discontinuity = false;
     bool observation_accepted = true;
@@ -106,7 +125,7 @@ struct PlaybackHealthFold {
 };
 
 PlaybackHealthState initial_playback_health(
-    Generation generation, BufferPhase phase, TimePoint load_issued_at,
+    Generation generation, LoadAttempt load_attempt, BufferPhase phase, TimePoint load_issued_at,
     std::optional<double> target_seconds = std::nullopt);
 
 PlaybackHealthFold fold_playback_health(

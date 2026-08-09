@@ -49,6 +49,7 @@ using PlayerEventPayload = std::variant<LoadCommandResult, FirstPlaybackStart,
                                         TransportFailureDetected>;
 struct PlayerEvent {
     core::Generation generation;
+    core::LoadAttempt load_attempt;
     PlayerEventPayload payload;
 };
 
@@ -56,7 +57,8 @@ struct PlayerEvent {
 // so its ordering and generation fences can be contract-tested with no media.
 class PlayerEventAdapter {
 public:
-    void track_load(std::uint64_t request_id, core::Generation generation);
+    void track_load(std::uint64_t request_id, core::Generation generation,
+                    core::LoadAttempt load_attempt);
     void track_property(std::uint64_t request_id, core::Generation generation,
                         core::BufferPhase phase, BufferProperty property);
     void command_result(std::uint64_t request_id, int error);
@@ -69,18 +71,23 @@ public:
     void end_file(std::int64_t playlist_entry_id, PlayerEndReason reason, int error,
                   std::int64_t playlist_insert_id = 0,
                   int playlist_insert_num_entries = 0);
-    void backend_failed(core::Generation generation, int error);
-    void authentication_rejected(core::Generation generation);
-    void transport_failure(core::Generation generation,
+    void backend_failed(core::Generation generation, core::LoadAttempt load_attempt, int error);
+    void authentication_rejected(core::Generation generation, core::LoadAttempt load_attempt);
+    void transport_failure(core::Generation generation, core::LoadAttempt load_attempt,
                            core::TransportFailureReason reason);
     void dispose();
 
     [[nodiscard]] std::vector<PlayerEvent> drain();
     [[nodiscard]] std::optional<core::Generation> active_generation() const;
+    [[nodiscard]] std::optional<core::LoadAttempt> active_load_attempt() const;
     [[nodiscard]] std::optional<std::int64_t> active_entry() const { return active_entry_; }
 
 private:
-    struct PendingLoad { std::uint64_t request_id; core::Generation generation; };
+    struct LoadIdentity {
+        core::Generation generation;
+        core::LoadAttempt load_attempt;
+    };
+    struct PendingLoad { std::uint64_t request_id; LoadIdentity identity; };
     struct PropertyRequest {
         core::Generation generation;
         core::BufferPhase phase;
@@ -92,9 +99,9 @@ private:
     void clear_correlations();
 
     std::deque<PendingLoad> pending_loads_;
-    std::unordered_map<std::uint64_t, core::Generation> load_requests_;
+    std::unordered_map<std::uint64_t, LoadIdentity> load_requests_;
     std::unordered_map<std::uint64_t, PropertyRequest> property_requests_;
-    std::unordered_map<std::int64_t, core::Generation> entries_;
+    std::unordered_map<std::int64_t, LoadIdentity> entries_;
     std::unordered_map<std::int64_t, StopIntent> stop_intents_;
     std::unordered_map<std::int64_t, bool> first_started_;
     std::optional<std::int64_t> active_entry_;

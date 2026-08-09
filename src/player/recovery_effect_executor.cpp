@@ -18,16 +18,20 @@ void execute_recovery_effect(const core::SupervisorEffect& effect,
                 using T = std::decay_t<decltype(payload)>;
                 if constexpr (std::is_same_v<T, core::ReopenStream>) {
                     return executor->reopen_stream
-                        ? executor->reopen_stream(effect.generation) : std::nullopt;
+                        ? executor->reopen_stream(effect.generation, effect.load_attempt)
+                        : std::nullopt;
                 } else if constexpr (std::is_same_v<T, core::ReloadHlsLive>) {
                     return executor->reload_hls_live
-                        ? executor->reload_hls_live(effect.generation) : std::nullopt;
+                        ? executor->reload_hls_live(effect.generation, effect.load_attempt)
+                        : std::nullopt;
                 } else if constexpr (std::is_same_v<T, core::ReopenProbed>) {
                     return executor->reopen_probed
-                        ? executor->reopen_probed(effect.generation) : std::nullopt;
+                        ? executor->reopen_probed(effect.generation, effect.load_attempt)
+                        : std::nullopt;
                 } else if constexpr (std::is_same_v<T, core::RecreatePlayer>) {
                     return executor->recreate_player
-                        ? executor->recreate_player(effect.generation) : std::nullopt;
+                        ? executor->recreate_player(effect.generation, effect.load_attempt)
+                        : std::nullopt;
                 } else {
                     static_assert(kAlwaysFalse<T>, "SupervisorEffect handling must be exhaustive");
                 }
@@ -38,10 +42,12 @@ void execute_recovery_effect(const core::SupervisorEffect& effect,
     }
     if (!transport) {
         if (on_rejection) on_rejection(effect);
-        dispatch(core::SourceFailed{effect.generation});
+        dispatch(core::SourceFailed{effect.generation, effect.load_attempt});
         return;
     }
-    dispatch(core::StreamLoadIssued{effect.generation, *transport});
+    const auto intent = std::holds_alternative<core::RecreatePlayer>(effect.payload)
+        ? core::LoadIntent::PlayerRecreation : core::LoadIntent::RecoveryReopen;
+    dispatch(core::StreamLoadIssued{effect.generation, effect.load_attempt, intent, *transport});
 }
 
 }  // namespace coax::player

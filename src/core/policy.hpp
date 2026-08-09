@@ -8,8 +8,8 @@
 
 namespace coax::core {
 
-inline constexpr std::string_view kTransportPolicyVersion = "coax-transport-recovery-v4";
-inline constexpr std::string_view kRecoveryPolicyVersion = "coax-recovery-v1";
+inline constexpr std::string_view kTransportPolicyVersion = "coax-transport-recovery-v7";
+inline constexpr std::string_view kRecoveryPolicyVersion = "coax-recovery-v3";
 inline constexpr int kHlsLiveStartIndex = -1;
 inline constexpr std::string_view kHlsRuntimeRetryOptions =
     "http_persistent=0,http_multiple=0,seg_max_retry=0";
@@ -21,6 +21,7 @@ struct RecoveryPolicy {
         milliseconds(4'000), milliseconds(5'000)};
     Duration steady_healthy_window = milliseconds(5'000);
     Duration wall_clock_budget = milliseconds(30'000);
+    std::size_t short_reopens_before_recreation = 2;
     std::string_view version = kRecoveryPolicyVersion;
 };
 
@@ -34,10 +35,16 @@ inline constexpr BufferPhaseTargets buffer_phase_targets(BufferPhase phase) {
 }
 
 struct HealthPolicy {
+    // The provider soak separated ordinary cache fills (at most six seconds)
+    // from hard freezes (at least 74 seconds). Ten seconds preserves a clear
+    // grace margin while bounding how long paused-for-cache can suppress
+    // recovery when playback is not moving.
+    Duration cache_pause_grace = milliseconds(10'000);
     double decode_shortfall_ratio = 0.05;
     Duration decode_stall_confirmation = milliseconds(6'000);
     double depleted_buffer_seconds = 0.5;
     double discontinuity_jump_seconds = 1.0;
+    int min_cache_stall_observations = 3;
     int min_decode_stall_observations = 8;
     int min_open_stall_observations = 8;
     int min_stall_observations = 3;

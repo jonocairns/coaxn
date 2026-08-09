@@ -5,9 +5,6 @@
 #include <string_view>
 #include <vector>
 
-// Callers redact through these before logging; see the note on write().
-#include "util/redact.hpp"
-
 namespace coax::log {
 
 enum class Level { Debug, Info, Warn, Error };

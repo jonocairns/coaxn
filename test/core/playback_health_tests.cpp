@@ -15,7 +15,8 @@ constexpr double kContainerFps = 25.0;
 const Duration kInterval = kDefaultHealthPolicy.sample_interval;
 
 PlaybackHealthObservation healthy() {
-    return {.generation = Generation{1}, .av_sync_seconds = 0.0,
+    return {.generation = Generation{1}, .load_attempt = LoadAttempt{1},
+            .av_sync_seconds = 0.0,
             .buffer_seconds = 8.0, .cache_end_seconds = 8.0,
             .cache_paused = false, .input_rate_bytes_per_second = 240'000.0,
             .ipc_round_trip_ms = 1.2, .playback_time_seconds = 0.0,
@@ -57,6 +58,15 @@ std::vector<PlaybackHealthObservation> wedged(int count, double at) {
     return result;
 }
 
+std::vector<PlaybackHealthObservation> cache_paused(int count, double at) {
+    auto result = frozen(count, at);
+    for (auto& value : result) {
+        value.buffer_seconds.reset();
+        value.cache_paused = true;
+    }
+    return result;
+}
+
 struct ReplayResult {
     PlaybackHealthState state;
     std::vector<PlaybackHealthFold> folds;
@@ -64,13 +74,14 @@ struct ReplayResult {
 
 ReplayResult replay(const std::vector<PlaybackHealthObservation>& values,
                     bool first_frame = true, TimePoint load_at = TimePoint{}) {
-    auto state = initial_playback_health(Generation{1}, BufferPhase::Zap, load_at);
+    auto state = initial_playback_health(Generation{1}, LoadAttempt{1}, BufferPhase::Zap, load_at);
     auto at = load_at;
     std::vector<PlaybackHealthFold> folds;
     for (auto value : values) {
         // Fixtures that exercise unavailable opening telemetry use default
         // observations; the helper attaches them to its current load.
         if (value.generation == Generation{}) value.generation = Generation{1};
+        if (value.load_attempt == LoadAttempt{}) value.load_attempt = LoadAttempt{1};
         at += kInterval;
         PlaybackHealthFoldOptions options;
         options.container_fps = kContainerFps;
@@ -94,6 +105,7 @@ TEST_CASE("two phase buffer and health policy constants are pinned") {
     CHECK(buffer_phase_targets(BufferPhase::Zap).readahead_seconds == 1.0);
     CHECK(buffer_phase_targets(BufferPhase::Steady).cache_seconds == 10.0);
     CHECK(kDemuxerMaxBytes == 64U * 1024U * 1024U);
+    CHECK(kDefaultHealthPolicy.cache_pause_grace == seconds(10.0));
     CHECK(kDefaultHealthPolicy.stall_confirmation + 2 * kInterval < seconds(3.0));
 }
 
@@ -120,7 +132,7 @@ TEST_CASE("a brief input interruption is absorbed while playback advances") {
     for (const auto& fold : result.folds) CHECK_FALSE(fold.stalled);
 }
 
-TEST_CASE("stall needs progress buffer input duration and observation agreement") {
+TEST_CASE("confirmed unpaused no progress raises the progress-stall signal") {
     auto values = advancing(4);
     append(values, frozen(6, 2.0));
     const auto result = replay(values);
@@ -128,9 +140,29 @@ TEST_CASE("stall needs progress buffer input duration and observation agreement"
     const auto found = std::find_if(result.folds.begin(), result.folds.end(),
                                     [](const auto& fold) { return fold.stalled; });
     REQUIRE(found != result.folds.end());
+    CHECK_FALSE(found->state.snapshot.cache_paused);
     CHECK(found->state.observations >= kDefaultHealthPolicy.min_stall_observations);
     REQUIRE(found->state.snapshot.stalled_for);
     CHECK(*found->state.snapshot.stalled_for >= kDefaultHealthPolicy.stall_confirmation);
+}
+
+TEST_CASE("isolated backward timestamp movement does not raise a recovery signal") {
+    auto values = advancing(4);
+    auto backward = healthy();
+    backward.buffer_seconds = 6.0;
+    backward.cache_end_seconds = 10.5;
+    backward.playback_time_seconds = 1.0;
+    values.push_back(backward);
+    append(values, advancing(4, 2.0));
+
+    const auto result = replay(values);
+    CHECK(result.state.verdict == PlaybackHealthVerdict::Healthy);
+    CHECK(std::any_of(result.folds.begin(), result.folds.end(),
+                      [](const auto& fold) { return fold.discontinuity; }));
+    for (const auto& fold : result.folds) {
+        CHECK_FALSE(fold.stalled);
+        CHECK_FALSE(fold.decode_stalled);
+    }
 }
 
 TEST_CASE("one stopped sample never confirms a stall") {
@@ -182,15 +214,85 @@ TEST_CASE("an unreadable sample retains the frozen progress baseline") {
                       [](const auto& fold) { return fold.stalled; }));
 }
 
-TEST_CASE("cache pause is depleted even without buffer duration") {
+TEST_CASE("brief cache pause does not confirm either recovery clock") {
     auto values = advancing(4);
-    auto paused = frozen(6, 2.0);
-    for (auto& value : paused) { value.buffer_seconds.reset(); value.cache_paused = true; }
-    append(values, paused);
-    CHECK(replay(values).state.verdict == PlaybackHealthVerdict::Stalled);
+    // The soak's longest ordinary fill was six seconds, so pin that observed
+    // boundary below the independently confirmed ten-second grace.
+    append(values, cache_paused(
+        static_cast<int>(seconds(6.0) / kInterval), 2.0));
+    const auto result = replay(values);
+    CHECK(result.state.verdict == PlaybackHealthVerdict::Degraded);
+    CHECK(result.state.snapshot.degraded_reason == PlaybackDegradedReason::CacheBuffering);
+    for (const auto& fold : result.folds) {
+        CHECK_FALSE(fold.stalled);
+        CHECK_FALSE(fold.decode_stalled);
+    }
 }
 
-TEST_CASE("open stall runs from load issue and cannot arm after first frame") {
+TEST_CASE("sustained cache pause without progress raises a distinct cache stall") {
+    auto values = advancing(4);
+    const int count = static_cast<int>(std::ceil(
+        kDefaultHealthPolicy.cache_pause_grace / kInterval)) + 2;
+    append(values, cache_paused(count, 2.0));
+
+    const auto result = replay(values);
+    CHECK(result.state.verdict == PlaybackHealthVerdict::CacheStalled);
+    CHECK(result.state.snapshot.degraded_reason == PlaybackDegradedReason::CacheBuffering);
+    const auto found = std::find_if(result.folds.begin(), result.folds.end(),
+                                    [](const auto& fold) { return fold.cache_stalled; });
+    REQUIRE(found != result.folds.end());
+    CHECK(found->stalled);
+    CHECK(found->state.cache_pause_observations >=
+          kDefaultHealthPolicy.min_cache_stall_observations);
+    REQUIRE(found->state.snapshot.stalled_for);
+    CHECK(*found->state.snapshot.stalled_for >=
+          kDefaultHealthPolicy.cache_pause_grace);
+    for (const auto& fold : result.folds) CHECK_FALSE(fold.decode_stalled);
+}
+
+TEST_CASE("cache stall grace resets on progress and pause exit") {
+    const int partial = static_cast<int>(
+        kDefaultHealthPolicy.cache_pause_grace / kInterval) - 4;
+    auto values = advancing(4);
+    append(values, cache_paused(partial, 2.0));
+
+    auto progress_while_paused = healthy();
+    progress_while_paused.buffer_seconds.reset();
+    progress_while_paused.cache_end_seconds = 10.5;
+    progress_while_paused.cache_paused = true;
+    progress_while_paused.playback_time_seconds = 2.5;
+    values.push_back(progress_while_paused);
+    append(values, cache_paused(partial, 2.5));
+
+    // Leaving the pause also clears the dedicated clock, even if this one
+    // unpaused sample has not yet moved enough to be healthy.
+    auto unpaused = healthy();
+    unpaused.buffer_seconds = 0.0;
+    unpaused.cache_end_seconds = 2.5;
+    unpaused.playback_time_seconds = 2.5;
+    values.push_back(unpaused);
+    append(values, cache_paused(partial, 2.5));
+
+    const auto result = replay(values);
+    for (const auto& fold : result.folds) CHECK_FALSE(fold.cache_stalled);
+}
+
+TEST_CASE("health observations are scoped to both generation and load attempt") {
+    const auto started = initial_playback_health(
+        Generation{9}, LoadAttempt{2}, BufferPhase::Zap, TimePoint{});
+    auto observation = healthy();
+    observation.generation = Generation{9};
+    observation.load_attempt = LoadAttempt{1};
+
+    PlaybackHealthFoldOptions options;
+    const auto stale = fold_playback_health(
+        started, observation, TimePoint{} + kInterval, options);
+    CHECK_FALSE(stale.observation_accepted);
+    CHECK(stale.state.load_attempt == LoadAttempt{2});
+    CHECK(stale.state.observations == 0);
+}
+
+TEST_CASE("first-frame deadline runs from load issue and cannot arm after first frame") {
     PlaybackHealthObservation dead;
     dead.input_rate_bytes_per_second = 0.0;
     dead.ipc_round_trip_ms = 0.8;
@@ -207,7 +309,7 @@ TEST_CASE("open stall runs from load issue and cannot arm after first frame") {
     }
 }
 
-TEST_CASE("an opening cache that keeps filling is not stalled") {
+TEST_CASE("opening input and stale playback time cannot outlive the first-frame deadline") {
     std::vector<PlaybackHealthObservation> values;
     for (int index = 0; index < 40; ++index) {
         PlaybackHealthObservation value;
@@ -215,9 +317,49 @@ TEST_CASE("an opening cache that keeps filling is not stalled") {
         value.cache_end_seconds = (index + 1) * kInterval.count();
         value.input_rate_bytes_per_second = 400'000.0;
         value.ipc_round_trip_ms = 0.9;
+        value.playback_time_seconds = 125.0;
         values.push_back(value);
     }
-    for (const auto& fold : replay(values, false).folds) CHECK_FALSE(fold.stalled);
+    const auto result = replay(values, false);
+    CHECK(result.state.verdict == PlaybackHealthVerdict::OpenStalled);
+    CHECK(result.state.snapshot.input_advancing == true);
+    CHECK(result.state.snapshot.progressing == false);
+    const auto stalled = std::find_if(result.folds.begin(), result.folds.end(),
+                                      [](const auto& fold) { return fold.stalled; });
+    REQUIRE(stalled != result.folds.end());
+    const auto due_index = static_cast<std::size_t>(std::ceil(
+        kDefaultHealthPolicy.open_stall_confirmation / kInterval)) - 1;
+    CHECK(static_cast<std::size_t>(std::distance(result.folds.begin(), stalled)) ==
+          due_index);
+    for (auto fold = result.folds.begin(); fold != stalled; ++fold) {
+        CHECK_FALSE(fold->stalled);
+    }
+
+    // App drains FirstFrame before sampling health. If the frame arrives on
+    // the exact due turn, that phase change wins and no open stall is emitted.
+    auto state = initial_playback_health(
+        Generation{1}, LoadAttempt{1}, BufferPhase::Zap, TimePoint{});
+    PlaybackHealthFoldOptions options;
+    for (std::size_t index = 0; index < due_index; ++index) {
+        auto opening_value = values[index];
+        opening_value.generation = Generation{1};
+        opening_value.load_attempt = LoadAttempt{1};
+        state = fold_playback_health(
+            state, opening_value,
+            TimePoint{} + kInterval * static_cast<double>(index + 1),
+            options).state;
+    }
+    options.first_frame_seen = true;
+    auto first_frame_value = values[due_index];
+    first_frame_value.generation = Generation{1};
+    first_frame_value.load_attempt = LoadAttempt{1};
+    first_frame_value.playback_time_seconds = 125.0 + kInterval.count();
+    const auto frame_won = fold_playback_health(
+        state, first_frame_value,
+        TimePoint{} + kDefaultHealthPolicy.open_stall_confirmation,
+        options);
+    CHECK_FALSE(frame_won.stalled);
+    CHECK(frame_won.state.verdict == PlaybackHealthVerdict::Healthy);
 }
 
 TEST_CASE("discontinuity is deviation from elapsed progress in either direction") {
@@ -329,7 +471,7 @@ TEST_CASE("pause resume and backward replay retain different evidence") {
     auto baseline = healthy();
     baseline.playback_time_seconds = 10.0;
     baseline.cache_end_seconds = 20.0;
-    auto state = initial_playback_health(Generation{1}, BufferPhase::Zap, TimePoint{});
+    auto state = initial_playback_health(Generation{1}, LoadAttempt{1}, BufferPhase::Zap, TimePoint{});
     PlaybackHealthFoldOptions options;
     options.first_frame_seen = true;
 
@@ -365,7 +507,7 @@ TEST_CASE("pause resume and backward replay retain different evidence") {
 TEST_CASE("stale generations cannot alter current-load timeline evidence") {
     auto current = healthy();
     current.generation = Generation{9};
-    auto state = initial_playback_health(Generation{9}, BufferPhase::Zap, TimePoint{});
+    auto state = initial_playback_health(Generation{9}, LoadAttempt{1}, BufferPhase::Zap, TimePoint{});
     PlaybackHealthFoldOptions options;
     options.first_frame_seen = true;
     state = fold_playback_health(
@@ -406,7 +548,7 @@ TEST_CASE("degraded classification separates throttling decode damage and unknow
     REQUIRE(result.state.snapshot.video_fps_shortfall);
     CHECK(*result.state.snapshot.video_fps_shortfall > kDefaultHealthPolicy.decode_shortfall_ratio);
 
-    auto state = initial_playback_health(Generation{1}, BufferPhase::Zap, TimePoint{});
+    auto state = initial_playback_health(Generation{1}, LoadAttempt{1}, BufferPhase::Zap, TimePoint{});
     TimePoint at{};
     for (const auto& value : values) {
         at += kInterval;

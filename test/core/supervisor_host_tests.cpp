@@ -30,11 +30,14 @@ struct HostFixture {
 
     void start(Generation generation = Generation{1}) {
         supervisor.dispatch(ChannelRequested{generation});
-        supervisor.dispatch(StreamLoadIssued{generation, RecoveryTransport::MpegTs});
+        supervisor.dispatch(StreamLoadIssued{generation, LoadAttempt{1},
+                                             LoadIntent::FreshSelection,
+                                             RecoveryTransport::MpegTs});
     }
     void start_healthy_playback(Generation generation = Generation{1}) {
-        supervisor.dispatch(FirstFrame{generation});
-        supervisor.dispatch(PlaybackHealthObserved{generation, false});
+        const auto load_attempt = supervisor.current().load_attempt;
+        supervisor.dispatch(FirstFrame{generation, load_attempt});
+        supervisor.dispatch(PlaybackHealthObserved{generation, load_attempt, false});
     }
     void advance(double seconds_value) { clock.advance_to(seconds_value); supervisor.poll(); }
 };
@@ -50,12 +53,34 @@ TEST_CASE("host owns one deadline and runs effects when it expires") {
     CHECK(host.supervisor.current().name == SupervisorStateName::Steady);
     CHECK_FALSE(host.supervisor.armed_deadline());
 
-    host.supervisor.dispatch(StreamEnded{Generation{1}, EndReason::Error, {}});
+    host.supervisor.dispatch(StreamEnded{Generation{1}, LoadAttempt{1}, EndReason::Error, {}});
     CHECK(host.supervisor.armed_deadline() == TimePoint{seconds(5.5)});
     host.advance(5.5);
     REQUIRE(host.effects.size() == 1);
     CHECK(std::holds_alternative<ReopenStream>(host.effects[0].payload));
     CHECK_FALSE(host.supervisor.armed_deadline());
+}
+
+TEST_CASE("host disarms an opening retry when the current load starts in backoff") {
+    HostFixture host;
+    host.start();
+    host.supervisor.dispatch(PlaybackStalled{
+        Generation{1}, LoadAttempt{1}, StallKind::Open});
+    REQUIRE(host.supervisor.current().name == SupervisorStateName::Recovering);
+    REQUIRE(host.supervisor.armed_deadline() == TimePoint{seconds(.5)});
+
+    host.clock.advance_to(.25);
+    host.supervisor.dispatch(FirstFrame{Generation{1}, LoadAttempt{1}});
+    CHECK(host.supervisor.current().name == SupervisorStateName::Zap);
+    CHECK(host.supervisor.current().attempt == 1);
+    CHECK(host.supervisor.armed_deadline() == TimePoint{seconds(5.25)});
+
+    host.advance(.5);
+    CHECK(host.effects.empty());
+    CHECK(host.supervisor.current().name == SupervisorStateName::Zap);
+    host.advance(5.25);
+    CHECK(host.effects.empty());
+    CHECK(host.supervisor.current().name == SupervisorStateName::Steady);
 }
 
 TEST_CASE("synchronous effect settlement is queued instead of reentering callbacks") {
@@ -67,6 +92,8 @@ TEST_CASE("synchronous effect settlement is queued instead of reentering callbac
         clock,
         {.on_effect = [&](const SupervisorEffect& effect) {
              host->dispatch(StreamLoadIssued{effect.generation,
+                                             effect.load_attempt,
+                                             LoadIntent::RecoveryReopen,
                                              RecoveryTransport::MpegTs});
          },
          .on_state_changed = [&](const SupervisorState& state) {
@@ -78,12 +105,12 @@ TEST_CASE("synchronous effect settlement is queued instead of reentering callbac
     host = &supervisor;
 
     supervisor.dispatch(ChannelRequested{Generation{1}});
-    supervisor.dispatch(StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs});
-    supervisor.dispatch(FirstFrame{Generation{1}});
-    supervisor.dispatch(PlaybackHealthObserved{Generation{1}, false});
+    supervisor.dispatch(StreamLoadIssued{Generation{1}, LoadAttempt{1}, LoadIntent::FreshSelection, RecoveryTransport::MpegTs});
+    supervisor.dispatch(FirstFrame{Generation{1}, LoadAttempt{1}});
+    supervisor.dispatch(PlaybackHealthObserved{Generation{1}, LoadAttempt{1}, false});
     clock.advance_to(5.0);
     supervisor.poll();
-    supervisor.dispatch(StreamEnded{Generation{1}, EndReason::Error, {}});
+    supervisor.dispatch(StreamEnded{Generation{1}, LoadAttempt{1}, EndReason::Error, {}});
     states.clear();
     reasons.clear();
 
@@ -100,13 +127,13 @@ TEST_CASE("synchronous effect settlement is queued instead of reentering callbac
 TEST_CASE("backend recreation is bounded and a rejected attempt terminates") {
     HostFixture host;
     host.start(); host.start_healthy_playback(); host.advance(5);
-    host.supervisor.dispatch(ProcessExited{Generation{1}});
+    host.supervisor.dispatch(ProcessExited{Generation{1}, LoadAttempt{1}});
     CHECK(host.supervisor.armed_deadline() == TimePoint{seconds(5.5)});
     host.advance(5.5);
     REQUIRE(host.effects.size() == 1);
     CHECK(std::holds_alternative<RecreatePlayer>(host.effects[0].payload));
     CHECK(host.supervisor.current().name == SupervisorStateName::Recovering);
-    host.supervisor.dispatch(SourceFailed{Generation{1}});
+    host.supervisor.dispatch(SourceFailed{Generation{1}, LoadAttempt{2}});
     CHECK(host.supervisor.current().failure == FailureReason::SourceUnavailable);
     CHECK_FALSE(host.supervisor.armed_deadline());
 }
@@ -114,26 +141,26 @@ TEST_CASE("backend recreation is bounded and a rejected attempt terminates") {
 TEST_CASE("recreation attempts share budget until steady then reset") {
     HostFixture host;
     host.start(); host.start_healthy_playback(); host.advance(5);
-    host.supervisor.dispatch(ProcessExited{Generation{1}}); host.advance(5.5);
-    host.supervisor.dispatch(StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs});
-    host.supervisor.dispatch(ProcessExited{Generation{1}});
+    host.supervisor.dispatch(ProcessExited{Generation{1}, LoadAttempt{1}}); host.advance(5.5);
+    host.supervisor.dispatch(StreamLoadIssued{Generation{1}, LoadAttempt{2}, LoadIntent::PlayerRecreation, RecoveryTransport::MpegTs});
+    host.supervisor.dispatch(ProcessExited{Generation{1}, LoadAttempt{2}});
     CHECK(host.supervisor.current().attempt == 2);
     CHECK(host.supervisor.armed_deadline() == TimePoint{seconds(6.5)});
     host.advance(6.5);
     CHECK(host.effects.size() == 2);
 
-    host.supervisor.dispatch(StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs});
+    host.supervisor.dispatch(StreamLoadIssued{Generation{1}, LoadAttempt{3}, LoadIntent::PlayerRecreation, RecoveryTransport::MpegTs});
     host.start_healthy_playback();
     host.advance(11.5);
     CHECK(host.supervisor.current().name == SupervisorStateName::Steady);
-    host.supervisor.dispatch(ProcessExited{Generation{1}});
+    host.supervisor.dispatch(ProcessExited{Generation{1}, LoadAttempt{3}});
     CHECK(host.supervisor.current().attempt == 1);
 }
 
 TEST_CASE("new generation and disposal disarm the host") {
     HostFixture host;
     host.start(); host.start_healthy_playback(); host.advance(5);
-    host.supervisor.dispatch(StreamEnded{Generation{1}, EndReason::Error, {}});
+    host.supervisor.dispatch(StreamEnded{Generation{1}, LoadAttempt{1}, EndReason::Error, {}});
     REQUIRE(host.supervisor.armed_deadline());
     host.supervisor.dispatch(ChannelRequested{Generation{2}});
     CHECK_FALSE(host.supervisor.armed_deadline());
@@ -141,7 +168,7 @@ TEST_CASE("new generation and disposal disarm the host") {
     CHECK(host.effects.empty());
     CHECK(host.supervisor.current().name == SupervisorStateName::Loading);
     host.supervisor.dispose();
-    host.supervisor.dispatch(StreamLoadIssued{Generation{2}, RecoveryTransport::MpegTs});
+    host.supervisor.dispatch(StreamLoadIssued{Generation{2}, LoadAttempt{1}, LoadIntent::FreshSelection, RecoveryTransport::MpegTs});
     CHECK(host.supervisor.current().name == SupervisorStateName::Loading);
 }
 
@@ -149,15 +176,15 @@ TEST_CASE("host reports accepted transitions and ignores stale events") {
     HostFixture host;
     host.start();
     REQUIRE(host.transitions.size() == 2);
-    host.supervisor.dispatch(FirstFrame{Generation{99}});
+    host.supervisor.dispatch(FirstFrame{Generation{99}, LoadAttempt{1}});
     CHECK(host.transitions.size() == 2);
     host.start_healthy_playback(); host.advance(5);
-    host.supervisor.dispatch(StreamEnded{Generation{1}, EndReason::Eof, {}});
+    host.supervisor.dispatch(StreamEnded{Generation{1}, LoadAttempt{1}, EndReason::Eof, {}});
     REQUIRE_FALSE(host.transitions.empty());
     const auto& transition = host.transitions.back();
     CHECK(transition.reason == "stream-ended-eof");
-    CHECK(transition.policy_version == "coax-recovery-v1");
-    CHECK(transition.transport_policy_version == "coax-transport-recovery-v4");
+    CHECK(transition.policy_version == "coax-recovery-v3");
+    CHECK(transition.transport_policy_version == "coax-transport-recovery-v7");
 }
 
 TEST_CASE("repeated backend failure exhausts the shared recreation schedule") {
@@ -165,13 +192,17 @@ TEST_CASE("repeated backend failure exhausts the shared recreation schedule") {
     host.start(); host.start_healthy_playback(); host.advance(5);
     double now = 5.0;
     for (const auto delay : kDefaultRecoveryPolicy.attempt_delays) {
-        host.supervisor.dispatch(ProcessExited{Generation{1}});
+        host.supervisor.dispatch(ProcessExited{
+            Generation{1}, host.supervisor.current().load_attempt});
         now += delay.count();
         host.advance(now);
         REQUIRE(std::holds_alternative<RecreatePlayer>(host.effects.back().payload));
-        host.supervisor.dispatch(StreamLoadIssued{Generation{1}, RecoveryTransport::MpegTs});
+        host.supervisor.dispatch(StreamLoadIssued{
+            Generation{1}, host.effects.back().load_attempt,
+            LoadIntent::PlayerRecreation, RecoveryTransport::MpegTs});
     }
-    host.supervisor.dispatch(ProcessExited{Generation{1}});
+    host.supervisor.dispatch(ProcessExited{
+        Generation{1}, host.supervisor.current().load_attempt});
     CHECK(host.supervisor.current().name == SupervisorStateName::Failed);
     CHECK(host.supervisor.current().failure == FailureReason::AttemptsExhausted);
     CHECK(host.effects.size() == kDefaultRecoveryPolicy.attempt_delays.size());

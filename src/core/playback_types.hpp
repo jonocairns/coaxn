@@ -27,6 +27,21 @@ private:
     std::uint64_t value_ = 0;
 };
 
+// Monotonic within one playback generation. Generation identifies the user
+// intent; this identifies each fresh command issued while fulfilling it, so a
+// late edge from a replaced recovery load cannot be credited to its successor.
+class LoadAttempt {
+public:
+    constexpr LoadAttempt() = default;
+    explicit constexpr LoadAttempt(std::uint64_t value) : value_(value) {}
+
+    [[nodiscard]] constexpr std::uint64_t value() const { return value_; }
+    constexpr auto operator<=>(const LoadAttempt&) const = default;
+
+private:
+    std::uint64_t value_ = 0;
+};
+
 enum class GenerationDecision { Stale, Current, Future };
 
 constexpr GenerationDecision decide_generation(Generation latest, Generation candidate) {
@@ -40,6 +55,7 @@ constexpr bool should_apply_generation(Generation displayed, Generation candidat
 
 enum class BufferPhase { Zap, Steady };
 enum class RecoveryTransport { MpegTs, Hls };
+enum class LoadIntent { FreshSelection, RecoveryReopen, PlayerRecreation };
 
 struct BufferPhaseTargets {
     double cache_seconds;

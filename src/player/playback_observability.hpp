@@ -2,11 +2,13 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
 #include "core/playback_health.hpp"
 #include "core/playback_types.hpp"
+#include "core/supervisor.hpp"
 
 namespace coax::player {
 
@@ -102,7 +104,6 @@ private:
     std::vector<Entry> seen_;
 };
 
-enum class LoadRequestIntent { FreshSelection, RecoveryReopen, PlayerRecreation };
 enum class RequestScheme { Http, Https, LocalFile, Other };
 enum class RequestTargetShape { XtreamLive, HlsPlaylist, MediaPath, Opaque };
 
@@ -115,7 +116,8 @@ struct SourceCorrelation {
 // This describes only the loadfile command Coax hands to libmpv. It contains no
 // host, path, query value, userinfo, credential or header value.
 struct SanitizedRequestShape {
-    LoadRequestIntent intent = LoadRequestIntent::FreshSelection;
+    core::LoadIntent intent = core::LoadIntent::FreshSelection;
+    core::LoadAttempt load_attempt;
     RequestScheme scheme = RequestScheme::Other;
     RequestTargetShape target = RequestTargetShape::Opaque;
     core::RecoveryTransport transport = core::RecoveryTransport::MpegTs;
@@ -126,11 +128,25 @@ struct SanitizedRequestShape {
 };
 
 SanitizedRequestShape inspect_request_shape(
-    std::string_view target, LoadRequestIntent intent,
+    std::string_view target, core::LoadIntent intent, core::LoadAttempt load_attempt,
     core::RecoveryTransport transport, bool forced_format,
     SourceCorrelation correlation = {});
-const char* to_string(LoadRequestIntent value);
 const char* to_string(RequestScheme value);
 const char* to_string(RequestTargetShape value);
+
+// Optional decision-time evidence is already numeric or from closed enums.
+// There is no field capable of carrying a URL, host, header, cookie, query
+// value, credential, or raw engine message into the retained telemetry line.
+struct RecoveryDecisionEvidence {
+    bool cache_paused = false;
+    std::optional<double> playback_movement_seconds;
+    std::optional<double> cache_end_movement_seconds;
+    std::optional<SanitizedEngineWarning> engine_warning;
+};
+
+std::string format_recovery_telemetry(
+    const core::SupervisorTransition& transition,
+    const std::optional<SanitizedRequestShape>& request,
+    const RecoveryDecisionEvidence& evidence = {});
 
 }  // namespace coax::player

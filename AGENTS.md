@@ -55,7 +55,7 @@ short version.
 
 ## Keep the portable core portable
 
-- `coax_core` is `src/core/*.cpp` plus `src/util/redact.cpp`. It must not
+- `coax_core` is `src/core/*.cpp` plus `src/util/log_ring.cpp`. It must not
   reference Windows, libmpv, ImGui or any UI type.
 - `coax_player_core` sits above it: the half of `src/player/` that links only
   `coax_core`, with no platform or engine library. It may name player concepts

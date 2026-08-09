@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <string>
 
 namespace coax::player {
@@ -197,11 +199,12 @@ bool EngineDiagnosticLogGate::first_occurrence(
 }
 
 SanitizedRequestShape inspect_request_shape(
-    std::string_view target, LoadRequestIntent intent,
+    std::string_view target, core::LoadIntent intent, core::LoadAttempt load_attempt,
     core::RecoveryTransport transport, bool forced_format,
     SourceCorrelation correlation) {
     SanitizedRequestShape shape;
     shape.intent = intent;
+    shape.load_attempt = load_attempt;
     shape.transport = transport;
     shape.forced_format = forced_format;
     shape.correlation = correlation;
@@ -236,15 +239,6 @@ SanitizedRequestShape inspect_request_shape(
     return shape;
 }
 
-const char* to_string(LoadRequestIntent value) {
-    switch (value) {
-        case LoadRequestIntent::FreshSelection: return "fresh-selection";
-        case LoadRequestIntent::RecoveryReopen: return "recovery-reopen";
-        case LoadRequestIntent::PlayerRecreation: return "player-recreation";
-    }
-    return "fresh-selection";
-}
-
 const char* to_string(RequestScheme value) {
     switch (value) {
         case RequestScheme::Http: return "http";
@@ -253,6 +247,54 @@ const char* to_string(RequestScheme value) {
         case RequestScheme::Other: return "other";
     }
     return "other";
+}
+
+std::string format_recovery_telemetry(
+    const core::SupervisorTransition& transition,
+    const std::optional<SanitizedRequestShape>& request,
+    const RecoveryDecisionEvidence& evidence) {
+    const auto duration = [](std::optional<core::Duration> value) {
+        if (!value) return std::string("unavailable");
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(0) << value->count() * 1000.0 << "ms";
+        return out.str();
+    };
+    const auto movement = [](std::optional<double> value) {
+        if (!value) return std::string("unavailable");
+        std::ostringstream out;
+        out << std::showpos << std::fixed << std::setprecision(3) << *value << "s";
+        return out.str();
+    };
+    const auto correlation = request ? request->correlation : SourceCorrelation{};
+    const auto warning_severity = evidence.engine_warning
+        ? to_string(evidence.engine_warning->severity) : "none";
+    const auto warning_component = evidence.engine_warning
+        ? to_string(evidence.engine_warning->component) : "none";
+    const auto warning_category = evidence.engine_warning
+        ? to_string(evidence.engine_warning->category) : "none";
+
+    std::ostringstream out;
+    out << "Recovery telemetry provider-session=" << correlation.provider_session
+        << " channel-session=" << correlation.channel_session
+        << " generation=" << transition.generation.value()
+        << " load-attempt=" << transition.load_attempt.value()
+        << " intent=" << core::to_string(transition.load_intent)
+        << " supervisor-attempt=" << transition.attempt
+        << " escalation=" << core::to_string(transition.escalation)
+        << " outcome=" << core::to_string(transition.outcome)
+        << " last-progress-to-decision="
+        << duration(transition.last_progress_to_decision)
+        << " decision-to-command=" << duration(transition.decision_to_command)
+        << " command-to-first-frame=" << duration(transition.command_to_first_frame)
+        << " first-frame-to-outcome=" << duration(transition.first_frame_to_outcome)
+        << " recovered-load-lifetime=" << duration(transition.recovered_load_lifetime)
+        << " cache-paused=" << (evidence.cache_paused ? "yes" : "no")
+        << " playback-move=" << movement(evidence.playback_movement_seconds)
+        << " cache-end-move=" << movement(evidence.cache_end_movement_seconds)
+        << " warning-severity=" << warning_severity
+        << " warning-component=" << warning_component
+        << " warning-category=" << warning_category;
+    return out.str();
 }
 
 const char* to_string(RequestTargetShape value) {
