@@ -115,6 +115,12 @@ private:
 
     std::unique_ptr<xtream::Client> client_;
     xtream::Credentials             credentials_;
+    xtream::TransportCapabilities   transport_capabilities_;
+    // Phase 2a deliberately exposes no selector. Keeping preference distinct
+    // from advertised capability gives the later application path a policy
+    // insertion point without activating HLS playback now.
+    xtream::TransportPreference transport_preference_ =
+        xtream::TransportPreference::MpegTs;
 
     Stage       stage_ = Stage::Login;
     std::string status_;
@@ -122,11 +128,12 @@ private:
     std::string direct_media_;
 
     // Catalog loading runs off the UI thread; these hand the result back.
-    std::thread              connect_thread_;
-    std::atomic<bool>        connect_done_{false};
-    std::mutex               connect_mutex_;
-    xtream::Catalog          connect_catalog_;
-    std::string              connect_error_;
+    std::thread                   connect_thread_;
+    std::atomic<bool>             connect_done_{false};
+    std::mutex                    connect_mutex_;
+    xtream::Catalog               connect_catalog_;
+    xtream::TransportCapabilities connect_transport_capabilities_;
+    std::string                   connect_error_;
 
     // Update check. Runs once at startup on its own thread. The worker only
     // ever touches update_result_; the UI thread joins before moving it into

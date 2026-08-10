@@ -13,9 +13,13 @@ on 2026-08-09. A later provider soak exercised cache-stall recovery twice and
 proved reopen, one-time recreation and command-budget exhaustion were bounded,
 but exposed late first-frame lifecycle defects both during retry backoff and
 after `Failed`. Those defects are now reducer-, host- and application-sequencing
-tested. Phase 1 remains incomplete until the corrected behavior is exercised
-against the provider. Phases 2–5 remain proposed; no HLS capability discovery,
-playback or fallback is implemented.
+tested, and a provider capture has validated the late-frame path after `Failed`.
+Phase 1 remains incomplete until the retry-backoff path and the stronger
+data-delivering/no-frame shape are exercised against the provider. Phase 2a now
+parses advertised account output formats into credential-safe session
+capabilities while keeping the preference pinned to MPEG-TS. The one-shot HLS
+probe and Phases 3–5 remain proposed; no HLS playback or fallback is
+implemented.
 
 ## Outcome
 
@@ -45,8 +49,15 @@ flowchart LR
 
 ## Current baseline
 
-- `xtream::Client::stream_url` always constructs a `.ts` live URL.
+- `xtream::Client` opportunistically reads the bare account response and retains
+  only whether an output-format list was advertised and whether it contained a
+  normalized MPEG-TS or HLS capability. The response and provider/account data
+  are discarded.
+- `xtream::Client::stream_url` still always constructs a `.ts` live URL.
 - `App` marks every Xtream channel load as `RecoveryTransport::MpegTs`.
+- Capability and preference are separate session concepts. Phase 2a pins the
+  preference to MPEG-TS and closes rather than entering the latent HLS path if
+  another preference is wired prematurely.
 - The supervisor models MPEG-TS and HLS separately, but the application cannot
   currently select the HLS branch.
 - The latent HLS branch uses `live_start_index=-1`; this must not ship as normal
@@ -213,9 +224,14 @@ credential-bearing diagnostic.
 The run validates the corrected runtime's bounded no-frame path for unavailable
 telemetry, ordinary EOF recovery and post-probation episode reset. It did not
 reproduce the stronger data-delivering/no-frame shape, an accepted late frame
-after `Failed`, or a first frame inside retry backoff. Those remain the field
-gate; Phase 1 is not marked complete merely because deterministic coverage and
-the adjacent runtime path pass.
+after `Failed`, or a first frame inside retry backoff.
+
+A subsequent credential-safe provider capture validated the late-frame path
+after command exhaustion. The recreation load produced its first frame 2.575
+seconds after `Failed`, completed probation and returned to supervised Steady.
+The stronger data-delivering/no-frame shape and a first frame inside retry
+backoff remain the field gate; Phase 1 is not marked complete merely because
+deterministic coverage and the adjacent runtime paths pass.
 
 ## Phase 2 — Credential-safe transport discovery
 
@@ -232,10 +248,22 @@ the adjacent runtime path pass.
 
 ### Acceptance gate
 
-- Accounts advertising only TS behave exactly as before.
-- HLS capability can be represented without storing provider identity or secrets.
-- Authentication failure is terminal and does not become a format-probing loop.
-- Probe diagnostics contain request shape and outcome only, never the target.
+Automated capability-parsing verification completed on 2026-08-10:
+
+- accounts advertising only TS retain the existing MPEG-TS playback path;
+- array and comma-separated output formats normalize recognized TS and HLS
+  aliases while discarding unknown values;
+- HLS capability is represented without storing provider identity, account
+  fields, secrets or the raw response;
+- explicit authentication rejection is terminal, while absent or unreadable
+  metadata establishes no capability and leaves existing catalog login intact;
+  and
+- session diagnostics contain advertised/TS/HLS booleans and the normalized
+  preference only.
+
+The remaining Phase 2 gate is the explicit one-shot probe: its diagnostics must
+contain request shape and outcome only, never the target, and it must prove that
+a candidate media playlist advances rather than accepting HTTP success alone.
 
 ## Phase 3 — Real HLS transport
 
@@ -326,9 +354,11 @@ The intended end-state is:
 2. **Done:** add repeated-short-load classification and bounded recreation
    escalation.
 3. **Partial:** portable supervisor/player tests and the Windows cross-build are
-   green; the corrected late-frame lifecycle still needs a credential-safe
-   provider capture.
-4. Parse credential-safe output-format capability.
+   green, and late admission after `Failed` has a credential-safe provider
+   capture; the data-delivering/no-frame and retry-backoff first-frame shapes
+   remain outstanding.
+4. **Done:** parse credential-safe output-format capability into a portable,
+   native-tested session model while keeping MPEG-TS selected.
 5. Make transport selection explicit in the application.
 6. Correct HLS startup and connection policy, then add application-level HLS tests.
 7. Run the provider comparison and document the selected default.

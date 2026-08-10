@@ -435,14 +435,16 @@ void App::begin_connect() {
     }
 
     connect_thread_ = std::thread([this, credentials] {
-        xtream::Client  client(credentials);
-        xtream::Catalog catalog;
-        std::string     error;
-        const bool      ok = client.fetch_catalog(catalog, error);
+        xtream::Client                client(credentials);
+        xtream::Catalog               catalog;
+        xtream::TransportCapabilities transport_capabilities;
+        std::string                   error;
+        const bool ok = client.fetch_catalog(catalog, transport_capabilities, error);
 
         {
             std::scoped_lock lock(connect_mutex_);
             connect_catalog_ = std::move(catalog);
+            connect_transport_capabilities_ = transport_capabilities;
             connect_error_   = ok ? std::string{} : error;
         }
         connect_done_.store(true, std::memory_order_release);
@@ -458,10 +460,12 @@ void App::finish_connect() {
     }
 
     xtream::Catalog catalog;
-    std::string     error;
+    xtream::TransportCapabilities transport_capabilities;
+    std::string error;
     {
         std::scoped_lock lock(connect_mutex_);
         catalog = std::move(connect_catalog_);
+        transport_capabilities = connect_transport_capabilities_;
         error   = connect_error_;
     }
 
@@ -475,9 +479,17 @@ void App::finish_connect() {
     }
 
     client_ = std::make_unique<xtream::Client>(credentials_);
+    transport_capabilities_ = transport_capabilities;
+    transport_preference_ = xtream::TransportPreference::MpegTs;
     channels_.reset(std::move(catalog.categories), std::move(catalog.channels));
     const auto provider_session = target_registry_.begin_provider_session();
     log::info("Provider session {} connected", provider_session);
+    log::info(
+        "Transport capabilities advertised={} mpeg-ts={} hls={}; session preference={}",
+        transport_capabilities_.advertised ? "yes" : "no",
+        transport_capabilities_.mpeg_ts ? "yes" : "no",
+        transport_capabilities_.hls ? "yes" : "no",
+        xtream::to_string(transport_preference_));
     stage_  = Stage::Browsing;
     set_status(std::format("{} channels", channels_.channel_count()));
     save_portal();
@@ -485,6 +497,15 @@ void App::finish_connect() {
 
 void App::play(const core::Channel& channel) {
     if (!client_) {
+        return;
+    }
+    // Phase 2a discovers capability but cannot select HLS: its startup policy
+    // and complete application path are Phase 3 work. This guard turns any
+    // accidental early preference wiring into a closed failure rather than an
+    // unsafe load through the latent HLS branch.
+    if (transport_preference_ != xtream::TransportPreference::MpegTs) {
+        set_status("Selected stream format is not available in this build", true);
+        log::error("Unsupported session transport preference");
         return;
     }
     playing_channel_id_   = channel.id;

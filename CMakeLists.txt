@@ -16,6 +16,19 @@ option(COAX_BUILD_APP "Build the Windows application and libmpv adapter" ${WIN32
 include(CTest)
 include(FetchContent)
 
+FetchContent_Declare(json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
+    URL_HASH SHA256=9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6
+    DOWNLOAD_NO_EXTRACT TRUE)
+FetchContent_MakeAvailable(json)
+
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/staged-include/nlohmann")
+file(COPY "${json_SOURCE_DIR}/json.hpp"
+     DESTINATION "${CMAKE_BINARY_DIR}/staged-include/nlohmann")
+
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json INTERFACE "${CMAKE_BINARY_DIR}/staged-include")
+
 # Portable policy and state model. This target deliberately has no link
 # dependencies: configuring it natively is the mechanical platform-boundary
 # check, rather than relying on include discipline alone.
@@ -47,6 +60,15 @@ add_library(coax_player_core
 target_include_directories(coax_player_core PUBLIC src)
 target_link_libraries(coax_player_core PUBLIC coax_core)
 target_compile_options(coax_player_core PRIVATE -Wall -Wextra -Wpedantic)
+
+# Provider response parsing is portable even though WinHTTP remains in the
+# Windows adapter. Keeping the authenticated response out of this interface
+# makes the native tests the boundary check for credential-safe normalization.
+add_library(coax_xtream_core
+    src/xtream/account_metadata.cpp)
+target_include_directories(coax_xtream_core PUBLIC src)
+target_link_libraries(coax_xtream_core PRIVATE nlohmann_json)
+target_compile_options(coax_xtream_core PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
     # Immutable Catch2 v3 release used by both native and cross builds.
@@ -86,6 +108,16 @@ if(BUILD_TESTING)
         target_link_options(coax_player_core_tests PRIVATE -static)
     endif()
     catch_discover_tests(coax_player_core_tests DISCOVERY_MODE PRE_TEST)
+
+    add_executable(coax_xtream_core_tests
+        test/xtream/account_metadata_tests.cpp)
+    target_link_libraries(coax_xtream_core_tests PRIVATE
+        Catch2::Catch2WithMain coax_xtream_core)
+    target_compile_options(coax_xtream_core_tests PRIVATE -Wall -Wextra -Wpedantic)
+    if(WIN32)
+        target_link_options(coax_xtream_core_tests PRIVATE -static)
+    endif()
+    catch_discover_tests(coax_xtream_core_tests DISCOVERY_MODE PRE_TEST)
 endif()
 
 if(COAX_BUILD_APP)
@@ -106,19 +138,6 @@ if(COAX_BUILD_APP)
         IMPORTED_LOCATION "${MPV_DIR}/libmpv-2.dll"
         IMPORTED_IMPLIB   "${MPV_DIR}/libmpv.dll.a"
         INTERFACE_INCLUDE_DIRECTORIES "${MPV_DIR}/include")
-
-    FetchContent_Declare(json
-        URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
-        URL_HASH SHA256=9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6
-        DOWNLOAD_NO_EXTRACT TRUE)
-    FetchContent_MakeAvailable(json)
-
-    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/staged-include/nlohmann")
-    file(COPY "${json_SOURCE_DIR}/json.hpp"
-         DESTINATION "${CMAKE_BINARY_DIR}/staged-include/nlohmann")
-
-    add_library(nlohmann_json INTERFACE)
-    target_include_directories(nlohmann_json INTERFACE "${CMAKE_BINARY_DIR}/staged-include")
 
     FetchContent_Declare(imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -172,7 +191,7 @@ if(COAX_BUILD_APP)
 
     target_include_directories(coax PRIVATE src)
     target_link_libraries(coax PRIVATE
-        coax_mpv imgui nlohmann_json
+        coax_mpv coax_xtream_core imgui nlohmann_json
         d3d11 dxgi dxguid dcomp dwmapi winhttp crypt32 shell32 ole32 uuid)
     target_compile_definitions(coax PRIVATE
         UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN

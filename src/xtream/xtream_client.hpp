@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "core/channel.hpp"
+#include "xtream/account_metadata.hpp"
 
 namespace coax::xtream {
 
@@ -25,8 +26,11 @@ public:
     explicit Client(Credentials creds) : creds_(std::move(creds)) {}
 
     // Loads live categories and channels, which doubles as credential
-    // verification: bad credentials come back as a provider error.
-    bool fetch_catalog(Catalog& out, std::string& error) const;
+    // verification: bad credentials come back as a provider error. Account
+    // transport metadata is opportunistic; an absent or unreadable capability
+    // response must not change existing MPEG-TS account behavior.
+    bool fetch_catalog(Catalog& out, TransportCapabilities& transports,
+                       std::string& error) const;
 
     // Builds the authenticated playback URL. This value is handed straight to
     // libmpv and must never reach the UI, the log or a diagnostics export.

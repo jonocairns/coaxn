@@ -92,15 +92,37 @@ std::string tidy_name(std::string text) {
 }  // namespace
 
 bool Client::get(std::string_view query, std::string& body, std::string& error) const {
-    const std::string url = std::format(
-        "{}/player_api.php?username={}&password={}&{}",
-        creds_.base_url, url_encode(creds_.username), url_encode(creds_.password), query);
+    std::string url = std::format(
+        "{}/player_api.php?username={}&password={}",
+        creds_.base_url, url_encode(creds_.username), url_encode(creds_.password));
+    if (!query.empty()) {
+        url += '&';
+        url += query;
+    }
 
     return util::http::get(url, body, error);
 }
 
-bool Client::fetch_catalog(Catalog& out, std::string& error) const {
+bool Client::fetch_catalog(Catalog& out, TransportCapabilities& transports,
+                           std::string& error) const {
     std::string body;
+    transports = {};
+
+    // The bare player_api response commonly carries user_info and its allowed
+    // output formats. Discovery is additive: providers that omit or cannot
+    // serve it continue through the existing catalogue-based authentication
+    // path. Only an explicit auth rejection is terminal here.
+    std::string metadata_error;
+    if (get({}, body, metadata_error)) {
+        const AccountMetadataResult metadata = parse_account_metadata(body);
+        if (metadata.status == AccountMetadataStatus::AuthenticationRejected) {
+            error = "Login rejected by provider";
+            return false;
+        }
+        if (metadata.status == AccountMetadataStatus::Parsed) {
+            transports = metadata.transports;
+        }
+    }
 
     if (!get("action=get_live_categories", body, error)) {
         return false;
