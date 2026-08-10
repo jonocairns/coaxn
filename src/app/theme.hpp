@@ -76,26 +76,37 @@ inline constexpr ImU32 kTextFaint = IM_COL32(0x7C, 0x7C, 0x84, 0xFF);  //  4.6:1
 inline constexpr ImU32 kError     = IM_COL32(0xEC, 0x6A, 0x62, 0xFF);  //  6.1:1
 
 // Accent. This is the brand colour and it is only ever decoration — the mark,
-// the volume fill, the rule beside the playing channel — so it is chosen to
-// look right rather than to be read off.
-inline constexpr ImU32 kAccent      = IM_COL32(0x4C, 0x7C, 0xF0, 0xFF);
-inline constexpr ImU32 kAccentHover = IM_COL32(0x6B, 0x93, 0xFF, 0xFF);
+// the volume fill, the rule beside the playing channel.
+//
+// Its lightness is not a taste decision. The mark has no ground of its own and
+// the accent is the one value that cannot differ between the two SVGs, so it
+// has to read on near-black and on white at once. Sweeping every hue at every
+// usable saturation, the best worst-case contrast any colour can reach against
+// both grounds is 4.43:1 — and every hue reaches it. So the constraint pins the
+// lightness and leaves the hue free; this one sits on that balance point at
+// 4.43:1 on the backdrop and 4.44:1 on white. The blue it replaced was at
+// 3.85:1 against white, which is why the mark used to go soft on a light page.
+inline constexpr ImU32 kAccent      = IM_COL32(0x63, 0x63, 0xFD, 0xFF);
+inline constexpr ImU32 kAccentHover = IM_COL32(0x90, 0x90, 0xFD, 0xFF);  // 7.1:1
 
 // The primary action, which is the one place the accent has a label on it. A
-// step darker than the brand, because white on kAccent is 3.85:1 and normal
-// text needs 4.5. Hover and press go down the ramp rather than up for the same
-// reason: a lighter blue would take the label back under, so this button
-// deepens under the pointer instead of brightening.
-inline constexpr ImU32 kAccentFill       = IM_COL32(0x45, 0x70, 0xD7, 0xFF);  // 4.6:1
-inline constexpr ImU32 kAccentFillHover  = IM_COL32(0x3A, 0x63, 0xCC, 0xFF);  // 5.5:1
-inline constexpr ImU32 kAccentFillActive = IM_COL32(0x2F, 0x52, 0xA8, 0xFF);  // 7.3:1
+// step darker than the brand, because white on kAccent is 4.43:1 and normal
+// text needs 4.5. That step is now barely visible — sitting the accent on the
+// balance point already puts it within a hair of carrying a white label — but
+// it still has to exist. Hover and press go down the ramp rather than up: a
+// lighter fill would take the label back under, so this button deepens under
+// the pointer instead of brightening.
+inline constexpr ImU32 kAccentFill       = IM_COL32(0x61, 0x61, 0xFD, 0xFF);  // 4.5:1
+inline constexpr ImU32 kAccentFillHover  = IM_COL32(0x4D, 0x4D, 0xFC, 0xFF);  // 5.6:1
+inline constexpr ImU32 kAccentFillActive = IM_COL32(0x2C, 0x2C, 0xFC, 0xFF);  // 7.3:1
 inline constexpr ImU32 kOnAccent         = IM_COL32(0xFF, 0xFF, 0xFF, 0xFF);
 
-// The mark's second arm. Its counterpart is the accent, so this is the only
-// other colour the application draws — a light slate rather than the dark one
-// the mark was designed against, because here it is seen on near-black and a
-// dark arm on a dark ground is half a logo.
-inline constexpr ImU32 kLogoArm = IM_COL32(0xA9, 0xB3, 0xC9, 0xFF);
+// The mark's body — the large piece of the cut hexagon. Its counterpart is the
+// accent offcut, so this is the only other colour the application draws: a
+// light slate rather than the dark one the mark was designed against, because
+// here it is seen on near-black and a dark body on a dark ground is most of a
+// missing logo.
+inline constexpr ImU32 kLogoBody = IM_COL32(0xA9, 0xB3, 0xC9, 0xFF);  // 9.3:1
 
 // The playback overlay. It sits over the picture rather than over a surface of
 // its own, so it is a ramp into darkness at the bottom of the frame rather
@@ -233,11 +244,11 @@ void draw_backdrop();
 // behind it — it buys legibility for the row without hiding the picture.
 void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade);
 
-// The coax mark: two spiral arms turning about one centre, half a turn apart —
-// a cable seen end on and a signal going round it, depending on how long you
-// look. Drawn rather than loaded so it takes the palette's own colours and
-// costs no texture. It has no tile of its own; it sits on whatever surface it
-// is placed on. `radius` is the mark's outer edge, stroke included.
+// The coax mark: a hexagon cut once, the offcut pushed clear of the body and
+// given the accent. Drawn rather than loaded so it takes the palette's own
+// colours and costs no texture. It has no tile of its own; it sits on whatever
+// surface it is placed on. `radius` is the mark's outer edge, which the lowest
+// vertex plus half the gap reaches almost exactly.
 void draw_logo(ImDrawList* draw_list, ImVec2 centre, float radius);
 
 // ---------------------------------------------------------------------------

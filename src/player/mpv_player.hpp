@@ -39,6 +39,8 @@ struct PlayerConfig {
 struct PlaybackTarget {
     std::string url;
     core::Generation generation;
+    core::LoadAttempt load_attempt;
+    core::LoadIntent load_intent = core::LoadIntent::FreshSelection;
     core::RecoveryTransport transport = core::RecoveryTransport::MpegTs;
     bool probed_format_forced = false;
     SourceCorrelation correlation;
@@ -60,15 +62,17 @@ public:
 
     bool initialize(const PlayerConfig& config, std::string& error);
     bool play(const std::string& url, core::Generation generation,
-              core::RecoveryTransport transport, bool force_probed_format = false,
+              core::LoadAttempt load_attempt, core::RecoveryTransport transport,
+              bool force_probed_format = false,
               SourceCorrelation correlation = {});
     void stop(core::Generation generation);
 
     [[nodiscard]] std::optional<core::RecoveryTransport> reopen_current(
-        core::Generation generation, bool force_probed_format = false,
+        core::Generation generation, core::LoadAttempt load_attempt,
+        bool force_probed_format = false,
         bool require_hls = false);
     [[nodiscard]] std::optional<core::RecoveryTransport> recreate_player(
-        core::Generation generation, std::string& error);
+        core::Generation generation, core::LoadAttempt load_attempt, std::string& error);
     bool apply_buffer_phase(core::Generation generation, core::BufferPhase phase);
 
     void set_composition_size(int width, int height);
@@ -108,7 +112,7 @@ private:
     // across which an address can be reused by a different object.
     void bump_swapchain_epoch();
     std::uint64_t next_request_id();
-    bool issue_load(bool force_probed_format, LoadRequestIntent intent);
+    bool issue_load(bool force_probed_format);
     bool issue_buffer_property(core::Generation generation, core::BufferPhase phase,
                                BufferProperty property, double value);
 

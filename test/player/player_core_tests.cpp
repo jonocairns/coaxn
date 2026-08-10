@@ -16,11 +16,11 @@ using namespace coax;
 
 TEST_CASE("adapter drains every edge once in mpv order with issue-time generations") {
     player::PlayerEventAdapter adapter;
-    adapter.track_load(10, core::Generation{1});
+    adapter.track_load(10, core::Generation{1}, core::LoadAttempt{1});
     adapter.command_result(10, 0);
     adapter.start_file(100);
     adapter.playback_restart(100);
-    adapter.track_load(11, core::Generation{2});
+    adapter.track_load(11, core::Generation{2}, core::LoadAttempt{1});
     adapter.command_result(11, 0);
     adapter.start_file(101);
     adapter.end_file(100, player::PlayerEndReason::Stop, 0);
@@ -44,7 +44,7 @@ TEST_CASE("adapter drains every edge once in mpv order with issue-time generatio
 
 TEST_CASE("a superseded load cannot publish a late first playback start") {
     player::PlayerEventAdapter adapter;
-    adapter.track_load(10, core::Generation{4});
+    adapter.track_load(10, core::Generation{4}, core::LoadAttempt{1});
     adapter.command_result(10, 0);
     adapter.start_file(100);
     REQUIRE(adapter.drain().size() == 1);
@@ -52,7 +52,7 @@ TEST_CASE("a superseded load cannot publish a late first playback start") {
     // Recovery retains the generation. Until its START_FILE arrives, the old
     // entry is still active and may publish a delayed restart; that edge belongs
     // to the load being replaced and must not arm the new load's rebuffer gate.
-    adapter.track_load(11, core::Generation{4});
+    adapter.track_load(11, core::Generation{4}, core::LoadAttempt{2});
     adapter.command_result(11, 0);
     REQUIRE(adapter.drain().size() == 1);
     adapter.playback_restart(100);
@@ -67,11 +67,12 @@ TEST_CASE("a superseded load cannot publish a late first playback start") {
           player::IntentionalStopKind::Replaced);
     CHECK(std::holds_alternative<player::FirstPlaybackStart>(events[1].payload));
     CHECK(events[1].generation == core::Generation{4});
+    CHECK(events[1].load_attempt == core::LoadAttempt{2});
 }
 
 TEST_CASE("structured end reason stays attached to its load generation") {
     player::PlayerEventAdapter adapter;
-    adapter.track_load(10, core::Generation{7});
+    adapter.track_load(10, core::Generation{7}, core::LoadAttempt{1});
     adapter.command_result(10, 0);
     adapter.start_file(70);
     adapter.end_file(70, player::PlayerEndReason::Error, -13);
@@ -85,7 +86,7 @@ TEST_CASE("structured end reason stays attached to its load generation") {
 
 TEST_CASE("HLS redirect transfers generation ownership to inserted entries") {
     player::PlayerEventAdapter adapter;
-    adapter.track_load(12, core::Generation{8});
+    adapter.track_load(12, core::Generation{8}, core::LoadAttempt{1});
     adapter.command_result(12, 0);
     adapter.start_file(80);
     adapter.end_file(80, player::PlayerEndReason::Redirect, 0, 81, 2);
@@ -102,9 +103,34 @@ TEST_CASE("HLS redirect transfers generation ownership to inserted entries") {
           player::PlayerEndReason::Eof);
 }
 
+TEST_CASE("redirect rehash preserves stopped-entry load identity") {
+    player::PlayerEventAdapter adapter;
+    adapter.track_load(12, core::Generation{8}, core::LoadAttempt{3});
+    adapter.command_result(12, 0);
+    adapter.start_file(80);
+    adapter.intentional_stop(80, core::Generation{9},
+                             player::IntentionalStopKind::Requested);
+
+    // More entries than libstdc++'s initial bucket count makes a rehash likely;
+    // correctness must not depend on whether it happens.
+    adapter.end_file(80, player::PlayerEndReason::Redirect, 0, 81, 64);
+    adapter.start_file(81);
+    adapter.playback_restart(81);
+
+    const auto events = adapter.drain();
+    REQUIRE(events.size() == 3);
+    CHECK(events[1].generation == core::Generation{9});
+    CHECK(events[1].load_attempt == core::LoadAttempt{3});
+    CHECK(std::get<player::PlaybackStopped>(events[1].payload).kind ==
+          player::IntentionalStopKind::Requested);
+    CHECK(events[2].generation == core::Generation{8});
+    CHECK(events[2].load_attempt == core::LoadAttempt{3});
+    CHECK(std::holds_alternative<player::FirstPlaybackStart>(events[2].payload));
+}
+
 TEST_CASE("load and buffer property command rejection are observable") {
     player::PlayerEventAdapter adapter;
-    adapter.track_load(10, core::Generation{3});
+    adapter.track_load(10, core::Generation{3}, core::LoadAttempt{1});
     adapter.command_rejected_immediately(10, -4);
     adapter.track_property(20, core::Generation{3}, core::BufferPhase::Steady,
                            player::BufferProperty::CacheSeconds);
@@ -122,13 +148,13 @@ TEST_CASE("load and buffer property command rejection are observable") {
 
 TEST_CASE("one backend failure produces one edge until a new load is issued") {
     player::PlayerEventAdapter adapter;
-    adapter.backend_failed(core::Generation{2}, -1);
-    adapter.backend_failed(core::Generation{2}, -2);
+    adapter.backend_failed(core::Generation{2}, core::LoadAttempt{1}, -1);
+    adapter.backend_failed(core::Generation{2}, core::LoadAttempt{1}, -2);
     auto events = adapter.drain();
     REQUIRE(events.size() == 1);
     CHECK(std::holds_alternative<player::BackendFailed>(events[0].payload));
-    adapter.track_load(30, core::Generation{2});
-    adapter.backend_failed(core::Generation{2}, -3);
+    adapter.track_load(30, core::Generation{2}, core::LoadAttempt{2});
+    adapter.backend_failed(core::Generation{2}, core::LoadAttempt{2}, -3);
     events = adapter.drain();
     REQUIRE(events.size() == 1);
     CHECK(std::get<player::BackendFailed>(events[0].payload).error == -3);
@@ -136,10 +162,10 @@ TEST_CASE("one backend failure produces one edge until a new load is issued") {
 
 TEST_CASE("backend failure and disposal release stale correlations") {
     player::PlayerEventAdapter adapter;
-    adapter.track_load(10, core::Generation{2});
+    adapter.track_load(10, core::Generation{2}, core::LoadAttempt{1});
     adapter.track_property(20, core::Generation{2}, core::BufferPhase::Zap,
                            player::BufferProperty::CacheSeconds);
-    adapter.backend_failed(core::Generation{2}, -7);
+    adapter.backend_failed(core::Generation{2}, core::LoadAttempt{1}, -7);
     adapter.command_result(10, 0);
     adapter.command_result(20, 0);
     adapter.start_file(200);
@@ -148,7 +174,7 @@ TEST_CASE("backend failure and disposal release stale correlations") {
     CHECK(std::get<player::BackendFailed>(events[0].payload).error == -7);
     CHECK_FALSE(adapter.active_generation());
 
-    adapter.track_load(30, core::Generation{3});
+    adapter.track_load(30, core::Generation{3}, core::LoadAttempt{1});
     adapter.command_result(30, 0);
     adapter.dispose();
     CHECK(adapter.drain().empty());
@@ -158,7 +184,7 @@ TEST_CASE("backend failure and disposal release stale correlations") {
 
 TEST_CASE("explicit and replacement stops are classified separately") {
     player::PlayerEventAdapter adapter;
-    adapter.track_load(1, core::Generation{4}); adapter.command_result(1, 0);
+    adapter.track_load(1, core::Generation{4}, core::LoadAttempt{1}); adapter.command_result(1, 0);
     adapter.start_file(40);
     adapter.intentional_stop(40, core::Generation{5},
                              player::IntentionalStopKind::Requested);
@@ -247,7 +273,7 @@ TEST_CASE("new loads clear observations but retain lifetime diagnostics") {
         player::EngineWarningCategory::NetworkTimeout};
     diagnostics.request_shape = player::inspect_request_shape(
         "https://user:secret@example.invalid/live/u/p/123.ts?token=secret",
-        player::LoadRequestIntent::FreshSelection,
+        core::LoadIntent::FreshSelection, core::LoadAttempt{1},
         core::RecoveryTransport::MpegTs, false);
 
     player::reset_load_observations(diagnostics);
@@ -412,10 +438,10 @@ TEST_CASE("fresh selection request shape is useful and URL free") {
     const std::string raw =
         "https://alice:password@provider.invalid/live/alice/password/42.ts?token=secret";
     const auto shape = player::inspect_request_shape(
-        raw, player::LoadRequestIntent::FreshSelection,
+        raw, core::LoadIntent::FreshSelection, core::LoadAttempt{1},
         core::RecoveryTransport::MpegTs, false,
         {.provider_session = 3, .channel_session = 7});
-    CHECK(shape.intent == player::LoadRequestIntent::FreshSelection);
+    CHECK(shape.intent == core::LoadIntent::FreshSelection);
     CHECK(shape.scheme == player::RequestScheme::Https);
     CHECK(shape.target == player::RequestTargetShape::XtreamLive);
     CHECK(shape.query_present);
@@ -424,10 +450,61 @@ TEST_CASE("fresh selection request shape is useful and URL free") {
     CHECK(shape.correlation.provider_session == 3);
     CHECK(shape.correlation.channel_session == 7);
 
-    const std::string retained = std::string(player::to_string(shape.intent)) + "/" +
+    const std::string retained = std::string(core::to_string(shape.intent)) + "/" +
         player::to_string(shape.scheme) + "/" + player::to_string(shape.target);
     for (const std::string_view forbidden : {
              "provider.invalid", "alice", "password", "token", "secret", "https://"}) {
+        CHECK(retained.find(forbidden) == std::string::npos);
+    }
+}
+
+TEST_CASE("recovery telemetry is load scoped and cannot retain credentials") {
+    const std::string raw =
+        "https://alice:password@provider.invalid/live/alice/password/42.ts?token=secret";
+    const auto shape = player::inspect_request_shape(
+        raw, core::LoadIntent::RecoveryReopen, core::LoadAttempt{2},
+        core::RecoveryTransport::MpegTs, true,
+        {.provider_session = 3, .channel_session = 7});
+    core::SupervisorTransition transition;
+    transition.attempt = 2;
+    transition.generation = core::Generation{9};
+    transition.load_attempt = core::LoadAttempt{2};
+    transition.load_intent = core::LoadIntent::RecoveryReopen;
+    transition.escalation = core::RecoveryEscalation::SourceReopen;
+    transition.outcome = core::RecoveryOutcome::RenewedEof;
+    transition.last_progress_to_decision = core::Duration{1.25};
+    transition.decision_to_command = core::Duration{0.5};
+    transition.command_to_first_frame = core::Duration{0.8};
+    transition.first_frame_to_outcome = core::Duration{1.1};
+    transition.recovered_load_lifetime = core::Duration{1.9};
+    const player::RecoveryDecisionEvidence evidence{
+        .cache_paused = false,
+        .playback_movement_seconds = -0.75,
+        .cache_end_movement_seconds = 0.125,
+        .engine_warning = player::sanitize_engine_warning(
+            "ffmpeg/demuxer",
+            "Continuity check failed at " + raw + " Authorization: Bearer hidden",
+            "error"),
+    };
+
+    const std::string retained =
+        player::format_recovery_telemetry(transition, shape, evidence);
+    CHECK(retained.find("provider-session=3") != std::string::npos);
+    CHECK(retained.find("channel-session=7") != std::string::npos);
+    CHECK(retained.find("generation=9") != std::string::npos);
+    CHECK(retained.find("load-attempt=2") != std::string::npos);
+    CHECK(retained.find("intent=recovery-reopen") != std::string::npos);
+    CHECK(retained.find("escalation=source-reopen") != std::string::npos);
+    CHECK(retained.find("outcome=renewed-eof") != std::string::npos);
+    CHECK(retained.find("last-progress-to-decision=1250ms") != std::string::npos);
+    CHECK(retained.find("decision-to-command=500ms") != std::string::npos);
+    CHECK(retained.find("command-to-first-frame=800ms") != std::string::npos);
+    CHECK(retained.find("first-frame-to-outcome=1100ms") != std::string::npos);
+    CHECK(retained.find("recovered-load-lifetime=1900ms") != std::string::npos);
+    CHECK(retained.find("warning-category=continuity-error") != std::string::npos);
+    for (const std::string_view forbidden : {
+             "provider.invalid", "alice", "password", "token", "secret",
+             "Authorization", "Bearer", "hidden", "https://"}) {
         CHECK(retained.find(forbidden) == std::string::npos);
     }
 }
@@ -454,19 +531,19 @@ TEST_CASE("recovery effect executor routes every native action and settles outco
     std::vector<core::SupervisorEvent> events;
     std::vector<std::string> calls;
     player::RecoveryExecutor executor{
-        .reopen_stream = [&](core::Generation) {
+        .reopen_stream = [&](core::Generation, core::LoadAttempt) {
             calls.push_back("reopen-stream");
             return std::optional{core::RecoveryTransport::MpegTs};
         },
-        .reload_hls_live = [&](core::Generation) {
+        .reload_hls_live = [&](core::Generation, core::LoadAttempt) {
             calls.push_back("reload-hls-live");
             return std::optional{core::RecoveryTransport::Hls};
         },
-        .reopen_probed = [&](core::Generation) {
+        .reopen_probed = [&](core::Generation, core::LoadAttempt) {
             calls.push_back("reopen-probed");
             return std::optional{core::RecoveryTransport::MpegTs};
         },
-        .recreate_player = [&](core::Generation) {
+        .recreate_player = [&](core::Generation, core::LoadAttempt) {
             calls.push_back("recreate-player");
             return std::optional{core::RecoveryTransport::MpegTs};
         },
@@ -476,35 +553,43 @@ TEST_CASE("recovery effect executor routes every native action and settles outco
         core::RecreatePlayer{}};
     for (const auto& payload : payloads) {
         player::execute_recovery_effect(
-            {core::Generation{9}, payload}, &executor,
+            {core::Generation{9}, core::LoadAttempt{2}, payload}, &executor,
             [&](const auto& event) { events.push_back(event); });
     }
     CHECK(calls == std::vector<std::string>{"reopen-stream", "reload-hls-live",
                                             "reopen-probed", "recreate-player"});
     REQUIRE(events.size() == 4);
-    for (const auto& event : events) {
-        CHECK(std::get<core::StreamLoadIssued>(event).generation == core::Generation{9});
+    for (std::size_t index = 0; index < events.size(); ++index) {
+        const auto& issued = std::get<core::StreamLoadIssued>(events[index]);
+        CHECK(issued.generation == core::Generation{9});
+        CHECK(issued.load_attempt == core::LoadAttempt{2});
+        CHECK(issued.intent == (std::holds_alternative<core::RecreatePlayer>(
+                                    payloads[index])
+                                    ? core::LoadIntent::PlayerRecreation
+                                    : core::LoadIntent::RecoveryReopen));
     }
 }
 
 TEST_CASE("missing rejected and throwing recovery executors terminate instead of parking") {
     std::vector<core::SupervisorEvent> events;
     int rejections = 0;
-    const core::SupervisorEffect effect{core::Generation{6}, core::RecreatePlayer{}};
+    const core::SupervisorEffect effect{core::Generation{6}, core::LoadAttempt{2}, core::RecreatePlayer{}};
     auto dispatch = [&](const auto& event) { events.push_back(event); };
     auto rejected = [&](const auto&) { ++rejections; };
 
     player::execute_recovery_effect(effect, nullptr, dispatch, rejected);
     player::RecoveryExecutor empty;
     player::execute_recovery_effect(effect, &empty, dispatch, rejected);
-    empty.recreate_player = [](core::Generation) -> std::optional<core::RecoveryTransport> {
+    empty.recreate_player = [](core::Generation, core::LoadAttempt) -> std::optional<core::RecoveryTransport> {
         throw 7;
     };
     player::execute_recovery_effect(effect, &empty, dispatch, rejected);
     REQUIRE(events.size() == 3);
     CHECK(rejections == 3);
     for (const auto& event : events) {
-        CHECK(std::get<core::SourceFailed>(event).generation == core::Generation{6});
+        const auto& failed = std::get<core::SourceFailed>(event);
+        CHECK(failed.generation == core::Generation{6});
+        CHECK(failed.load_attempt == core::LoadAttempt{2});
     }
 }
 
@@ -513,11 +598,11 @@ TEST_CASE("a stale recreation result cannot replace the current generation") {
         core::initial_supervisor_state(), core::ChannelRequested{core::Generation{2}},
         core::TimePoint{}).state;
     player::RecoveryExecutor executor;
-    executor.recreate_player = [](core::Generation) {
+    executor.recreate_player = [](core::Generation, core::LoadAttempt) {
         return std::optional{core::RecoveryTransport::MpegTs};
     };
     player::execute_recovery_effect(
-        {core::Generation{1}, core::RecreatePlayer{}}, &executor,
+        {core::Generation{1}, core::LoadAttempt{2}, core::RecreatePlayer{}}, &executor,
         [&](const core::SupervisorEvent& event) {
             state = core::reduce_supervisor_state(state, event, core::TimePoint{}).state;
         });
@@ -582,8 +667,8 @@ TEST_CASE("pinned transport log patterns produce only sanitized classifications"
 
 TEST_CASE("transport classifications remain generation-scoped adapter edges") {
     player::PlayerEventAdapter adapter;
-    adapter.authentication_rejected(core::Generation{12});
-    adapter.transport_failure(core::Generation{13},
+    adapter.authentication_rejected(core::Generation{12}, core::LoadAttempt{1});
+    adapter.transport_failure(core::Generation{13}, core::LoadAttempt{1},
                               core::TransportFailureReason::HlsPlaylistFailed);
     const auto events = adapter.drain();
     REQUIRE(events.size() == 2);

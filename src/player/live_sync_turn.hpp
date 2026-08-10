@@ -42,12 +42,15 @@ public:
     // reopens deliberately do not come through here.
     void reset() { gate_.reset(); }
 
-    // The event drain, filtered by generation exactly as
-    // App::process_player_events() filters it: a first frame belonging to a
-    // superseded load says nothing about the one now playing.
-    void observe_events(std::span<const PlayerEvent> events, core::Generation active) {
+    // The event drain, filtered by the exact active load identity just like
+    // App::process_player_events(): a late frame belonging to a superseded
+    // generation or replaced attempt says nothing about the one now playing.
+    void observe_events(std::span<const PlayerEvent> events,
+                        core::Generation active_generation,
+                        core::LoadAttempt active_load_attempt) {
         for (const auto& event : events) {
-            if (event.generation != active) continue;
+            if (event.generation != active_generation ||
+                event.load_attempt != active_load_attempt) continue;
             if (std::holds_alternative<FirstPlaybackStart>(event.payload)) {
                 first_frame_seen_ = true;
             }

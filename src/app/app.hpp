@@ -59,7 +59,8 @@ private:
     void finish_connect();
     void begin_update_check();
     void finish_update_check();
-    void begin_health_load();
+    void begin_health_load(core::LoadAttempt load_attempt);
+    void restart_health_supervision(core::LoadAttempt load_attempt);
     void dispatch_cache_state();
     void process_player_events();
     void flush_pending_stream_ends();
@@ -216,6 +217,7 @@ private:
 
     struct PendingStreamEnd {
         core::Generation generation;
+        core::LoadAttempt load_attempt;
         core::EndReason reason;
         core::TimePoint dispatch_at;
     };
