@@ -117,6 +117,10 @@ bool MpvPlayer::initialize_backend(std::string& error) {
     // silence, while mpv retains its pinned-runtime socket timing policy.
 
     set_option(mpv_, "audio-pitch-correction", "yes");
+    // Coax owns the Windows power request across cache pauses and recovery.
+    // Leaving mpv's playback-active policy enabled would create a second owner
+    // that clears its request whenever paused-for-cache changes.
+    set_option(mpv_, "stop-screensaver", "no");
     set_option(mpv_, "idle", "yes");
     set_option(mpv_, "terminal", "no");
     set_option(mpv_, "keep-open", "no");

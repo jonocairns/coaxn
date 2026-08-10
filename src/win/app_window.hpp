@@ -17,6 +17,7 @@ public:
     using PaintHandler  = std::function<void()>;
     using DpiHandler    = std::function<void(float scale)>;
     using DisplayHandler = std::function<void()>;
+    using MinimizedHandler = std::function<void(bool minimized)>;
     using ResumeHandler  = std::function<void()>;
 
     // The size is in logical pixels; the window is created at that size scaled
@@ -47,6 +48,9 @@ public:
     // WM_DPICHANGED is guaranteed to follow, so the client size and the scale
     // both have to be re-read rather than waited for.
     void on_display_change(DisplayHandler handler) { display_handler_ = std::move(handler); }
+    void on_minimized_changed(MinimizedHandler handler) {
+        minimized_handler_ = std::move(handler);
+    }
     // The machine resumed from sleep. The adapter may have been reset while it
     // was suspended, which nothing reports until work is submitted to it.
     void on_resume(ResumeHandler handler) { resume_handler_ = std::move(handler); }
@@ -54,6 +58,7 @@ public:
     [[nodiscard]] HWND handle() const { return window_; }
     [[nodiscard]] int  width()  const { return width_; }
     [[nodiscard]] int  height() const { return height_; }
+    [[nodiscard]] bool minimized() const { return minimized_; }
     // 1.0 at 96 DPI, 1.5 at 150%, and so on.
     [[nodiscard]] float dpi_scale() const;
 
@@ -68,12 +73,14 @@ private:
     int           height_ = 0;
     bool          running_ = true;
     bool          fullscreen_ = false;
+    bool          minimized_ = false;
     WINDOWPLACEMENT saved_placement_{};
     ResizeHandler  resize_handler_;
     CloseHandler   close_handler_;
     PaintHandler   paint_handler_;
     DpiHandler     dpi_handler_;
     DisplayHandler display_handler_;
+    MinimizedHandler minimized_handler_;
     ResumeHandler  resume_handler_;
 };
 

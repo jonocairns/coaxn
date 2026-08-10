@@ -19,6 +19,7 @@
 #include "player/session_target_registry.hpp"
 #include "win/app_window.hpp"
 #include "win/composition.hpp"
+#include "win/power_request.hpp"
 #include "win/ui_layer.hpp"
 #include "xtream/xtream_client.hpp"
 
@@ -72,6 +73,8 @@ private:
     void apply_vsr();
     void handle_resize(int width, int height);
     void handle_display_change();
+    void update_playback_power();
+    void update_playback_power(const core::SupervisorState& state);
     void handle_resume();
     // Drains any device loss the UI layer latched and drives the bounded
     // rebuild. Called once per frame, which is also what paces the retries.
@@ -106,6 +109,7 @@ private:
     win::AppWindow       window_;
     win::UiLayer         ui_;
     win::CompositionTree composition_;
+    win::PlaybackPowerRequest power_request_;
     player::MpvPlayer    player_;
     player::SessionTargetRegistry target_registry_;
     core::ChannelIndex   channels_;
@@ -160,6 +164,7 @@ private:
     bool        video_attached_   = false;
     bool        vsr_enabled_      = true;
     bool        paused_           = false;
+    std::optional<core::TimePoint> failure_power_grace_until_;
     int         volume_           = 100;
     // Where the volume was before the speaker was clicked, so unmuting puts it
     // back instead of leaving the way up to a drag.
