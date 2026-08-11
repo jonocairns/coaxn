@@ -8,7 +8,6 @@
 #include "player/load_diagnostics.hpp"
 #include "player/player_event_adapter.hpp"
 #include "player/playback_observability.hpp"
-#include "player/recovery_effect_executor.hpp"
 #include "player/session_target_registry.hpp"
 #include "player/transport_log_classifier.hpp"
 
@@ -525,90 +524,6 @@ TEST_CASE("session target identities correlate reselection without provider data
     const auto replacement_provider = registry.identify_channel("provider-stream-id-42");
     CHECK(replacement_provider.provider_session == 2);
     CHECK(replacement_provider.channel_session == 1);
-}
-
-TEST_CASE("recovery effect executor routes every native action and settles outcomes") {
-    std::vector<core::SupervisorEvent> events;
-    std::vector<std::string> calls;
-    player::RecoveryExecutor executor{
-        .reopen_stream = [&](core::Generation, core::LoadAttempt) {
-            calls.push_back("reopen-stream");
-            return std::optional{core::RecoveryTransport::MpegTs};
-        },
-        .reload_hls_live = [&](core::Generation, core::LoadAttempt) {
-            calls.push_back("reload-hls-live");
-            return std::optional{core::RecoveryTransport::Hls};
-        },
-        .reopen_probed = [&](core::Generation, core::LoadAttempt) {
-            calls.push_back("reopen-probed");
-            return std::optional{core::RecoveryTransport::MpegTs};
-        },
-        .recreate_player = [&](core::Generation, core::LoadAttempt) {
-            calls.push_back("recreate-player");
-            return std::optional{core::RecoveryTransport::MpegTs};
-        },
-    };
-    const std::array<core::SupervisorEffectPayload, 4> payloads{
-        core::ReopenStream{}, core::ReloadHlsLive{}, core::ReopenProbed{},
-        core::RecreatePlayer{}};
-    for (const auto& payload : payloads) {
-        player::execute_recovery_effect(
-            {core::Generation{9}, core::LoadAttempt{2}, payload}, &executor,
-            [&](const auto& event) { events.push_back(event); });
-    }
-    CHECK(calls == std::vector<std::string>{"reopen-stream", "reload-hls-live",
-                                            "reopen-probed", "recreate-player"});
-    REQUIRE(events.size() == 4);
-    for (std::size_t index = 0; index < events.size(); ++index) {
-        const auto& issued = std::get<core::StreamLoadIssued>(events[index]);
-        CHECK(issued.generation == core::Generation{9});
-        CHECK(issued.load_attempt == core::LoadAttempt{2});
-        CHECK(issued.intent == (std::holds_alternative<core::RecreatePlayer>(
-                                    payloads[index])
-                                    ? core::LoadIntent::PlayerRecreation
-                                    : core::LoadIntent::RecoveryReopen));
-    }
-}
-
-TEST_CASE("missing rejected and throwing recovery executors terminate instead of parking") {
-    std::vector<core::SupervisorEvent> events;
-    int rejections = 0;
-    const core::SupervisorEffect effect{core::Generation{6}, core::LoadAttempt{2}, core::RecreatePlayer{}};
-    auto dispatch = [&](const auto& event) { events.push_back(event); };
-    auto rejected = [&](const auto&) { ++rejections; };
-
-    player::execute_recovery_effect(effect, nullptr, dispatch, rejected);
-    player::RecoveryExecutor empty;
-    player::execute_recovery_effect(effect, &empty, dispatch, rejected);
-    empty.recreate_player = [](core::Generation, core::LoadAttempt) -> std::optional<core::RecoveryTransport> {
-        throw 7;
-    };
-    player::execute_recovery_effect(effect, &empty, dispatch, rejected);
-    REQUIRE(events.size() == 3);
-    CHECK(rejections == 3);
-    for (const auto& event : events) {
-        const auto& failed = std::get<core::SourceFailed>(event);
-        CHECK(failed.generation == core::Generation{6});
-        CHECK(failed.load_attempt == core::LoadAttempt{2});
-    }
-}
-
-TEST_CASE("a stale recreation result cannot replace the current generation") {
-    auto state = core::reduce_supervisor_state(
-        core::initial_supervisor_state(), core::ChannelRequested{core::Generation{2}},
-        core::TimePoint{}).state;
-    player::RecoveryExecutor executor;
-    executor.recreate_player = [](core::Generation, core::LoadAttempt) {
-        return std::optional{core::RecoveryTransport::MpegTs};
-    };
-    player::execute_recovery_effect(
-        {core::Generation{1}, core::LoadAttempt{2}, core::RecreatePlayer{}}, &executor,
-        [&](const core::SupervisorEvent& event) {
-            state = core::reduce_supervisor_state(state, event, core::TimePoint{}).state;
-        });
-    CHECK(state.name == core::SupervisorStateName::Loading);
-    CHECK(state.generation == core::Generation{2});
-    CHECK_FALSE(state.transport);
 }
 
 TEST_CASE("pinned transport log patterns produce only sanitized classifications") {

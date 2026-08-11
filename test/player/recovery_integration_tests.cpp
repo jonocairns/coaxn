@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <exception>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -47,7 +48,7 @@ core::PlaybackHealthObservation playing(double playback_time_seconds) {
 // the exact coordinator the Windows application calls.
 class RecoveryAppLoop {
 public:
-    enum class ExecutionMode { Success, Missing, Reject, Throw };
+    enum class ExecutionMode { Success, Missing, Reject, Throw, ThrowRestore };
 
     explicit RecoveryAppLoop(
         ExecutionMode mode = ExecutionMode::Success,
@@ -131,6 +132,7 @@ public:
 
     std::vector<core::SupervisorEffect> effects;
     std::vector<core::SupervisorTransition> transitions;
+    std::vector<std::exception_ptr> recovery_exceptions;
     std::vector<double> speed_writes;
 
 private:
@@ -156,6 +158,15 @@ private:
                 return core::RecoveryTransport::MpegTs;
             };
         }
+        callbacks.on_recovery_exception =
+            [this](const core::SupervisorEffect&, std::exception_ptr failure) {
+                recovery_exceptions.push_back(std::move(failure));
+            };
+        callbacks.restore_backend_settings = [this] {
+            if (execution_mode_ == ExecutionMode::ThrowRestore) {
+                throw std::runtime_error("fake backend restore failure");
+            }
+        };
         callbacks.set_health_discontinuities = [this](int count) {
             diagnostics_.health_discontinuities = count;
         };
@@ -325,6 +336,7 @@ TEST_CASE("ordinary recovery preserves learned live target while recreation rese
     app.poll(6.55);
     REQUIRE(app.effects.size() == 1);
     CHECK(app.live_target() == 4.5);
+    CHECK(app.state().load_intent == core::LoadIntent::RecoveryReopen);
 
     app.backend_failed_turn(7.0);
     app.poll(8.0);
@@ -332,6 +344,7 @@ TEST_CASE("ordinary recovery preserves learned live target while recreation rese
     CHECK(std::holds_alternative<core::RecreatePlayer>(app.effects.back().payload));
     CHECK(app.live_target() == 4.0);
     CHECK(app.speed_writes.back() == 1.0);
+    CHECK(app.state().load_intent == core::LoadIntent::PlayerRecreation);
 }
 
 TEST_CASE("missing rejected and throwing session recovery executors cannot park recovery") {
@@ -348,5 +361,26 @@ TEST_CASE("missing rejected and throwing session recovery executors cannot park 
         for (int attempt = 0; attempt < 6; ++attempt) app.poll(1.0);
         CHECK(app.state().name == core::SupervisorStateName::Failed);
         CHECK(app.state().failure == core::FailureReason::SourceUnavailable);
+        if (mode == RecoveryAppLoop::ExecutionMode::Throw) {
+            CHECK_FALSE(app.recovery_exceptions.empty());
+            CHECK(app.recovery_exceptions.front());
+        } else {
+            CHECK(app.recovery_exceptions.empty());
+        }
     }
+}
+
+TEST_CASE("a throwing backend restore is reported and cannot park recovery") {
+    auto policy = core::kDefaultRecoveryPolicy;
+    policy.attempt_delays.fill(core::Duration{});
+
+    RecoveryAppLoop app(RecoveryAppLoop::ExecutionMode::ThrowRestore, policy);
+    app.play();
+    app.backend_failed_turn(1.0);
+    for (int attempt = 0; attempt < 6; ++attempt) app.poll(1.0);
+
+    REQUIRE_FALSE(app.recovery_exceptions.empty());
+    CHECK(app.recovery_exceptions.front());
+    CHECK(app.state().name == core::SupervisorStateName::Failed);
+    CHECK(app.state().failure == core::FailureReason::SourceUnavailable);
 }

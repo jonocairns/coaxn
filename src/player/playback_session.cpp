@@ -93,11 +93,22 @@ void PlaybackSession::complete_recovery(
 }
 
 void PlaybackSession::execute_recovery(const core::SupervisorEffect& effect) {
+    const auto report_exception = [&](std::exception_ptr failure) noexcept {
+        if (!callbacks_.on_recovery_exception) return;
+        try {
+            callbacks_.on_recovery_exception(effect, std::move(failure));
+        } catch (...) {
+            // Diagnostics must never prevent the supervisor from settling the
+            // effect that raised them.
+        }
+    };
+
     std::optional<core::RecoveryTransport> transport;
     if (callbacks_.execute_recovery) {
         try {
             transport = callbacks_.execute_recovery(effect);
         } catch (...) {
+            report_exception(std::current_exception());
             transport.reset();
         }
     }
@@ -106,6 +117,7 @@ void PlaybackSession::execute_recovery(const core::SupervisorEffect& effect) {
             backend_recreated();
             if (callbacks_.restore_backend_settings) callbacks_.restore_backend_settings();
         } catch (...) {
+            report_exception(std::current_exception());
             transport.reset();
         }
     }

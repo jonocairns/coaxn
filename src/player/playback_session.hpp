@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <optional>
 #include <span>
@@ -40,6 +41,11 @@ struct PlaybackSessionCallbacks {
 
     std::function<std::optional<core::RecoveryTransport>(
         const core::SupervisorEffect&)> execute_recovery;
+    // Reports exceptions without coupling the portable session to the
+    // application's logger. The session still settles the recovery if this
+    // observer is missing or itself throws.
+    std::function<void(const core::SupervisorEffect&, std::exception_ptr)>
+        on_recovery_exception;
     // Runs after a successful player-recreation reset has synchronized the
     // session's live-sync state with the fresh backend.
     std::function<void()> restore_backend_settings;

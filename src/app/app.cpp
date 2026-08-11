@@ -8,6 +8,7 @@
 #include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <format>
 #include <string_view>
 
@@ -116,6 +117,23 @@ const char* control_baseline(std::optional<bool> retained) {
     return !retained ? "unavailable" : (*retained ? "retained" : "adjacent");
 }
 
+void log_recovery_exception(const core::SupervisorEffect& effect,
+                            const std::exception_ptr& failure) {
+    try {
+        if (failure) std::rethrow_exception(failure);
+    } catch (const std::exception& error) {
+        log::warn("Recovery effect {} threw: {}",
+                  core::effect_name(effect.payload), error.what());
+        return;
+    } catch (...) {
+        log::warn("Recovery effect {} threw an unknown exception",
+                  core::effect_name(effect.payload));
+        return;
+    }
+    log::warn("Recovery effect {} failed without exception details",
+              core::effect_name(effect.payload));
+}
+
 }  // namespace
 
 App::App()
@@ -132,6 +150,10 @@ App::App()
            .health_observation = [this] { return player_.health_observation(); },
            .execute_recovery = [this](const core::SupervisorEffect& effect) {
                return execute_supervisor_effect(effect);
+           },
+           .on_recovery_exception = [](const core::SupervisorEffect& effect,
+                                       std::exception_ptr failure) {
+               log_recovery_exception(effect, failure);
            },
            .restore_backend_settings = [this] {
                player_.set_volume(volume_);

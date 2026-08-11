@@ -12,10 +12,10 @@ two, so the line references hold.
 Findings 1 and the two live-sync defects it enabled testing for have since been
 fixed, at `41843f9` and `5388982`; findings 2 and 8 at `dcba234` and `8deb198`;
 findings 9 and 7 at `840f55a` and `5a691cc`; and the verification half of the P0
-at `e8dc558`. Finding 4 is fixed by the `PlaybackSession` extraction described
-below. Those entries are kept rather than deleted, marked with the change
-that closed them, so the reasoning stays readable and the same ground is not
-re-audited. Every other finding is still open.
+at `e8dc558`. Finding 4 was fixed at `d76a4e9` by the `PlaybackSession`
+extraction described below. Those entries are kept rather than deleted, marked
+with the commit that closed them, so the reasoning stays readable and the same
+ground is not re-audited. Every other finding is still open.
 
 Line references for the still-open findings are as of `f8a77d8` unless a fix
 since moved them, in which case that fix refreshed them: finding 10's
@@ -92,7 +92,7 @@ not.
 | P2 | Put `ChannelIndex` in the portable target and cache its derived view (findings 5 and 6) | This restores the documented boundary and removes full-catalogue work at frame rate. |
 | P2 | Move the complete service tick out of `run()` and give deadlines a wakeup that survives a modal loop (finding 3) | Resize/move modal loops currently starve recovery and health work. `5a691cc` gave the frame loop a deadline-driven wait, but that wait does not run while Windows owns the thread, so this needs the hoisted tick and a `WM_TIMER` regardless. |
 | P2 | Extract provider parsing/normalisation (finding 11) | This is the largest remaining body of Coax-owned protocol logic with no runnable tests. |
-| ~~P2~~ Fixed in this change | ~~Split playback orchestration from `App` behind a portable test seam (finding 4)~~ | `PlaybackSession::service_turn()` now owns the production ordering and is driven by the native recovery integration tests with fake telemetry and typed action callbacks. |
+| ~~P2~~ Fixed at `d76a4e9` | ~~Split playback orchestration from `App` behind a portable test seam (finding 4)~~ | `PlaybackSession::service_turn()` now owns the production ordering and is driven by the native recovery integration tests with fake telemetry and typed action callbacks. |
 | P2/P3 | Correct HTTP read failure and the installed log location; remove dead symbols (findings 10, 12 and 13) | These are real but narrower operational or correctness failures. |
 
 ## Findings
@@ -236,7 +236,7 @@ Mpv's event queue is **not** a serious risk here, for the record: property
 changes are coalesced (see [Checked and clean](#checked-and-clean)), so the
 starved `player_.pump()` is not the problem. The starved session poll is.
 
-### 4. [Fixed in this change] `App` is four objects
+### 4. [Fixed at `d76a4e9`] `App` is four objects
 
 **Original finding.** At the audit point, [app.cpp](../src/app/app.cpp) was 1685
 lines and `App` carried around fifty members. It was at once the ImGui view
@@ -285,6 +285,8 @@ includes `MpvPlayer`.
 Recovery execution returns a transport or rejection to the session; missing,
 rejected and throwing executors all dispatch `SourceFailed`, so no callback can
 leave the supervisor parked with an unsettled effect.
+The superseded `recovery_effect_executor` module was removed rather than
+retaining a second copy of that settlement rule and its tests.
 
 `App::run()` pumps mpv, hands the drained event journal to
 `PlaybackSession::service_turn()`, and supplies the presentation hook at the
@@ -676,7 +678,9 @@ so they are not raised again:
   291, 309 and 363 of what was then
   `test/player/player_event_adapter_tests.cpp`, now
   `test/player/player_core_tests.cpp`. The `RecoveryExecutor`
-  struct-of-functions seam is used by two of them.
+  struct-of-functions seam was used by two of them. The later `PlaybackSession`
+  extraction removed that executor after moving recovery settlement and its
+  runnable coverage into the production coordinator.
 - **`App` holds `client_` and `credentials_` redundantly.** It does not.
   `credentials_` carries the portal across the asynchronous gap between
   `begin_connect` (line 371) and `finish_connect` (line 416), where `client_`

@@ -42,7 +42,6 @@ add_library(coax_player_core
     src/player/playback_observability.cpp
     src/player/playback_session.cpp
     src/player/player_event_adapter.cpp
-    src/player/recovery_effect_executor.cpp
     src/player/session_target_registry.cpp
     src/player/transport_log_classifier.cpp)
 target_include_directories(coax_player_core PUBLIC src)
