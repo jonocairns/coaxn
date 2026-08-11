@@ -243,7 +243,7 @@ extract one: HLS would still feed demuxer buffered duration to this controller.
 
 #### Known live-sync correctness gaps
 
-Two of the three original defects recorded here are fixed. The second took three
+All three original defects recorded here are fixed. The second took three
 attempts, and both failed ones are recorded in full: each passed its isolated
 tests and was then falsified by the running application, so the engine behaviour
 and the two wrong readings of it are all easy to reintroduce.
@@ -304,11 +304,13 @@ and the two wrong readings of it are all easy to reintroduce.
    rather than playing it, non-progress in it already reaches the supervisor as
    a stall, and under-charging there is the safe direction for a defect whose
    entire history is over-charging.
-3. **Open, P2.** While `paused-for-cache` or `core-idle` is true, the
-   application still returns without setting speed. It therefore retains the
-   previously installed `0.97x` or `1.03x`; it is not literally held at `1.0x`.
-   This is unchanged by the fixes above, which act on the telemetry and
-   arming conditions rather than on the stall branch.
+3. **Fixed.** While `paused-for-cache` or `core-idle` is true, the gate requests
+   `1.0x` and rejects cache duration as controller input. `LiveSync` installs
+   unity only when a correction is active and invalidates its update interval,
+   so repeated stalled turns do not churn mpv and the first valid normal-
+   playback sample recomputes immediately. This is a safety invariant: stalled
+   telemetry is not valid control input. It does not decay or otherwise change
+   the learned target.
 
 Both rules live in `player::LiveSyncGate`, beside the controller they guard
 rather than inside `App`'s frame tick. The gate stayed correct in isolation
@@ -1049,7 +1051,7 @@ progressive-live and replay comparison refreshed on 2026-08-07:
 | Deferred; not planned for the current provider | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Reopen as a separate project only when a supported provider exposes a genuine moving HLS playlist |
 | Deferred; not planned for the current provider | Remove HLS connection overrides unless reproduced provider evidence requires them; define one error-retry budget across FFmpeg and Coax | There is no supported HLS source to validate these policies against; the unreachable branch must not be presented as product support |
 | P2 | Add bounded jitter, response-aware retry and due-time budget enforcement | Avoids synchronized retry waves, respects transient/permanent distinctions and makes the 30-second bound real |
-| P2 | Install `1.0x` on stall entry and recompute on exit | Makes the risk mitigation true and avoids retaining a stale speed through buffering |
+| ~~P2~~ Fixed in this change | ~~Install `1.0x` on stall entry and recompute on exit~~ | `paused-for-cache` and `core-idle` now hold unity without controlling on draining or idle cache duration. The hold is de-duplicated and invalidates the old rate-limit deadline, so valid playback telemetry takes effect immediately on exit. This is a speed safety invariant, not target decay |
 | P2 | Log mpv, build-configuration and FFmpeg version properties | Makes future transport and option claims reproducible against the shipped runtime |
 | P2 | Give every buffer-table tuning value one definition in `policy.hpp` and serialise it at the adapter boundary | Removes the duplicated zap targets, the unread byte-ceiling constant, and the pause-wait and back-buffer literals that have no policy home, so documented, tested and shipped policy cannot diverge |
 | P3 | Measure the 64MiB ceiling, 10s steady limit and ±3% audio range on representative channels | Converts reasonable starting values into provider- and device-backed policy |
@@ -1172,7 +1174,7 @@ project exists.
 | Initial or recovery fill is mistaken for a rebuffer | Keep learning disarmed until the supervisor confirms the load steady, cleared per load by `begin_health_load()`. A first frame, and a post-first-frame non-paused observation, were both tried as the arming signal and both were falsified against the runtime — see the live-sync correctness gaps. Cover the sequencing at application level, driving the real supervisor rather than setting the arming flag directly |
 | Speed changes become audible | Pitch correction enabled and range capped at ±3%, matching ExoPlayer's defaults; representative listening tests remain outstanding |
 | Reconnect options silently rejected by a future libmpv | The wrapper logs every rejected option at startup |
-| Controller fights a stall instead of riding it out | Updates are suspended during `paused-for-cache` or `core-idle`; required fix is to actively install `1.0x` on entry and recompute on exit |
+| Controller fights a stall instead of riding it out | During `paused-for-cache` or `core-idle`, reject cache duration, install `1.0x` once and invalidate the update interval so valid telemetry recomputes speed immediately on exit; keep this independent of target learning or decay |
 | HLS starts too close to the playlist edge (latent while the HLS branch is unreachable) | Required fix is to replace `live_start_index=-1`, prefer a valid `EXT-X-START`, and otherwise retain a conservative start |
 | HLS connection overrides reduce robustness or throughput | Leave FFmpeg's persistent/multiple HTTP defaults enabled unless a provider-specific failure is reproduced |
 | Many clients retry a provider outage in lockstep | Add bounded jitter to the capped exponential schedule while preserving the total recovery budget |

@@ -72,9 +72,13 @@ public:
             sample.paused_for_cache && !was_paused_for_cache_ && sample.playback_established;
         was_paused_for_cache_ = sample.paused_for_cache;
 
-        // A draining cache is not a mistimed one. Leave the controller alone
-        // rather than have it chase a buffer that is refilling.
-        if (sample.paused_for_cache || sample.core_idle) return step;
+        // A draining or idle cache is not a valid timing measurement. Do not
+        // have the controller chase it, and take any installed correction off
+        // while playback is unable to make normal forward progress.
+        if (sample.paused_for_cache || sample.core_idle) {
+            step.hold_unity_speed = true;
+            return step;
+        }
 
         // Missing telemetry read as zero is a positive error against a positive
         // target, which installs the minimum speed and accumulates latency for

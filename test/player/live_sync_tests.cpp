@@ -109,7 +109,8 @@ TEST_CASE("a correction is reissued after a hold, not suppressed as unchanged") 
     // The same conditions compute the same 0.97 as before the hold. It has to
     // be written again: playback is at 1.0 now, so treating it as an unchanged
     // speed would leave the controller's record and mpv's disagreeing forever.
-    CHECK(sync.update(0.0, 1.0) == Approx(0.97));
+    // The hold invalidates the old deadline, so this does not wait one second.
+    CHECK(sync.update(0.0, 0.1) == Approx(0.97));
 }
 
 // The gate. These are the rules that decide what a turn may learn from mpv's
@@ -244,24 +245,25 @@ TEST_CASE("a recovery reopen concedes nothing for its own fill") {
     CHECK(gate.observe(buffering(true)).rebuffered);
 }
 
-TEST_CASE("the controller is left alone while the cache drains or the core is idle") {
+TEST_CASE("stalled playback asks for unity without controlling on cache duration") {
     player::LiveSyncGate gate;
 
     // Buffered duration is available here, and still must not be controlled
-    // on: it is draining rather than mistimed.
+    // on: it is draining rather than mistimed. Unity is the safe speed while
+    // playback cannot make normal progress.
     const auto stalled = gate.observe({.buffered_seconds     = 0.5,
                                        .paused_for_cache     = true,
                                        .core_idle            = false,
                                        .playback_established = true});
     CHECK_FALSE(stalled.control_input);
-    CHECK_FALSE(stalled.hold_unity_speed);
+    CHECK(stalled.hold_unity_speed);
 
     const auto idle = gate.observe({.buffered_seconds     = 4.0,
                                     .paused_for_cache     = false,
                                     .core_idle            = true,
                                     .playback_established = true});
     CHECK_FALSE(idle.control_input);
-    CHECK_FALSE(idle.hold_unity_speed);
+    CHECK(idle.hold_unity_speed);
 }
 
 TEST_CASE("unavailable telemetry asks for unity instead of being read as zero") {
@@ -338,17 +340,94 @@ TEST_CASE("losing buffered duration holds unity instead of installing the minimu
 
     // mpv stops reporting the property. Read as 0.0 this is a -4s error, which
     // pins 0.97x and accumulates roughly 108 seconds of latency per hour.
-    CHECK(tick(gate, sync, playing(std::nullopt), 1.0) == Approx(1.0));
-    for (int turn = 2; turn < 60; ++turn) {
-        CHECK_FALSE(tick(gate, sync, playing(std::nullopt), turn));
+    CHECK(tick(gate, sync, playing(std::nullopt), 0.1) == Approx(1.0));
+    for (int turn = 2; turn < 20; ++turn) {
+        CHECK_FALSE(tick(gate, sync, playing(std::nullopt), turn * 0.01));
     }
     CHECK(sync.speed() == Approx(1.0));
 
     // The target is untouched by the outage: nothing rebuffered.
     CHECK(sync.target_offset_seconds() == Approx(4.0));
 
-    // When the property comes back the controller resumes from the real value.
-    CHECK(tick(gate, sync, playing(4.5), 60.0) == Approx(1.03));
+    // When the property comes back the controller resumes from the real value
+    // immediately, even though the previous update was less than a second ago.
+    CHECK(tick(gate, sync, playing(4.5), 0.2) == Approx(1.03));
+}
+
+TEST_CASE("paused-for-cache takes off a slow correction once and recomputes on exit") {
+    player::LiveSyncGate gate;
+    player::LiveSync     sync;
+
+    REQUIRE(tick(gate, sync, playing(0.0), 0.0) == Approx(0.97));
+
+    // This is a genuine rebuffer: it concedes exactly once, but never feeds
+    // the draining 0.5s reading into the controller.
+    const player::LiveSyncSample stalled{.buffered_seconds     = 0.5,
+                                          .paused_for_cache     = true,
+                                          .core_idle            = false,
+                                          .playback_established = true};
+    CHECK(tick(gate, sync, stalled, 0.1) == Approx(1.0));
+    CHECK(sync.target_offset_seconds() == Approx(4.5));
+
+    // The held level requests the safety action every turn, but the controller
+    // knows unity is already installed and produces no duplicate mpv writes or
+    // concessions.
+    CHECK_FALSE(tick(gate, sync, stalled, 0.11));
+    CHECK_FALSE(tick(gate, sync, stalled, 0.12));
+    CHECK(sync.target_offset_seconds() == Approx(4.5));
+
+    // The first valid sample after the stall is applied inside the old one
+    // second interval.
+    CHECK(tick(gate, sync, playing(3.0), 0.2) == Approx(0.97));
+}
+
+TEST_CASE("core-idle takes off a fast correction once and recomputes on exit") {
+    player::LiveSyncGate gate;
+    player::LiveSync     sync;
+
+    REQUIRE(tick(gate, sync, playing(5.0), 0.0) == Approx(1.03));
+
+    const player::LiveSyncSample idle{.buffered_seconds     = 5.0,
+                                       .paused_for_cache     = false,
+                                       .core_idle            = true,
+                                       .playback_established = true};
+    CHECK(tick(gate, sync, idle, 0.1) == Approx(1.0));
+    CHECK_FALSE(tick(gate, sync, idle, 0.11));
+    CHECK_FALSE(tick(gate, sync, idle, 0.12));
+    CHECK(sync.target_offset_seconds() == Approx(4.0));
+
+    CHECK(tick(gate, sync, playing(5.0), 0.2) == Approx(1.03));
+}
+
+TEST_CASE("opening and recovery fills hold unity without learning latency") {
+    SECTION("opening fill") {
+        player::LiveSyncGate gate;
+        player::LiveSync     sync;
+
+        const auto opening_fill = gate.observe(buffering(false));
+        CHECK(opening_fill.hold_unity_speed);
+        CHECK_FALSE(opening_fill.control_input);
+        CHECK_FALSE(opening_fill.rebuffered);
+        CHECK_FALSE(sync.hold_unity_speed());
+        CHECK(sync.target_offset_seconds() == Approx(4.0));
+    }
+
+    SECTION("recovery reopen fill") {
+        player::LiveSyncGate gate;
+        player::LiveSync     sync;
+
+        REQUIRE(tick(gate, sync, playing(3.0), 0.0) == Approx(0.97));
+        REQUIRE(tick(gate, sync, buffering(true), 0.1) == Approx(1.0));
+        REQUIRE(sync.target_offset_seconds() == Approx(4.5));
+
+        // An ordinary recovery begins a new unestablished load without
+        // resetting either object. Its idle and fill turns stay safely at
+        // unity, retain the learned target and make no second concession.
+        CHECK_FALSE(tick(gate, sync, loading(), 0.2));
+        CHECK_FALSE(tick(gate, sync, buffering(false), 0.3));
+        CHECK(sync.speed() == Approx(1.0));
+        CHECK(sync.target_offset_seconds() == Approx(4.5));
+    }
 }
 
 // The application turn. App::process_player_events() runs before

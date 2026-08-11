@@ -915,7 +915,7 @@ void App::update_live_sync() {
 
     if (step.hold_unity_speed) {
         if (const auto speed = live_sync_.hold_unity_speed()) {
-            log::warn("Buffered duration unavailable; holding playback at {:.2f}x", *speed);
+            log::warn("Live-sync telemetry invalid; holding playback at {:.2f}x", *speed);
             player_.set_speed(*speed);
         }
     } else if (step.control_input) {
