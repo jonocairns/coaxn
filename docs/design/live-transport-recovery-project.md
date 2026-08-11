@@ -13,9 +13,13 @@ on 2026-08-09. A later provider soak exercised cache-stall recovery twice and
 proved reopen, one-time recreation and command-budget exhaustion were bounded,
 but exposed late first-frame lifecycle defects both during retry backoff and
 after `Failed`. Those defects are now reducer-, host- and application-sequencing
-tested. Phase 1 remains incomplete until the corrected behavior is exercised
-against the provider. Phases 2–5 remain proposed; no HLS capability discovery,
-playback or fallback is implemented.
+tested. A subsequent provider capture has validated late-frame admission after
+`Failed`; Phase 1 remains incomplete while the retry-backoff and stronger
+data-delivering/no-frame shapes remain outstanding. Credential-safe Phase 2
+research found that this account advertises and delivers MPEG-TS only. The
+research implementation was removed, so Phases 2–5 remain proposed and gated
+for this provider; no HLS capability discovery, playback or fallback is
+implemented.
 
 ## Outcome
 
@@ -213,9 +217,15 @@ credential-bearing diagnostic.
 The run validates the corrected runtime's bounded no-frame path for unavailable
 telemetry, ordinary EOF recovery and post-probation episode reset. It did not
 reproduce the stronger data-delivering/no-frame shape, an accepted late frame
-after `Failed`, or a first frame inside retry backoff. Those remain the field
-gate; Phase 1 is not marked complete merely because deterministic coverage and
-the adjacent runtime path pass.
+after `Failed`, or a first frame inside retry backoff.
+
+A subsequent credential-safe provider capture validated the late-frame path
+after command exhaustion. The already-issued recreation load produced its first
+frame 2.575 seconds after `Failed`, completed probation and returned to
+supervised Steady without issuing another recovery command. The stronger
+data-delivering/no-frame shape and a first frame inside retry backoff remain the
+field gate; Phase 1 is not marked complete merely because deterministic coverage
+and adjacent runtime paths pass.
 
 ## Phase 2 — Credential-safe transport discovery
 
@@ -236,6 +246,28 @@ the adjacent runtime path pass.
 - HLS capability can be represented without storing provider identity or secrets.
 - Authentication failure is terminal and does not become a format-probing loop.
 - Probe diagnostics contain request shape and outcome only, never the target.
+
+### Research outcome (not shipped)
+
+Credential-safe account metadata research on 2026-08-10 reported
+`advertised=yes`, `mpeg-ts=yes` and `hls=no`; the normalized preference remained
+MPEG-TS. A local Phase 2b prototype then ran the explicit bounded HLS probe on
+two channels. Each probe completed after one sample with no playlist wait and
+the outcome `http-unavailable`. Its diagnostics retained only process-local
+provider/channel aliases, method, target shape, sample count, wait, outcome and
+preference—not a URL, host, account field, response body or secret.
+
+A provider-exported M3U catalogue supplied the same day contained 935
+extensionless HTTPS playback entries under one credential-bearing route shape.
+Credential-safe sampling followed the route's redirect. The available samples
+had MPEG-TS packet synchronization rather than an HLS playlist signature; a
+third sample delivered no data. No catalogue entry or credential was copied
+into the repository or retained in diagnostics.
+
+Together, these observations establish an alternate MPEG-TS route but no usable
+HLS route for this account. The capability and probe implementations were
+removed rather than shipped, MPEG-TS remains selected, and Phase 3 or later HLS
+work is gated until a provider account with genuine HLS capability is available.
 
 ## Phase 3 — Real HLS transport
 
@@ -326,13 +358,21 @@ The intended end-state is:
 2. **Done:** add repeated-short-load classification and bounded recreation
    escalation.
 3. **Partial:** portable supervisor/player tests and the Windows cross-build are
-   green; the corrected late-frame lifecycle still needs a credential-safe
-   provider capture.
-4. Parse credential-safe output-format capability.
-5. Make transport selection explicit in the application.
-6. Correct HLS startup and connection policy, then add application-level HLS tests.
-7. Run the provider comparison and document the selected default.
-8. Consider automatic fallback only after both transports meet their acceptance
+   green, and late admission after `Failed` has a credential-safe provider
+   capture; the data-delivering/no-frame and retry-backoff first-frame shapes
+   remain outstanding.
+4. **Closed without shipping:** use local credential-safe account metadata to
+   establish that this account advertises MPEG-TS but not HLS, then remove the
+   research implementation.
+5. **Closed without shipping:** use a local bounded HLS probe and the provider's
+   M3U catalogue to corroborate MPEG-TS delivery and no usable HLS route, then
+   remove the probe implementation.
+6. **Gated:** make transport selection explicit only when an account with
+   genuine HLS capability is available.
+7. **Gated:** correct HLS startup and connection policy, then add
+   application-level HLS tests.
+8. **Gated:** run a provider comparison and document the selected default.
+9. Consider automatic fallback only after both transports meet their acceptance
    gates.
 
 ## Definition of done
