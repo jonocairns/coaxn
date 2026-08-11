@@ -7,19 +7,17 @@ tags: [design, project, playback, recovery, mpeg-ts, hls, mpv, exoplayer]
 
 ## Status
 
-**Phase 1 implemented and build/test verified; corrected lifecycle field
-acceptance pending.** The portable native suite and Windows cross-build passed
-on 2026-08-09. A later provider soak exercised cache-stall recovery twice and
-proved reopen, one-time recreation and command-budget exhaustion were bounded,
-but exposed late first-frame lifecycle defects both during retry backoff and
-after `Failed`. Those defects are now reducer-, host- and application-sequencing
-tested. A subsequent provider capture has validated late-frame admission after
-`Failed`; Phase 1 remains incomplete while the retry-backoff and stronger
-data-delivering/no-frame shapes remain outstanding. Credential-safe Phase 2
-research found that this account advertises and delivers MPEG-TS only. The
-research implementation was removed, so Phases 2–5 remain proposed and gated
-for this provider; no HLS capability discovery, playback or fallback is
-implemented.
+**Phase 1 implemented and verified; Phases 2–5 gated.** The 159-test portable
+native suite and Windows cross-build passed on 2026-08-11. Provider soaks
+established the real failure shapes and validated ordinary cache-stall and EOF
+recovery plus late-frame admission after `Failed`. Deterministic application-
+sequencing simulations now close the two timing cases that need not recur by
+chance: a first frame during retry backoff cancels the unissued reopen, and a
+recovered load with advancing input/cache evidence but no presentable frame
+still crosses the eight-second opening bound. Credential-safe Phase 2 research
+found that this account advertises and delivers MPEG-TS only. The research
+implementation was removed, so Phases 2–5 remain proposed and gated for this
+provider; no HLS capability discovery, playback or fallback is implemented.
 
 ## Outcome
 
@@ -222,10 +220,18 @@ after `Failed`, or a first frame inside retry backoff.
 A subsequent credential-safe provider capture validated the late-frame path
 after command exhaustion. The already-issued recreation load produced its first
 frame 2.575 seconds after `Failed`, completed probation and returned to
-supervised Steady without issuing another recovery command. The stronger
-data-delivering/no-frame shape and a first frame inside retry backoff remain the
-field gate; Phase 1 is not marked complete merely because deterministic coverage
-and adjacent runtime paths pass.
+supervised Steady without issuing another recovery command.
+
+On 2026-08-11, permanent virtual-time application-sequencing tests closed the
+two remaining acceptance cases. The fixture follows the application's actual
+turn order through the player event adapter, health fold, supervisor host and
+synchronous recovery-effect settlement. It proves that a first-playback edge at
+8.25 seconds cancels the retry due at 8.5 seconds and still completes five-second
+probation, and that an EOF-recovered load with advancing input/cache evidence,
+a stale playback clock and no first-playback edge open-stalls after eight
+seconds while preserving the recovery episode. Earlier provider captures had
+already established that both input shapes are real; their random recurrence in
+a corrected soak is continuing observation rather than an acceptance gate.
 
 ## Phase 2 — Credential-safe transport discovery
 
@@ -357,10 +363,10 @@ The intended end-state is:
 1. **Done:** add phase-specific recovery timing and load-attempt identity.
 2. **Done:** add repeated-short-load classification and bounded recreation
    escalation.
-3. **Partial:** portable supervisor/player tests and the Windows cross-build are
-   green, and late admission after `Failed` has a credential-safe provider
-   capture; the data-delivering/no-frame and retry-backoff first-frame shapes
-   remain outstanding.
+3. **Done:** portable supervisor/player tests and the Windows cross-build are
+   green; provider evidence covers late admission after `Failed`, and permanent
+   virtual-time application-sequencing tests cover data-delivering/no-frame and
+   retry-backoff first-frame behavior.
 4. **Closed without shipping:** use local credential-safe account metadata to
    establish that this account advertises MPEG-TS but not HLS, then remove the
    research implementation.

@@ -79,7 +79,8 @@ if(BUILD_TESTING)
     # simply linked into a Windows executable no runner could execute.
     add_executable(coax_player_core_tests
         test/player/live_sync_tests.cpp
-        test/player/player_core_tests.cpp)
+        test/player/player_core_tests.cpp
+        test/player/recovery_integration_tests.cpp)
     target_link_libraries(coax_player_core_tests PRIVATE
         Catch2::Catch2WithMain coax_player_core)
     target_compile_options(coax_player_core_tests PRIVATE -Wall -Wextra -Wpedantic)
