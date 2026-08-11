@@ -34,6 +34,16 @@ The provider does not offer a genuine moving HLS playlist for this account, so
 MPEG-TS remains the only selected transport. The HLS notes below are retained as
 research context, not planned product scope.
 
+Target decay and adaptive live-offset recovery are also outside this project's
+direct-TS scope. Media3 applies that policy where an adaptive manifest exposes a
+live window; a progressive MPEG-TS stream exposes only one continuously arriving
+position. Coax therefore retains its bounded rebuffer concessions and resets
+them on channel change or player recreation rather than inventing a live edge
+from approximate cache duration. The supervisor's bounded reopen remains the
+fallback when playback cannot recover. Revisit only if representative long
+sessions demonstrate unacceptable accumulated latency and a trustworthy signal
+can support a bounded policy.
+
 ```mermaid
 flowchart LR
     A["1. Fast TS rejoin"] --> B["2. Discover HLS safely"]

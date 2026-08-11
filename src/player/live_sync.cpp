@@ -25,6 +25,10 @@ void LiveSync::notify_rebuffer() {
 }
 
 std::optional<double> LiveSync::hold_unity_speed() {
+    // A hold marks a break in valid normal-playback telemetry. Do this even if
+    // unity is already installed: when telemetry returns, its first sample is
+    // more relevant than the rate-limit deadline from before the break.
+    has_updated_ = false;
     if (speed_ == 1.0) return std::nullopt;
     speed_ = 1.0;
     return speed_;

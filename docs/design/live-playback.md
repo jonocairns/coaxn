@@ -17,7 +17,11 @@ produces a player that is either fragile or needlessly far behind live:
 3. **Hold latency** — drift away from the live edge should be corrected, not
    accumulated.
 
-ExoPlayer separates all three, and is the reference this design follows.
+ExoPlayer separates all three for adaptive live streams, and is the reference
+for the parts its media model can support. Its live-offset controller does not
+apply to progressive live streams, which have no live window and only one
+playable position. Coax therefore does not claim adaptive-live parity for the
+provider's direct TS endpoint.
 
 For the provider's continuous progressive MPEG-TS endpoint, restoring playback
 is not the same as recovering every missing second. There is no addressable live
@@ -211,11 +215,20 @@ up to 3% fast. Pitch correction is enabled, which reduces pitch changes, but
 whether a 3% tempo change or correction artifacts are audible is content- and
 listener-dependent and still needs listening tests.
 
-The 500ms concessions themselves currently **do ratchet**: `notify_rebuffer()`
-raises the target and nothing decays it toward the initial target. The
-controller claws back only excess above the newly raised target. This differs
-from ExoPlayer, which also smooths the minimum possible live offset and adjusts
-its current target back toward a safe ideal.
+The 500ms concessions intentionally **ratchet**: `notify_rebuffer()` raises the
+target and nothing decays it toward the initial target. The controller claws
+back only excess above the newly raised target. Coax will not add target decay
+for the provider's direct progressive TS endpoint. ExoPlayer's adaptive target
+uses an observable live window; Media3 explicitly excludes progressive live
+streams from that model. Applying equivalent decay to `demuxer-cache-duration`
+would invent a live edge from an unreliable proxy rather than reproduce
+ExoPlayer behavior. A channel change or player recreation remains the reset.
+
+Revisit this decision only if representative long sessions demonstrate
+unacceptable accumulated latency. Any replacement policy must first establish
+a trustworthy observable, bounded behavior and user-experience evidence; the
+mere passage of stable playback time is not proof that a direct TS stream has
+returned closer to live.
 
 `LiveSync` is free of Windows, mpv and UI types, so the control law is testable
 in isolation and portable to another platform. It is now built into
@@ -243,7 +256,7 @@ extract one: HLS would still feed demuxer buffered duration to this controller.
 
 #### Known live-sync correctness gaps
 
-Two of the three original defects recorded here are fixed. The second took three
+All three original defects recorded here are fixed. The second took three
 attempts, and both failed ones are recorded in full: each passed its isolated
 tests and was then falsified by the running application, so the engine behaviour
 and the two wrong readings of it are all easy to reintroduce.
@@ -304,11 +317,13 @@ and the two wrong readings of it are all easy to reintroduce.
    rather than playing it, non-progress in it already reaches the supervisor as
    a stall, and under-charging there is the safe direction for a defect whose
    entire history is over-charging.
-3. **Open, P2.** While `paused-for-cache` or `core-idle` is true, the
-   application still returns without setting speed. It therefore retains the
-   previously installed `0.97x` or `1.03x`; it is not literally held at `1.0x`.
-   This is unchanged by the fixes above, which act on the telemetry and
-   arming conditions rather than on the stall branch.
+3. **Fixed.** While `paused-for-cache` or `core-idle` is true, the gate requests
+   `1.0x` and rejects cache duration as controller input. `LiveSync` installs
+   unity only when a correction is active and invalidates its update interval,
+   so repeated stalled turns do not churn mpv and the first valid normal-
+   playback sample recomputes immediately. This is a safety invariant: stalled
+   telemetry is not valid control input. It does not decay or otherwise change
+   the learned target.
 
 Both rules live in `player::LiveSyncGate`, beside the controller they guard
 rather than inside `App`'s frame tick. The gate stayed correct in isolation
@@ -393,7 +408,8 @@ attempt count, never moves to steady buffer targets, and never concedes live
 latency. For a channel in that state the supervisor's stall detection and
 recovery are the relevant machinery, not a 500ms target nudge — but it does mean
 the rebuffer concession cannot help a channel that has never once played
-cleanly. Revisit alongside the target decay semantics in the priority table.
+cleanly. The documented direct-TS policy intentionally leaves this to bounded
+recovery rather than adding speculative target decay.
 
 The base schedule is truncated exponential backoff, but it is deterministic.
 Network retry guidance recommends adding jitter so many clients do not retry a
@@ -1045,11 +1061,11 @@ progressive-live and replay comparison refreshed on 2026-08-07:
 | ~~P1~~ Fixed on 2026-08-08 | ~~Make `Steady` mean five continuously clean seconds rather than five seconds since a first frame~~ | Done in three passes. The deadline could confirm mid-fill because the fold's interrupted edge never fires for a pause that predates the window; the first repair then let a held deadline carry credit for time spent filling, so both cache-state edges now restart the window. The final repair made the fold's last determinate health verdict supervisor state: otherwise a non-cache degradation could remain unhealthy without another edge, confirm at five seconds and clear an attempt just before the six-second decode-stall recovery. `Unknown` remains neutral, so missing playback-time telemetry neither invents nor clears an unhealthy condition. Found by hanging live-sync arming off `Steady`; it also had `apply_buffer_phase(Steady)` switching to steady buffer targets while playback was unhealthy |
 | ~~P1~~ Fixed in this change | ~~Make advancing replay observable before deciding any policy for it~~ | Signed adjacent-sample playback movement, expected-movement deviation and cache-end movement now survive in a generation-scoped snapshot, log and diagnostics panel. Pause, resume, stopped playback, forward jumps and backward movement have distinct presentation categories. Engine warnings survive only as credential-safe structured context, and URL-free instrumentation records the exact `loadfile replace` command shape. The backend's HTTP method/range/headers and byte identity remain honestly field-unverified, so no replay threshold or recovery action was added |
 | **P1 complete** | Progressive-live recovery now reopens on a ten-second confirmed cache stall, bounds every pre-frame load at the existing eight-second open-stall threshold, keeps first-frame loads on probation, cancels only unissued opening-stall source retries, recreates once after two short recovered loads, and admits the exact exhausted current load to one command-free probation | Native 159/159 tests and the Windows cross-build passed on 2026-08-11. Provider captures established the failure shapes and validated ordinary EOF recovery plus late admission after `Failed`; permanent virtual-time application-sequencing tests close the retry-backoff first-frame and recovered data-delivering/no-frame cases without requiring their random recurrence in a corrected soak |
-| P2 | Decide and document target decay semantics | The present controller intentionally or accidentally retains every 500ms concession until reset; it does not reproduce ExoPlayer's adaptive target |
+| ~~P2~~ Decided on 2026-08-11 | ~~Decide and document target decay semantics~~ | No decay for direct progressive MPEG-TS. Media3's adaptive target requires a live window and does not apply to progressive live sources; Coax will not infer one from unreliable cache duration. Concessions remain bounded and reset on channel change or player recreation. Revisit only with representative evidence of unacceptable long-session latency and a trustworthy observable |
 | Deferred; not planned for the current provider | Replace `live_start_index=-1`, make transport selection real and test the complete HLS load path | Reopen as a separate project only when a supported provider exposes a genuine moving HLS playlist |
 | Deferred; not planned for the current provider | Remove HLS connection overrides unless reproduced provider evidence requires them; define one error-retry budget across FFmpeg and Coax | There is no supported HLS source to validate these policies against; the unreachable branch must not be presented as product support |
 | P2 | Add bounded jitter, response-aware retry and due-time budget enforcement | Avoids synchronized retry waves, respects transient/permanent distinctions and makes the 30-second bound real |
-| P2 | Install `1.0x` on stall entry and recompute on exit | Makes the risk mitigation true and avoids retaining a stale speed through buffering |
+| ~~P2~~ Fixed in this change | ~~Install `1.0x` on stall entry and recompute on exit~~ | `paused-for-cache` and `core-idle` now hold unity without controlling on draining or idle cache duration. The hold is de-duplicated and invalidates the old rate-limit deadline, so valid playback telemetry takes effect immediately on exit. This is a speed safety invariant, not target decay |
 | P2 | Log mpv, build-configuration and FFmpeg version properties | Makes future transport and option claims reproducible against the shipped runtime |
 | P2 | Give every buffer-table tuning value one definition in `policy.hpp` and serialise it at the adapter boundary | Removes the duplicated zap targets, the unread byte-ceiling constant, and the pause-wait and back-buffer literals that have no policy home, so documented, tested and shipped policy cannot diverge |
 | P3 | Measure the 64MiB ceiling, 10s steady limit and ±3% audio range on representative channels | Converts reasonable starting values into provider- and device-backed policy |
@@ -1107,10 +1123,13 @@ concession at first frame, generation 17's recovery reopen did the same, and a
 holds the configured 4.0-second target through its opening fill. The target
 still only ratchets upward, so on a persistently bad channel genuine concessions
 trade live proximity for stability up to the 30-second ceiling. For live sport
-that is a real cost — a phone notification can arrive before the picture.
-Whether genuine concessions should decay remains an open policy question, as
-does the fact that a load which never plays cleanly for five seconds never
-concedes at all.
+that is a real cost — a phone notification can arrive before the picture. This
+is an accepted direct-TS trade-off rather than an open decay item: without a
+live window, stable playback does not establish that latency has fallen, and
+ExoPlayer does not apply its adaptive live-target policy to progressive streams.
+The fact that a load which never plays cleanly for five seconds never concedes
+remains part of the bounded-recovery path, not a reason to invent live-edge
+semantics.
 
 **Buffer memory for absorption.** The 64 MiB cache ceiling is a ceiling, not an
 allocation, and remains a tuning value rather than a measured optimum.
@@ -1148,11 +1167,13 @@ implementation simplification rather than a channel-policy decision.
 ## Alternatives considered
 
 **Per-channel learned buffer, growing by a fixed amount per interruption, with
-decay.** Not implemented. The speed controller does not subsume this: buffer
-depth controls jitter absorption, while playback speed controls accumulated
-latency. A learned buffer remains a possible provider-specific policy, but it
-needs representative interruption data, bounds and decay behavior before its
-complexity is justified.
+decay.** Not planned for direct progressive MPEG-TS. The speed controller does
+not subsume this: buffer depth controls jitter absorption, while playback speed
+can remove only measured excess above the current target. Unlike adaptive live
+media, this endpoint supplies no live window against which a decayed target can
+be judged. Reconsider only for a future adaptive transport or after
+representative direct-TS evidence establishes both the user problem and a
+trustworthy control signal.
 
 **Larger fixed buffer for everything.** Rejected: penalises every channel for
 the worst one and can add latency. Valid live-offset control can remove excess
@@ -1172,7 +1193,7 @@ project exists.
 | Initial or recovery fill is mistaken for a rebuffer | Keep learning disarmed until the supervisor confirms the load steady, cleared per load by `begin_health_load()`. A first frame, and a post-first-frame non-paused observation, were both tried as the arming signal and both were falsified against the runtime — see the live-sync correctness gaps. Cover the sequencing at application level, driving the real supervisor rather than setting the arming flag directly |
 | Speed changes become audible | Pitch correction enabled and range capped at ±3%, matching ExoPlayer's defaults; representative listening tests remain outstanding |
 | Reconnect options silently rejected by a future libmpv | The wrapper logs every rejected option at startup |
-| Controller fights a stall instead of riding it out | Updates are suspended during `paused-for-cache` or `core-idle`; required fix is to actively install `1.0x` on entry and recompute on exit |
+| Controller fights a stall instead of riding it out | During `paused-for-cache` or `core-idle`, reject cache duration, install `1.0x` once and invalidate the update interval so valid telemetry recomputes speed immediately on exit; keep this independent of target learning or decay |
 | HLS starts too close to the playlist edge (latent while the HLS branch is unreachable) | Required fix is to replace `live_start_index=-1`, prefer a valid `EXT-X-START`, and otherwise retain a conservative start |
 | HLS connection overrides reduce robustness or throughput | Leave FFmpeg's persistent/multiple HTTP defaults enabled unless a provider-specific failure is reproduced |
 | Many clients retry a provider outage in lockstep | Add bounded jitter to the capped exponential schedule while preserving the total recovery budget |
