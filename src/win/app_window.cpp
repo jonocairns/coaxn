@@ -44,6 +44,11 @@ LRESULT AppWindow::handle_message(HWND window, UINT message, WPARAM wparam, LPAR
 
     switch (message) {
         case WM_SIZE: {
+            const bool minimized = wparam == SIZE_MINIMIZED;
+            if (minimized != minimized_) {
+                minimized_ = minimized;
+                if (minimized_handler_) minimized_handler_(minimized_);
+            }
             if (wparam != SIZE_MINIMIZED) {
                 width_  = LOWORD(lparam);
                 height_ = HIWORD(lparam);

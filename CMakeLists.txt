@@ -61,6 +61,7 @@ if(BUILD_TESTING)
     add_executable(coax_core_tests
         test/core/generation_tests.cpp
         test/core/playback_health_tests.cpp
+        test/core/playback_power_tests.cpp
         test/core/presentation_tests.cpp
         test/core/supervisor_tests.cpp
         test/core/supervisor_host_tests.cpp
@@ -167,6 +168,7 @@ if(COAX_BUILD_APP)
         src/win/app_window.cpp
         src/win/composition.cpp
         src/win/credential_store.cpp
+        src/win/power_request.cpp
         src/win/ui_layer.cpp
         src/util/log.cpp)
 

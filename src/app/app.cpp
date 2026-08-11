@@ -206,6 +206,7 @@ bool App::initialize(std::string& error) {
     window_.on_paint([this] { draw_frame(); });
     window_.on_dpi_changed([this](float scale) { theme::set_dpi_scale(scale); });
     window_.on_display_change([this] { handle_display_change(); });
+    window_.on_minimized_changed([this](bool) { update_playback_power(); });
     window_.on_resume([this] { handle_resume(); });
 
     if (!direct_media_.empty()) {
@@ -853,6 +854,13 @@ void App::execute_supervisor_effect(const core::SupervisorEffect& effect) {
 void App::on_supervisor_state_changed(const core::SupervisorState& state) {
     const auto previous_state = supervisor_snapshot_.state;
     supervisor_snapshot_ = core::project_supervisor_stats(state, supervisor_clock_.now());
+    if (state.name == core::SupervisorStateName::Failed &&
+        previous_state != core::SupervisorStateName::Failed) {
+        failure_power_grace_until_ =
+            supervisor_clock_.now() + core::kTerminalFailurePowerGrace;
+    } else if (state.name != core::SupervisorStateName::Failed) {
+        failure_power_grace_until_.reset();
+    }
     if (previous_state == core::SupervisorStateName::Failed &&
         state.name == core::SupervisorStateName::Zap &&
         state.generation == generation_) {
@@ -875,6 +883,24 @@ void App::on_supervisor_state_changed(const core::SupervisorState& state) {
                        : "Playback failed",
                    true);
     }
+    update_playback_power(state);
+}
+
+void App::update_playback_power() {
+    update_playback_power(supervisor_.current());
+}
+
+void App::update_playback_power(const core::SupervisorState& state) {
+    const bool terminal_failure = state.name == core::SupervisorStateName::Failed;
+    const bool grace_active = terminal_failure && failure_power_grace_until_ &&
+                              supervisor_clock_.now() < *failure_power_grace_until_;
+    power_request_.set_mode(core::decide_playback_power_mode({
+        .session_active = state.name != core::SupervisorStateName::Idle,
+        .user_paused = paused_,
+        .window_minimized = window_.minimized(),
+        .terminal_failure = terminal_failure,
+        .terminal_failure_grace_active = grace_active,
+    }));
 }
 
 void App::update_live_sync() {
@@ -1403,6 +1429,7 @@ void App::draw_status_bar() {
                              paused_ ? widgets::Icon::Play : widgets::Icon::Pause, row, fade)) {
         paused_ = !paused_;
         player_.set_paused(paused_);
+        update_playback_power();
     }
     cursor += row + gap;
 
@@ -1815,6 +1842,7 @@ void App::draw_frame() {
         stage_ == Stage::Browsing) {
         paused_ = !paused_;
         player_.set_paused(paused_);
+        update_playback_power();
     }
 
     // Until mpv owns the video plane there is nothing behind the UI layer but
@@ -1889,6 +1917,7 @@ int App::run() {
 
         update_live_sync();
         finish_connect();
+        update_playback_power();
         draw_frame();
         wait_ms = next_turn_wait_ms();
     }
@@ -1923,6 +1952,7 @@ void App::shutdown() {
         update_thread_.join();
     }
     supervisor_.dispose();
+    power_request_.set_mode(core::PlaybackPowerMode::AllowSleep);
     player_.stop(generation_);
     // Outwards from the content, the same order the rebuild path uses. The
     // player detaches again when it is destroyed with this object, but that is
