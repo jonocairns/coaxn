@@ -1,5 +1,5 @@
 ---
-description: Sequenced micro-project for fast progressive-TS recovery, HLS support and evidence-based transport selection.
+description: Completed micro-project for fast progressive-TS recovery and credential-safe transport evaluation.
 tags: [design, project, playback, recovery, mpeg-ts, hls, mpv, exoplayer]
 ---
 
@@ -7,40 +7,39 @@ tags: [design, project, playback, recovery, mpeg-ts, hls, mpv, exoplayer]
 
 ## Status
 
-**Phase 1 implemented and verified; Phases 2–5 gated.** The 159-test portable
-native suite and Windows cross-build passed on 2026-08-11. Provider soaks
-established the real failure shapes and validated ordinary cache-stall and EOF
-recovery plus late-frame admission after `Failed`. Deterministic application-
+**Complete for the current provider.** Phase 1 is implemented and verified. The
+159-test portable native suite and Windows cross-build passed on 2026-08-11.
+Provider soaks established the real failure shapes and validated ordinary
+cache-stall and EOF recovery plus late-frame admission after `Failed`. Deterministic application-
 sequencing simulations now close the two timing cases that need not recur by
 chance: a first frame during retry backoff cancels the unissued reopen, and a
 recovered load with advancing input/cache evidence but no presentable frame
-still crosses the eight-second opening bound. Credential-safe Phase 2 research
-found that this account advertises and delivers MPEG-TS only. The research
-implementation was removed, so Phases 2–5 remain proposed and gated for this
-provider; no HLS capability discovery, playback or fallback is implemented.
+still crosses the eight-second opening bound. Credential-safe transport research
+found that this account advertises and delivers MPEG-TS only. HLS implementation,
+comparison and fallback are therefore closed rather than active backlog. They
+may be reconsidered as a separate project only if a supported provider exposes
+a genuine moving HLS playlist.
 
 ## Outcome
 
-Restore live pictures quickly when a provider stream fails, then add genuine HLS
-support and determine from field evidence which transport is better for this
-provider.
+Restore live pictures quickly when the provider's progressive MPEG-TS stream
+fails, and establish its available transport without retaining credentials.
 
 For continuous progressive MPEG-TS, recovery means **fast rejoin**, not
 fast-forward or gap repair. Coax abandons an unhealthy load and accepts the first
 current frame supplied by a fresh request. Content emitted while the connection
 was dead may be permanently unavailable.
 
-If the provider offers a genuine moving HLS playlist, Coax can additionally use
-an addressable live window, segment-level failures and a defined near-live start
-position. HLS should become the preferred transport only if measurements show
-that the provider's implementation is healthier at acceptable latency.
+The provider does not offer a genuine moving HLS playlist for this account, so
+MPEG-TS remains the only selected transport. The HLS notes below are retained as
+research context, not planned product scope.
 
 ```mermaid
 flowchart LR
     A["1. Fast TS rejoin"] --> B["2. Discover HLS safely"]
     B --> C{"Genuine moving playlist?"}
-    C -- No --> D["Keep TS and tune recovery"]
-    C -- Yes --> E["3. Implement HLS transport"]
+    C -- No --> D["Close on TS recovery"]
+    C -. Future provider .-> E["Open a separate HLS project"]
     E --> F["4. Compare on same channels"]
     F --> G["5. Select policy with fallback"]
 ```
@@ -233,7 +232,7 @@ seconds while preserving the recovery episode. Earlier provider captures had
 already established that both input shapes are real; their random recurrence in
 a corrected soak is continuing observation rather than an acceptance gate.
 
-## Phase 2 — Credential-safe transport discovery
+## Phase 2 — Credential-safe transport discovery (closed without shipping)
 
 ### Behavior
 
@@ -272,10 +271,11 @@ into the repository or retained in diagnostics.
 
 Together, these observations establish an alternate MPEG-TS route but no usable
 HLS route for this account. The capability and probe implementations were
-removed rather than shipped, MPEG-TS remains selected, and Phase 3 or later HLS
-work is gated until a provider account with genuine HLS capability is available.
+removed rather than shipped and MPEG-TS remains selected. This closes transport
+discovery for the current provider; a future HLS-capable provider would require
+a separate project rather than silently reopening this one.
 
-## Phase 3 — Real HLS transport
+## Phase 3 — Real HLS transport (deferred, not planned)
 
 ### Behavior
 
@@ -300,7 +300,7 @@ work is gated until a provider account with genuine HLS capability is available.
   segment or always choosing the final advertised segment.
 - Channel changes during playlist activity remain generation-safe.
 
-## Phase 4 — Provider comparison
+## Phase 4 — Provider comparison (deferred, not planned)
 
 Compare TS and HLS on the same representative channels and time periods. Record:
 
@@ -328,7 +328,7 @@ credential-safe wire investigation.
   or unacceptably delayed.
 - Retain both transports unless provider evidence makes one uniformly unusable.
 
-## Phase 5 — Selection and fallback policy
+## Phase 5 — Selection and fallback policy (deferred, not planned)
 
 Start with an explicit account/session preference based on the Phase 4 result.
 Avoid per-failure transport oscillation until both paths are proven.
@@ -373,21 +373,23 @@ The intended end-state is:
 5. **Closed without shipping:** use a local bounded HLS probe and the provider's
    M3U catalogue to corroborate MPEG-TS delivery and no usable HLS route, then
    remove the probe implementation.
-6. **Gated:** make transport selection explicit only when an account with
-   genuine HLS capability is available.
-7. **Gated:** correct HLS startup and connection policy, then add
-   application-level HLS tests.
-8. **Gated:** run a provider comparison and document the selected default.
-9. Consider automatic fallback only after both transports meet their acceptance
-   gates.
+6. **Deferred, not planned:** HLS transport selection requires a separate future
+   project and a provider with genuine HLS capability.
+7. **Deferred, not planned:** HLS startup, connection policy and application-level
+   tests have no supported source to validate against.
+8. **Closed for this provider:** MPEG-TS is the only available transport, so no
+   same-provider TS/HLS comparison can be run.
+9. **Closed for this provider:** there is no second proven transport to fall back
+   to, so automatic transport fallback is not implemented.
 
 ## Definition of done
 
 - TS failure recovery is fast, bounded and measured.
-- Provider HLS availability is known without credential leakage.
-- Genuine HLS can be selected through the complete application path.
-- TS and HLS have been compared on the same representative channel set.
-- The chosen default and fallback are supported by retained sanitized evidence.
+- Provider transport availability is known without credential leakage.
+- MPEG-TS remains the explicit application transport and unsupported HLS is not
+  advertised or selected.
+- The TS-only default and absence of transport fallback are supported by retained
+  sanitized evidence.
 - Documentation distinguishes provider/content loss from player-health recovery.
 - Every new player/core behavior has native tests under `test/`.
 
