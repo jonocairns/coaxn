@@ -10,12 +10,9 @@
 
 #include "app/update_check.hpp"
 #include "core/channel_index.hpp"
-#include "core/playback_health.hpp"
 #include "core/presentation.hpp"
-#include "core/supervisor_host.hpp"
-#include "player/live_sync.hpp"
-#include "player/live_sync_turn.hpp"
 #include "player/mpv_player.hpp"
+#include "player/playback_session.hpp"
 #include "player/session_target_registry.hpp"
 #include "win/app_window.hpp"
 #include "win/composition.hpp"
@@ -60,15 +57,12 @@ private:
     void finish_connect();
     void begin_update_check();
     void finish_update_check();
-    void begin_health_load(core::LoadAttempt load_attempt);
-    void restart_health_supervision(core::LoadAttempt load_attempt);
-    void dispatch_cache_state();
-    void process_player_events();
-    void flush_pending_stream_ends();
-    void sample_playback_health();
-    void execute_supervisor_effect(const core::SupervisorEffect& effect);
-    void on_supervisor_state_changed(const core::SupervisorState& state);
-    void update_live_sync();
+    std::optional<core::RecoveryTransport> execute_supervisor_effect(
+        const core::SupervisorEffect& effect);
+    void on_supervisor_state_changed(const core::SupervisorState& state,
+                                     core::SupervisorStateName previous_state);
+    void observe_player_event(const player::PlayerEvent& event);
+    void log_health_sample(const player::HealthSampleReport& report);
     void play(const core::Channel& channel);
     void apply_vsr();
     void handle_resize(int width, int height);
@@ -115,7 +109,7 @@ private:
     core::ChannelIndex   channels_;
 
     core::SteadySupervisorClock supervisor_clock_;
-    core::PlaybackSupervisor    supervisor_;
+    player::PlaybackSession     playback_session_;
 
     std::unique_ptr<xtream::Client> client_;
     xtream::Credentials             credentials_;
@@ -184,15 +178,6 @@ private:
     int         last_video_width_  = 0;
     int         last_video_height_ = 0;
 
-    // Live-offset control. The turn assembles what each frame reports and its
-    // gate decides what may be learned from mpv's cache signalling; the
-    // controller decides the speed. The turn owns the per-load flags because
-    // the question is when a signal arrived relative to the others in its turn,
-    // which no single half can answer.
-    player::LiveSync     live_sync_;
-    player::LiveSyncTurn live_sync_turn_;
-    int                  rebuffer_count_ = 0;
-
     // Presentation lifetime. The budget bounds and paces rebuilds; the rest is
     // what F1 reports, kept here rather than in the player's diagnostics
     // because it outlives the UI device it describes.
@@ -206,27 +191,6 @@ private:
     int         device_loss_events_    = 0;
     int         presentation_rebuilds_ = 0;
 
-    core::Generation generation_;
-    std::optional<core::PlaybackHealthState> playback_health_;
-    core::BufferHealthSnapshot health_snapshot_;
-    player::TimelineClassification timeline_classification_ =
-        player::TimelineClassification::Unavailable;
-    core::SupervisorStatsSnapshot supervisor_snapshot_;
-    core::TimePoint next_health_sample_{};
-    bool stall_reported_ = false;
-    bool decode_stall_reported_ = false;
-    bool exact_failure_reported_ = false;
-    std::uint64_t last_health_engine_message_count_ = 0;
-    std::uint64_t last_health_unattributed_engine_message_count_ = 0;
-    std::optional<bool> last_cache_state_dispatched_;
-
-    struct PendingStreamEnd {
-        core::Generation generation;
-        core::LoadAttempt load_attempt;
-        core::EndReason reason;
-        core::TimePoint dispatch_at;
-    };
-    std::vector<PendingStreamEnd> pending_stream_ends_;
 };
 
 }  // namespace coax::app

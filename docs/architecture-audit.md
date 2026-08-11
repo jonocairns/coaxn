@@ -12,7 +12,8 @@ two, so the line references hold.
 Findings 1 and the two live-sync defects it enabled testing for have since been
 fixed, at `41843f9` and `5388982`; findings 2 and 8 at `dcba234` and `8deb198`;
 findings 9 and 7 at `840f55a` and `5a691cc`; and the verification half of the P0
-at `e8dc558`. Those entries are kept rather than deleted, marked with the commit
+at `e8dc558`. Finding 4 is fixed by the `PlaybackSession` extraction described
+below. Those entries are kept rather than deleted, marked with the change
 that closed them, so the reasoning stays readable and the same ground is not
 re-audited. Every other finding is still open.
 
@@ -90,7 +91,8 @@ not.
 | ~~P1~~ Fixed at `5388982` | ~~Run the already-portable player suite in native CI and add `LiveSync` coverage (finding 1)~~ | The target split landed and the suite runs on every push. Native CTest went from 66 cases to 98. |
 | P2 | Put `ChannelIndex` in the portable target and cache its derived view (findings 5 and 6) | This restores the documented boundary and removes full-catalogue work at frame rate. |
 | P2 | Move the complete service tick out of `run()` and give deadlines a wakeup that survives a modal loop (finding 3) | Resize/move modal loops currently starve recovery and health work. `5a691cc` gave the frame loop a deadline-driven wait, but that wait does not run while Windows owns the thread, so this needs the hoisted tick and a `WM_TIMER` regardless. |
-| P2 | Extract provider parsing/normalisation, then split playback orchestration from `App` behind a test seam (findings 11 and 4) | These are the largest remaining bodies of Coax-owned protocol logic with no runnable tests. |
+| P2 | Extract provider parsing/normalisation (finding 11) | This is the largest remaining body of Coax-owned protocol logic with no runnable tests. |
+| ~~P2~~ Fixed in this change | ~~Split playback orchestration from `App` behind a portable test seam (finding 4)~~ | `PlaybackSession::service_turn()` now owns the production ordering and is driven by the native recovery integration tests with fake telemetry and typed action callbacks. |
 | P2/P3 | Correct HTTP read failure and the installed log location; remove dead symbols (findings 10, 12 and 13) | These are real but narrower operational or correctness failures. |
 
 ## Findings
@@ -183,8 +185,9 @@ not looking.
 
 ### 3. [P2] The frame tick lives in `run()`, and a resize drag does not run it
 
-`run()` does pump → `process_player_events` → `service_presentation` →
-`supervisor_.poll` → `sample_playback_health` → live sync → `draw_frame`. But
+`run()` pumps mpv, then `PlaybackSession::service_turn()` does player events →
+the `service_presentation` hook → cache state → health sample → supervisor poll
+→ live sync before `App` draws the frame. But
 during a sizing or moving drag the system enters a modal loop inside
 `DefWindowProc`, and per Microsoft's documentation the operation *"is complete
 when DefWindowProc returns"* — so `pump_messages()` does not return for the
@@ -192,7 +195,8 @@ whole gesture. `draw_frame()` still runs, because WM_SIZE and WM_PAINT call the
 paint handler directly ([app_window.cpp:60](../src/win/app_window.cpp)).
 
 Drawing therefore continues while nothing else does. The consequence that
-matters is the supervisor. `supervisor_.poll()` cannot run, but the recovery
+matters is the supervisor. The session's supervisor poll cannot run, but the
+recovery
 budget is measured against a real `steady_clock`:
 [supervisor.cpp:100](../src/core/supervisor.cpp) fails the episode when a
 subsequent failure would schedule `retry_at` beyond
@@ -209,65 +213,87 @@ failure first depends on which state and events existed when the modal loop
 began. The starvation and lost budget are real; the direct-failure sequence is
 not universal.
 
-The comment on the hoisted paint handler is right about why drawing belongs in
-the message loop. The conclusion should have been to hoist the whole tick.
-Extract the body of `run()`'s loop into a `service()` method and call it from
-both places — the same comment already argues the reentrancy is safe, because
-the paint handler is only reached from the message pump, which never runs
+The portable playback part of the tick is now
+`PlaybackSession::service_turn()`, but `App` still needs a callable method that
+pumps mpv and invokes it from both the ordinary loop and a modal-loop wakeup.
+The paint-handler comment already argues the reentrancy is safe, because the
+paint handler is only reached from the message pump, which never runs
 mid-frame. Paint and size messages alone are not a deadline mechanism, though:
 if the pointer stops while Windows still owns the modal loop, neither is
 guaranteed to arrive at the supervisor deadline. A timer or message-wait timeout
 should provide the wakeup.
 
-Half of that wakeup now exists, and it is worth being precise about which half.
+One part of that wakeup exists, and it is worth being precise about which part.
 `5a691cc` gave the frame loop a deadline-driven wait for finding 7's sake, and
 `core::decide_frame_wait` already takes the supervisor's next deadline as one of
 its inputs. What it does not do is run inside the modal loop, which is the whole
-of this finding: nothing in that commit hoists the tick, and between
+of this finding: between
 `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE` the application's pump — wait and all —
-is not running. A `WM_TIMER` armed for the same deadline is the remaining piece,
-and it wants the extracted `service()` to have something to call.
+is not running. A `WM_TIMER` armed for the same deadline and an App method that
+pumps and invokes the extracted session turn are the remaining pieces.
 
 Mpv's event queue is **not** a serious risk here, for the record: property
 changes are coalesced (see [Checked and clean](#checked-and-clean)), so the
-starved `player_.pump()` is not the problem. The starved `supervisor_.poll()`
-is.
+starved `player_.pump()` is not the problem. The starved session poll is.
 
-### 4. [P2] `App` is four objects
+### 4. [Fixed in this change] `App` is four objects
 
-[app.cpp](../src/app/app.cpp) is 1685 lines and `App` carries around fifty
-members. It is at once the ImGui view (roughly 800 lines across `draw_login`,
+**Original finding.** At the audit point, [app.cpp](../src/app/app.cpp) was 1685
+lines and `App` carried around fifty members. It was at once the ImGui view
+(roughly 800 lines across `draw_login`,
 `draw_browser`, `draw_status_bar` and `draw_diagnostics`), the playback
 orchestrator, the presentation-lifetime manager, and the session and
-credentials model. The class holds `search_was_active_`, `pre_mute_volume_` and
+credentials model. The class held `search_was_active_`, `pre_mute_volume_` and
 `overlay_menu_open_` — pure view state — next to `last_cache_state_dispatched_`,
 `pending_stream_ends_` and `exact_failure_reported_`, which are playback
 protocol state.
 
-Size is not the complaint. The complaint is that everything *below* `App` is
-testable and mostly tested, while `App` holds several hundred lines of
+Size was not the complaint. The complaint was that everything *below* `App` was
+testable and mostly tested, while `App` held several hundred lines of
 orchestration that is not UI and cannot be reached by a test.
-`process_player_events` ([app.cpp:485](../src/app/app.cpp)) contains real
+`process_player_events` (then at `app.cpp:485`) contained real
 protocol logic: the exact-failure suppression rule and the 50 ms pending
 stream-end window together decide whether one provider failure costs one
 recovery attempt or two. That is supervisor-grade reasoning living in the view
 layer.
 
-Extract a `PlaybackSession` owning the supervisor, health fold, generation and
-player-event translation. `App` becomes view plus wiring. Merely moving the
-concrete `MpvPlayer` into that class does not make it testable: the session must
+The proposed repair was a `PlaybackSession` owning the supervisor, health fold,
+generation and player-event translation, leaving `App` as view plus wiring.
+Merely moving the concrete `MpvPlayer` into that class does not make it
+testable: the session must
 either depend on an injected player interface/fake, or itself be a pure
-coordinator that emits player commands as data. This is the largest piece of
-work on the list and should be done deliberately, after the cheaper items above
-have made the surrounding code testable.
+coordinator that emits player commands as data.
 
 One slice of this landed on 2026-08-08 under duress: `player::LiveSyncTurn`
 took the load-scoped live-sync flags, the generation-filtered first-frame drain
 and the sample assembly out of `App`, because two successive fixes to a live-sync
 defect passed their isolated tests and were then falsified by the untestable
-application ordering. The remaining protocol in `process_player_events` — the
-exact-failure suppression rule and the 50 ms pending stream-end window — is
-still unreachable.
+application ordering. At that point, the remaining protocol in
+`process_player_events` — the exact-failure suppression rule and the 50 ms
+pending stream-end window — was still unreachable.
+
+**What landed.** Subsequent work had grown `app.cpp` to 1969 lines before this
+extraction; it is now 1737. The remaining difference from the original audit
+count is later UI/log presentation and callback wiring, while the protocol
+state and ordering have moved out of `App`. `player::PlaybackSession` now owns
+generation and load
+lifecycle, the supervisor host and synchronous recovery settlement, the health
+fold and cache-level ordering, pending generic stream ends and exact-failure
+suppression, and live-sync lifecycle and writes. Its engine boundary is a
+portable set of telemetry reads and typed action callbacks; it neither owns nor
+includes `MpvPlayer`.
+Recovery execution returns a transport or rejection to the session; missing,
+rejected and throwing executors all dispatch `SourceFailed`, so no callback can
+leave the supervisor parked with an unsettled effect.
+
+`App::run()` pumps mpv, hands the drained event journal to
+`PlaybackSession::service_turn()`, and supplies the presentation hook at the
+same point in the old ordering. The native recovery integration fixture now
+wraps that production object rather than reproducing the application loop. It
+also pins the 50 ms generic/exact failure coalescing and the complete
+stall-unity/recompute sequence. This closes finding 4, but not finding 3: the
+Windows message loop still needs a timer or equivalent modal-loop wakeup that
+invokes the service turn while `DefWindowProc` owns the thread.
 
 ### 5. [P2] `channel_index` is core code that escaped the core target
 

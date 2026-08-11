@@ -234,8 +234,11 @@ returned closer to live.
 in isolation and portable to another platform. It is now built into
 `coax_player_core` and has a direct test suite that CI runs. The gating around
 it — what a turn may learn from mpv's cache signalling — is `LiveSyncGate` and
-is tested with it. What remains untested is `App`'s wiring of the two, which is
-a few lines and blocked on the same seam as architecture audit finding 4.
+is tested with it. `PlaybackSession` is the production coordinator that feeds
+the gate and controller in application order, and the portable integration
+suite drives that same object through stall entry, repeated stalled turns and
+immediate correction on exit. The remaining gap is field exercise against a
+real provider/mpv stall, not a second copy of the application wiring.
 
 #### The proxy, and why it is one
 
@@ -330,17 +333,19 @@ rather than inside `App`'s frame tick. The gate stayed correct in isolation
 through both falsified attempts, which is the lesson: the defect was never in
 the rule, it was in what the application handed the rule and when.
 
-`player::LiveSyncTurn` now owns that assembly — the per-load flags, the
-generation-filtered event drain, and the construction of the sample from
-`Diagnostics` — and `App` delegates to it rather than keeping its own copy. It
-is one object, driven by the application and by the portable tests in the same
-order, so there is no fixture to drift from the wiring. That is what the earlier
-cases lacked: they supplied a pre-first-frame paused observation the runtime
-usually did not produce, and `a recovery reopen concedes nothing before its own
-first frame` fed `buffering(false)` around the reopen and passed while asserting
-the exact behavior generation 17 falsified. The seam is a partial answer to
-architecture-audit finding 4; the rest of `App`'s orchestration is still not
-reachable by a test.
+`player::LiveSyncTurn` owns that assembly — the per-load flags, the generation-
+filtered event drain, and construction of the sample from `Diagnostics` —
+inside `player::PlaybackSession`. `App` drains mpv events into
+`PlaybackSession::service_turn()`, and the portable recovery fixture wraps that
+same production coordinator with fake telemetry and typed player actions. The
+event → cache level → health fold → supervisor poll → live-sync sequence is
+therefore no longer copied into a test fixture. That is what the earlier cases
+lacked: they supplied a pre-first-frame paused observation the runtime usually
+did not produce, and `a recovery reopen concedes nothing before its own first
+frame` fed `buffering(false)` around the reopen and passed while asserting the
+exact behavior generation 17 falsified. Concrete mpv command execution remains
+in `App`, but its success or failure is synchronously returned to the session,
+which always settles the supervisor effect.
 
 ### Supervisor
 
