@@ -164,10 +164,7 @@ App::App()
                                         core::BufferPhase phase) {
                player_.apply_buffer_phase(generation, phase);
            },
-           .set_speed = [this](double speed) {
-               log::debug("Playback speed requested: {:.2f}x", speed);
-               player_.set_speed(speed);
-           },
+           .set_speed = [this](double speed) { player_.set_speed(speed); },
            .set_live_sync_state = [this](double target, int rebuffers) {
                player_.set_live_sync_state(target, rebuffers);
            },
@@ -607,6 +604,7 @@ void App::log_health_sample(const player::HealthSampleReport& report) {
     }
     const auto& health_snapshot = fold.state.snapshot;
     const auto evidence_generation = health_snapshot.timeline.generation;
+    const double playback_speed = player_.diagnostics().playback_speed;
     const auto warning_component = report.engine_messages_since_sample > 0 &&
             report.engine_warning
         ? player::to_string(report.engine_warning->component) : "none";
@@ -619,7 +617,7 @@ void App::log_health_sample(const player::HealthSampleReport& report) {
     log::debug(
         "Timeline sample generation {} load-attempt={} kind={} elapsed={} playback-move={} "
         "playback-deviation={} cache-end-move={} control-playback-move={} "
-        "control-playback-deviation={} control-baseline={} cache-paused={} "
+        "control-playback-deviation={} control-baseline={} cache-paused={} playback-speed={:.2f}x "
         "previous-cache-paused={} engine-messages-since-sample={} "
         "unattributed-engine-messages-since-sample={} warning-severity={} "
         "warning-component={} warning-category={}",
@@ -633,6 +631,7 @@ void App::log_health_sample(const player::HealthSampleReport& report) {
         signed_seconds(health_snapshot.timeline.control_playback_deviation_seconds),
         control_baseline(health_snapshot.timeline.control_baseline_retained),
         health_snapshot.timeline.cache_paused ? "yes" : "no",
+        playback_speed,
         optional_pause(health_snapshot.timeline.previous_cache_paused),
         report.engine_messages_since_sample,
         report.unattributed_engine_messages_since_sample,
