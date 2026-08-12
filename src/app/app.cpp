@@ -164,7 +164,10 @@ App::App()
                                         core::BufferPhase phase) {
                player_.apply_buffer_phase(generation, phase);
            },
-           .set_speed = [this](double speed) { player_.set_speed(speed); },
+           .set_speed = [this](double speed) {
+               log::debug("Playback speed requested: {:.2f}x", speed);
+               player_.set_speed(speed);
+           },
            .set_live_sync_state = [this](double target, int rebuffers) {
                player_.set_live_sync_state(target, rebuffers);
            },
