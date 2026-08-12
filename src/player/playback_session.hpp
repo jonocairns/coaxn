@@ -115,6 +115,7 @@ private:
     // Called only after a successful player recreation. Ordinary recovery
     // reopens deliberately retain the live target and speed-control history.
     void backend_recreated();
+    void reset_live_state();
     void complete_recovery(const core::SupervisorEffect& effect,
                            std::optional<core::RecoveryTransport> transport);
     [[nodiscard]] const Diagnostics& diagnostics() const;

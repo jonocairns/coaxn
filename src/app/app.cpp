@@ -697,10 +697,8 @@ void App::on_supervisor_state_changed(const core::SupervisorState& state,
     if (previous_state == core::SupervisorStateName::Failed &&
         state.name == core::SupervisorStateName::Zap &&
         state.generation == playback_session_.generation()) {
-        // The same already-issued load was intentionally left alive after the
-        // command budget expired. Its first frame is a one-shot admission to
-        // probation, so restart the fold without resetting LiveSyncTurn's
-        // first-frame edge for this same physical load.
+        // PlaybackSession admitted the still-running load back into probation
+        // and restarted its health fold; App only reports that recovery.
         set_status("Playback resumed; confirming stability");
     }
     if (state.name == core::SupervisorStateName::Failed) {

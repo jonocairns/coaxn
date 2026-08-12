@@ -45,10 +45,7 @@ PlaybackSession::PlaybackSession(const core::SupervisorClock& clock,
       }, policy) {}
 
 core::Generation PlaybackSession::begin_channel() {
-    live_sync_.reset();
-    live_sync_turn_.reset();
-    rebuffer_count_ = 0;
-    if (callbacks_.set_speed) callbacks_.set_speed(1.0);
+    reset_live_state();
 
     generation_ = core::Generation{generation_.value() + 1};
     supervisor_.dispatch(core::ChannelRequested{generation_});
@@ -69,6 +66,10 @@ void PlaybackSession::load_failed(core::LoadAttempt load_attempt) {
 }
 
 void PlaybackSession::backend_recreated() {
+    reset_live_state();
+}
+
+void PlaybackSession::reset_live_state() {
     live_sync_.reset();
     live_sync_turn_.reset();
     rebuffer_count_ = 0;
@@ -294,10 +295,14 @@ void PlaybackSession::sample_health() {
     timeline_classification_ = classify_timeline(health_snapshot_.timeline, options.policy);
 
     if (callbacks_.on_health_sample) {
-        callbacks_.on_health_sample({fold, observation.generation,
-                                     timeline_classification_, engine_delta,
-                                     unattributed_delta,
-                                     current_diagnostics.last_engine_message});
+        callbacks_.on_health_sample({
+            .fold = fold,
+            .observed_generation = observation.generation,
+            .classification = timeline_classification_,
+            .engine_messages_since_sample = engine_delta,
+            .unattributed_engine_messages_since_sample = unattributed_delta,
+            .engine_warning = current_diagnostics.last_engine_message,
+        });
     }
     if (fold.state.snapshot.progressing && *fold.state.snapshot.progressing) {
         supervisor_.dispatch(core::ForwardProgressObserved{

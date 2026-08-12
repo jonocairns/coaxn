@@ -15,7 +15,7 @@ findings 9 and 7 at `840f55a` and `5a691cc`; and the verification half of the P0
 at `e8dc558`. Finding 4 was fixed at `d76a4e9` by the `PlaybackSession`
 extraction described below. Those entries are kept rather than deleted, marked
 with the commit that closed them, so the reasoning stays readable and the same
-ground is not re-audited. Every other finding is still open.
+ground is not re-audited. Every finding not named above remains open.
 
 Line references for the still-open findings are as of `f8a77d8` unless a fix
 since moved them, in which case that fix refreshed them: finding 10's
@@ -562,7 +562,9 @@ Verified at zero call sites across `src/` and `test/`:
 ## How the findings were checked
 
 **Native portability.** Every file claimed portable was compiled with the
-system GCC, outside both nix shells, with the project's own warning flags:
+system GCC, outside both nix shells, with the project's own warning flags. This
+is the historical command captured at `f8a77d8`; run it from a checkout of that
+commit, where the subsequently removed executor still exists:
 
 ```bash
 g++ -std=c++20 -Wall -Wextra -Wpedantic -I src -fsyntax-only src/player/live_sync.cpp src/player/player_event_adapter.cpp src/player/recovery_effect_executor.cpp src/player/transport_log_classifier.cpp src/player/load_diagnostics.cpp src/core/channel_index.cpp
@@ -571,8 +573,10 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -I src -fsyntax-only src/player/live_syn
 All six compile clean. As a negative control, `mpv_player.cpp` fails on
 `unknwn.h`, and it is the only file under `src/player/` that does.
 
-**The orphaned test suite.** Built against the Catch2 already fetched into
-`build-core/`, linking the five portable player units and the core sources:
+**The orphaned test suite.** At `f8a77d8`, it was built against the Catch2
+already fetched into `build-core/`, linking the five portable player units and
+the core sources. This historical reproduction command likewise belongs to a
+checkout of that commit:
 
 ```bash
 g++ -std=c++20 -I src -I build-core/_deps/catch2-src/src -I build-core/_deps/catch2-build/generated-includes test/player/player_event_adapter_tests.cpp src/player/player_event_adapter.cpp src/player/load_diagnostics.cpp src/player/recovery_effect_executor.cpp src/player/transport_log_classifier.cpp src/player/live_sync.cpp src/core/supervisor.cpp src/core/playback_health.cpp src/core/presentation.cpp src/core/supervisor_host.cpp src/core/version.cpp src/util/redact.cpp build-core/_deps/catch2-build/src/libCatch2Main.a build-core/_deps/catch2-build/src/libCatch2.a -o /tmp/adapter_tests && /tmp/adapter_tests
@@ -673,7 +677,8 @@ so they are not raised again:
   uncoalesced `MPV_EVENT_LOG_MESSAGE` at warn level. Finding 3 stands on
   supervisor starvation and elapsed wall-clock budget instead; its exact
   post-drag transition is state-dependent as that finding now records.
-- **`transport_log_classifier` and `recovery_effect_executor` are untested.**
+- **Historical claim: `transport_log_classifier` and
+  `recovery_effect_executor` are untested.**
   Both were tested, in the suite that never ran — test cases at lines 233, 270,
   291, 309 and 363 of what was then
   `test/player/player_event_adapter_tests.cpp`, now
