@@ -17,11 +17,11 @@ using namespace coax;
 TEST_CASE("adapter drains every edge once in mpv order with issue-time generations") {
     player::PlayerEventAdapter adapter;
     adapter.track_load(10, core::Generation{1}, core::LoadAttempt{1});
-    adapter.command_result(10, 0);
+    adapter.command_result(10, 0, 100);
     adapter.start_file(100);
     adapter.playback_restart(100);
     adapter.track_load(11, core::Generation{2}, core::LoadAttempt{1});
-    adapter.command_result(11, 0);
+    adapter.command_result(11, 0, 101);
     adapter.start_file(101);
     adapter.end_file(100, player::PlayerEndReason::Stop, 0);
     adapter.playback_restart(101);
@@ -45,7 +45,7 @@ TEST_CASE("adapter drains every edge once in mpv order with issue-time generatio
 TEST_CASE("a superseded load cannot publish a late first playback start") {
     player::PlayerEventAdapter adapter;
     adapter.track_load(10, core::Generation{4}, core::LoadAttempt{1});
-    adapter.command_result(10, 0);
+    adapter.command_result(10, 0, 100);
     adapter.start_file(100);
     REQUIRE(adapter.drain().size() == 1);
 
@@ -53,7 +53,7 @@ TEST_CASE("a superseded load cannot publish a late first playback start") {
     // entry is still active and may publish a delayed restart; that edge belongs
     // to the load being replaced and must not arm the new load's rebuffer gate.
     adapter.track_load(11, core::Generation{4}, core::LoadAttempt{2});
-    adapter.command_result(11, 0);
+    adapter.command_result(11, 0, 101);
     REQUIRE(adapter.drain().size() == 1);
     adapter.playback_restart(100);
     CHECK(adapter.drain().empty());
@@ -73,7 +73,7 @@ TEST_CASE("a superseded load cannot publish a late first playback start") {
 TEST_CASE("structured end reason stays attached to its load generation") {
     player::PlayerEventAdapter adapter;
     adapter.track_load(10, core::Generation{7}, core::LoadAttempt{1});
-    adapter.command_result(10, 0);
+    adapter.command_result(10, 0, 70);
     adapter.start_file(70);
     adapter.end_file(70, player::PlayerEndReason::Error, -13);
     const auto events = adapter.drain();
@@ -87,7 +87,7 @@ TEST_CASE("structured end reason stays attached to its load generation") {
 TEST_CASE("HLS redirect transfers generation ownership to inserted entries") {
     player::PlayerEventAdapter adapter;
     adapter.track_load(12, core::Generation{8}, core::LoadAttempt{1});
-    adapter.command_result(12, 0);
+    adapter.command_result(12, 0, 80);
     adapter.start_file(80);
     adapter.end_file(80, player::PlayerEndReason::Redirect, 0, 81, 2);
     adapter.start_file(81);
@@ -106,7 +106,7 @@ TEST_CASE("HLS redirect transfers generation ownership to inserted entries") {
 TEST_CASE("redirect rehash preserves stopped-entry load identity") {
     player::PlayerEventAdapter adapter;
     adapter.track_load(12, core::Generation{8}, core::LoadAttempt{3});
-    adapter.command_result(12, 0);
+    adapter.command_result(12, 0, 80);
     adapter.start_file(80);
     adapter.intentional_stop(80, core::Generation{9},
                              player::IntentionalStopKind::Requested);
@@ -175,7 +175,7 @@ TEST_CASE("backend failure and disposal release stale correlations") {
     CHECK_FALSE(adapter.active_generation());
 
     adapter.track_load(30, core::Generation{3}, core::LoadAttempt{1});
-    adapter.command_result(30, 0);
+    adapter.command_result(30, 0, 300);
     adapter.dispose();
     CHECK(adapter.drain().empty());
     adapter.start_file(300);
@@ -187,17 +187,17 @@ TEST_CASE("retiring a generation before start-file fences every late edge") {
     adapter.track_load(10, core::Generation{4}, core::LoadAttempt{1});
     adapter.track_property(20, core::Generation{4}, core::BufferPhase::Zap,
                            player::BufferProperty::CacheSeconds);
+    adapter.command_result(10, 0, 400);
     adapter.retire_generation(core::Generation{4});
 
     // A rapid restart is already queued when the old backend edges arrive.
     adapter.track_load(11, core::Generation{5}, core::LoadAttempt{1});
-    adapter.command_result(10, 0);
     adapter.command_result(20, 0);
     CHECK_FALSE(adapter.start_file(400));
     adapter.playback_restart(400);
     adapter.end_file(400, player::PlayerEndReason::Error, -13);
 
-    adapter.command_result(11, 0);
+    adapter.command_result(11, 0, 500);
     CHECK(adapter.start_file(500));
     adapter.playback_restart(500);
     const auto events = adapter.drain();
@@ -210,6 +210,28 @@ TEST_CASE("retiring a generation before start-file fences every late edge") {
     CHECK(adapter.active_load_attempt() == core::LoadAttempt{1});
 }
 
+TEST_CASE("an accepted retired load may produce no start-file before the fresh load") {
+    player::PlayerEventAdapter adapter;
+    adapter.track_load(10, core::Generation{4}, core::LoadAttempt{1});
+    adapter.retire_generation(core::Generation{4});
+    adapter.track_load(11, core::Generation{5}, core::LoadAttempt{1});
+
+    // mpv can accept the old loadfile, then let Stop clear it before startup.
+    // The next START_FILE is therefore the fresh entry, not an old tombstone.
+    adapter.command_result(10, 0, 400);
+    adapter.command_result(11, 0, 500);
+    CHECK(adapter.start_file(500));
+    adapter.playback_restart(500);
+
+    const auto events = adapter.drain();
+    REQUIRE(events.size() == 2);
+    CHECK(events[0].generation == core::Generation{5});
+    CHECK(std::holds_alternative<player::LoadCommandResult>(events[0].payload));
+    CHECK(events[1].generation == core::Generation{5});
+    CHECK(std::holds_alternative<player::FirstPlaybackStart>(events[1].payload));
+    CHECK(adapter.active_generation() == core::Generation{5});
+}
+
 TEST_CASE("a rejected retired load cannot consume the next start-file edge") {
     player::PlayerEventAdapter adapter;
     adapter.track_load(10, core::Generation{4}, core::LoadAttempt{1});
@@ -217,7 +239,7 @@ TEST_CASE("a rejected retired load cannot consume the next start-file edge") {
     adapter.track_load(11, core::Generation{5}, core::LoadAttempt{1});
 
     adapter.command_result(10, -1);
-    adapter.command_result(11, 0);
+    adapter.command_result(11, 0, 500);
     CHECK(adapter.start_file(500));
     adapter.playback_restart(500);
     const auto events = adapter.drain();
@@ -230,7 +252,7 @@ TEST_CASE("a rejected retired load cannot consume the next start-file edge") {
 TEST_CASE("retiring an active generation makes its stop acknowledgement cleanup-only") {
     player::PlayerEventAdapter adapter;
     adapter.track_load(10, core::Generation{4}, core::LoadAttempt{1});
-    adapter.command_result(10, 0);
+    adapter.command_result(10, 0, 400);
     adapter.start_file(400);
     adapter.playback_restart(400);
     REQUIRE(adapter.drain().size() == 2);
@@ -244,7 +266,8 @@ TEST_CASE("retiring an active generation makes its stop acknowledgement cleanup-
 
 TEST_CASE("explicit and replacement stops are classified separately") {
     player::PlayerEventAdapter adapter;
-    adapter.track_load(1, core::Generation{4}, core::LoadAttempt{1}); adapter.command_result(1, 0);
+    adapter.track_load(1, core::Generation{4}, core::LoadAttempt{1});
+    adapter.command_result(1, 0, 40);
     adapter.start_file(40);
     adapter.intentional_stop(40, core::Generation{5},
                              player::IntentionalStopKind::Requested);

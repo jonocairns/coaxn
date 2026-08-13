@@ -5,6 +5,7 @@
 #include <mpv/client.h>
 
 #include <format>
+#include <string_view>
 
 #include "core/policy.hpp"
 #include "core/supervisor.hpp"
@@ -63,6 +64,21 @@ constexpr const char* kDisplaySwapchainProperty = "display-swapchain";
 
 std::uint64_t swapchain_address(void* pointer) {
     return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer));
+}
+
+std::optional<std::int64_t> loadfile_playlist_entry_id(const mpv_event& event) {
+    if (event.error < 0 || !event.data) return std::nullopt;
+    const auto& result = static_cast<const mpv_event_command*>(event.data)->result;
+    if (result.format != MPV_FORMAT_NODE_MAP || !result.u.list) return std::nullopt;
+    const auto& map = *result.u.list;
+    if (!map.keys || !map.values) return std::nullopt;
+    for (int index = 0; index < map.num; ++index) {
+        if (map.keys[index] && std::string_view{map.keys[index]} == "playlist_entry_id" &&
+            map.values[index].format == MPV_FORMAT_INT64) {
+            return map.values[index].u.int64;
+        }
+    }
+    return std::nullopt;
 }
 
 }  // namespace
@@ -585,7 +601,8 @@ void MpvPlayer::pump() {
                 handle_property(event->reply_userdata,
                     *static_cast<mpv_event_property*>(event->data)); break;
             case MPV_EVENT_COMMAND_REPLY:
-                events_.command_result(event->reply_userdata, event->error);
+                events_.command_result(event->reply_userdata, event->error,
+                                       loadfile_playlist_entry_id(*event));
                 break;
             case MPV_EVENT_START_FILE: {
                 const auto* start = static_cast<mpv_event_start_file*>(event->data);

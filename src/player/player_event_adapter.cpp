@@ -7,7 +7,6 @@ namespace coax::player {
 void PlayerEventAdapter::track_load(std::uint64_t request_id, core::Generation generation,
                                     core::LoadAttempt load_attempt) {
     const LoadIdentity identity{generation, load_attempt};
-    pending_loads_.push_back({request_id, identity, false});
     load_requests_[request_id] = identity;
     backend_failure_reported_ = false;
 }
@@ -17,16 +16,19 @@ void PlayerEventAdapter::track_property(std::uint64_t request_id, core::Generati
     property_requests_[request_id] = {generation, phase, property};
 }
 
-void PlayerEventAdapter::command_result(std::uint64_t request_id, int error) {
+void PlayerEventAdapter::command_result(
+    std::uint64_t request_id, int error,
+    std::optional<std::int64_t> playlist_entry_id) {
     if (retired_load_requests_.contains(request_id)) {
-        if (error < 0) remove_pending_load(request_id);
         retired_load_requests_.erase(request_id);
         return;
     }
     if (const auto load = load_requests_.find(request_id); load != load_requests_.end()) {
         events_.push_back({load->second.generation, load->second.load_attempt,
                            LoadCommandResult{request_id, error >= 0, error}});
-        if (error < 0) remove_pending_load(request_id);
+        if (error >= 0 && playlist_entry_id) {
+            pending_entries_.insert_or_assign(*playlist_entry_id, load->second);
+        }
         load_requests_.erase(load);
         return;
     }
@@ -45,16 +47,10 @@ void PlayerEventAdapter::command_rejected_immediately(std::uint64_t request_id, 
 }
 
 bool PlayerEventAdapter::start_file(std::int64_t playlist_entry_id) {
-    if (!pending_loads_.empty()) {
-        const auto pending = pending_loads_.front();
-        pending_loads_.pop_front();
-        // Preserve a retired load's place in mpv's ordered START_FILE stream.
-        // Without the tombstone, its late edge could consume the fresh load
-        // queued by a rapid Stop -> Start and inherit the new generation.
-        if (pending.retired) {
-            retired_load_requests_.erase(pending.request_id);
-            return false;
-        }
+    if (const auto pending = pending_entries_.find(playlist_entry_id);
+        pending != pending_entries_.end()) {
+        const auto identity = pending->second;
+        pending_entries_.erase(pending);
         if (active_entry_) {
             const auto active = entries_.find(*active_entry_);
             if (active != entries_.end()) {
@@ -62,7 +58,7 @@ bool PlayerEventAdapter::start_file(std::int64_t playlist_entry_id) {
                                  IntentionalStopKind::Replaced);
             }
         }
-        entries_[playlist_entry_id] = pending.identity;
+        entries_[playlist_entry_id] = identity;
     } else if (!entries_.contains(playlist_entry_id)) {
         return false;
     }
@@ -81,7 +77,7 @@ void PlayerEventAdapter::playback_restart(std::int64_t playlist_entry_id) {
     // the replacement. Letting that edge through would make the new load look
     // as though it had already produced a frame and turn its initial cache fill
     // into a learned rebuffer.
-    if (!pending_loads_.empty()) return;
+    if (has_pending_load()) return;
 
     first_started_[playlist_entry_id] = true;
     events_.push_back({entry->second.generation, entry->second.load_attempt,
@@ -145,14 +141,16 @@ void PlayerEventAdapter::transport_failure(core::Generation generation,
 }
 
 void PlayerEventAdapter::retire_generation(core::Generation generation) {
-    for (auto& pending : pending_loads_) {
-        if (pending.identity.generation == generation) {
-            pending.retired = true;
-            retired_load_requests_.insert(pending.request_id);
+    for (auto request = load_requests_.begin(); request != load_requests_.end();) {
+        if (request->second.generation == generation) {
+            retired_load_requests_.insert(request->first);
+            request = load_requests_.erase(request);
+        } else {
+            ++request;
         }
     }
-    std::erase_if(load_requests_, [&](const auto& request) {
-        return request.second.generation == generation;
+    std::erase_if(pending_entries_, [&](const auto& entry) {
+        return entry.second.generation == generation;
     });
     std::erase_if(property_requests_, [&](const auto& request) {
         return request.second.generation == generation;
@@ -199,8 +197,8 @@ void PlayerEventAdapter::dispose() {
 }
 
 void PlayerEventAdapter::clear_correlations() {
-    pending_loads_.clear();
     load_requests_.clear();
+    pending_entries_.clear();
     retired_load_requests_.clear();
     property_requests_.clear();
     entries_.clear();
@@ -209,12 +207,8 @@ void PlayerEventAdapter::clear_correlations() {
     active_entry_.reset();
 }
 
-void PlayerEventAdapter::remove_pending_load(std::uint64_t request_id) {
-    const auto found = std::find_if(pending_loads_.begin(), pending_loads_.end(),
-                                    [request_id](const auto& pending) {
-                                        return pending.request_id == request_id;
-                                    });
-    if (found != pending_loads_.end()) pending_loads_.erase(found);
+bool PlayerEventAdapter::has_pending_load() const {
+    return !load_requests_.empty() || !pending_entries_.empty();
 }
 
 }  // namespace coax::player

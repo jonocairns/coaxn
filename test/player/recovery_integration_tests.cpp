@@ -80,7 +80,9 @@ public:
     }
 
     void deliver_load_command(const LoadHandle& load, int error = 0) {
-        events_.command_result(load.request_id, error);
+        events_.command_result(
+            load.request_id, error,
+            error < 0 ? std::nullopt : std::optional<std::int64_t>{load.entry_id});
     }
 
     bool deliver_start(const LoadHandle& load, bool first_frame = false) {
@@ -236,7 +238,10 @@ private:
         const auto request_id = ++request_id_;
         active_entry_ = ++entry_id_;
         events_.track_load(request_id, generation_, load_attempt);
-        if (publish_start_file) events_.start_file(active_entry_);
+        if (publish_start_file) {
+            events_.command_result(request_id, 0, active_entry_);
+            events_.start_file(active_entry_);
+        }
         return {request_id, active_entry_, generation_, load_attempt};
     }
 
@@ -294,7 +299,7 @@ TEST_CASE("stopped session performs no health live-sync deadline or recovery wor
     CHECK(app.effects.empty());
 }
 
-TEST_CASE("rapid stop start fences late old-generation command frame stop and end edges") {
+TEST_CASE("rapid stop start accepts fresh start when the old load never starts") {
     RecoveryAppLoop app;
     const auto old = app.play(/*publish_start_file=*/false);
     REQUIRE(app.stop());
@@ -306,7 +311,8 @@ TEST_CASE("rapid stop start fences late old-generation command frame stop and en
     CHECK(app.state().load_intent == core::LoadIntent::FreshSelection);
 
     app.deliver_load_command(old);
-    CHECK_FALSE(app.deliver_start(old, /*first_frame=*/true));
+    // Stop may cancel the accepted old load before mpv publishes START_FILE.
+    // The fresh entry must still correlate without consuming an old tombstone.
     app.deliver_end(old, player::PlayerEndReason::Stop);
     app.deliver_end(old, player::PlayerEndReason::Error);
     CHECK(app.state().generation == fresh.generation);
