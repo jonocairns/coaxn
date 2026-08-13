@@ -29,6 +29,7 @@ constexpr int kInitialHeight = 900;
 constexpr float kLoginCardWidth   = 430.0f;
 constexpr float kBrowserMaxWidth  = 430.0f;
 constexpr float kConnectHeight    = 40.0f;
+constexpr float kLoadingMaxWidth  = 360.0f;
 constexpr float kOverlayRampExtra = 46.0f;
 constexpr float kVolumeWidth      = 124.0f;
 constexpr float kLogWidth         = 560.0f;
@@ -550,6 +551,8 @@ void App::play(const core::Channel& channel) {
 
     // Latency learned on one channel says nothing about the next.
     const auto generation = playback_session_.begin_channel();
+    loading_channel_generation_ = generation;
+    set_status(std::format("Loading {}", channel.name));
     const auto correlation = target_registry_.identify_channel(channel.id);
     log::info("Channel selected generation {} provider-session={} channel-session={}",
               generation.value(), correlation.provider_session,
@@ -565,7 +568,6 @@ void App::play(const core::Channel& channel) {
         playback_session_.load_failed(load_attempt);
     }
     apply_vsr();
-    set_status(std::format("Playing {}", channel.name));
 }
 
 void App::observe_player_event(const player::PlayerEvent& event) {
@@ -686,8 +688,17 @@ std::optional<core::RecoveryTransport> App::execute_supervisor_effect(
 
 void App::on_supervisor_state_changed(const core::SupervisorState& state,
                                       core::SupervisorStateName previous_state) {
+    if (loading_channel_generation_ &&
+        state.generation == *loading_channel_generation_ && state.first_frame_at) {
+        loading_channel_generation_.reset();
+        set_status(std::format("Playing {}", playing_channel_name_));
+    }
     if (state.name == core::SupervisorStateName::Failed &&
         previous_state != core::SupervisorStateName::Failed) {
+        if (loading_channel_generation_ &&
+            state.generation == *loading_channel_generation_) {
+            loading_channel_generation_.reset();
+        }
         failure_power_grace_until_ =
             supervisor_clock_.now() + core::kTerminalFailurePowerGrace;
     } else if (state.name != core::SupervisorStateName::Failed) {
@@ -896,6 +907,65 @@ void App::draw_login() {
 float App::browser_width() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     return std::min(viewport->WorkSize.x * 0.34f, theme::scaled(kBrowserMaxWidth));
+}
+
+bool App::channel_loading() const {
+    if (!loading_channel_generation_) return false;
+    const auto& state = playback_session_.state();
+    return state.generation == *loading_channel_generation_ && !state.first_frame_at &&
+           state.name != core::SupervisorStateName::Idle &&
+           state.name != core::SupervisorStateName::Failed;
+}
+
+void App::draw_channel_loading() {
+    if (!channel_loading()) return;
+
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float left = viewport->WorkPos.x + (show_browser_ ? browser_width() : 0.0f);
+    const float available_width = viewport->WorkPos.x + viewport->WorkSize.x - left;
+    if (available_width <= 0.0f) return;
+
+    ImGui::SetNextWindowPos(ImVec2(left, viewport->WorkPos.y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(available_width, viewport->WorkSize.y), ImGuiCond_Always);
+    ImGui::Begin("##channel-loading", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing);
+
+    const float radius    = theme::scaled(11.0f);
+    const float thickness = theme::scaled(2.0f);
+    const float gap       = theme::scaled(theme::kSpace3);
+    const float pad       = theme::scaled(theme::kSpace5);
+    const float text_room = std::max(
+        1.0f, std::min(theme::scaled(kLoadingMaxWidth), available_width - pad * 2.0f));
+    const std::string label = elide(std::format("Loading {}", playing_channel_name_), text_room);
+    const ImVec2 text_size = ImGui::CalcTextSize(label.c_str());
+
+    const float content_width  = std::max(radius * 2.0f, text_size.x);
+    const float content_height = radius * 2.0f + gap + text_size.y;
+    const ImVec2 center(left + available_width * 0.5f,
+                        viewport->WorkPos.y + viewport->WorkSize.y * 0.5f);
+    const ImVec2 surface_min(center.x - content_width * 0.5f - pad,
+                             center.y - content_height * 0.5f - pad);
+    const ImVec2 surface_max(center.x + content_width * 0.5f + pad,
+                             center.y + content_height * 0.5f + pad);
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(surface_min, surface_max, theme::kScrim,
+                        theme::scaled(theme::kSpace2));
+
+    const ImVec2 spinner(center.x, surface_min.y + pad + radius);
+    draw->AddCircle(spinner, radius, theme::kTrackMark, 32, thickness);
+
+    constexpr float kTau = 6.2831853071795864769f;
+    const float start = static_cast<float>(ImGui::GetTime()) * kTau * 0.85f;
+    draw->PathArcTo(spinner, radius, start, start + kTau * 0.72f, 24);
+    draw->PathStroke(theme::kAccent, ImDrawFlags_None, thickness);
+
+    draw->AddText(ImVec2(center.x - text_size.x * 0.5f,
+                         spinner.y + radius + gap),
+                  theme::kText, label.c_str());
+    ImGui::End();
 }
 
 void App::draw_browser() {
@@ -1253,6 +1323,8 @@ void App::draw_status_bar() {
         theme::ScopedStyle style;
         style.color(ImGuiCol_Text, theme::kError);
         ImGui::TextUnformatted(status_.c_str());
+    } else if (channel_loading()) {
+        ImGui::TextDisabled("Loading");
     } else if (diagnostics.paused_for_cache) {
         ImGui::TextDisabled("Buffering");
     } else if (paused_) {
@@ -1657,6 +1729,7 @@ void App::draw_frame() {
             break;
         case Stage::Browsing:
             draw_browser();
+            draw_channel_loading();
             draw_status_bar();
             break;
     }
