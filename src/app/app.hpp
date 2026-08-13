@@ -46,6 +46,7 @@ private:
     void draw_frame();
     void draw_login();
     void draw_browser();
+    void draw_channel_loading();
     // The column the channel list occupies. Shared with the playback overlay,
     // which starts where it ends rather than running underneath it.
     [[nodiscard]] static float browser_width();
@@ -91,6 +92,7 @@ private:
     [[nodiscard]] DWORD next_turn_wait_ms() const;
     void load_saved_portal();
     void save_portal() const;
+    [[nodiscard]] bool channel_loading() const;
 
     // The status line is both the progress report and the error channel, so
     // what it is carrying has to be recorded alongside the text for the login
@@ -142,6 +144,10 @@ private:
     std::string search_;
     std::string playing_channel_id_;
     std::string playing_channel_name_;
+    // The selected channel owns its loading state until its exact generation
+    // produces a first frame or fails. A generation fence matters here: a late
+    // frame from the channel being replaced must not dismiss the new loader.
+    std::optional<core::Generation> loading_channel_generation_;
     bool        show_browser_     = true;
     // Whether the previous frame was filtering, so the frame a search clears
     // can collapse the categories it opened. Without the edge the collapsed
