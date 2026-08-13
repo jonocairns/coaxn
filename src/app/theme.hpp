@@ -260,6 +260,7 @@ void draw_logo(ImDrawList* draw_list, ImVec2 centre, float radius);
 
 void draw_play_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
 void draw_pause_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
+void draw_stop_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
 // `waves` is how many arcs stand beside the cone; zero draws the muted cross.
 void draw_volume_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color, int waves);
 void draw_settings_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);

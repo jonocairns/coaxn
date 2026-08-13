@@ -30,6 +30,13 @@ struct SwapchainIdentity {
     constexpr bool operator==(const SwapchainIdentity&) const = default;
 };
 
+// Positive swap-chain publications require the presentation owner to expect
+// video content. A null publication is always allowed to retire content.
+[[nodiscard]] constexpr bool swapchain_publication_allowed(
+    bool video_content_expected, const SwapchainIdentity& incoming) {
+    return video_content_expected || !incoming.present();
+}
+
 enum class SwapchainTransition {
     // A duplicate notification for the object already attached. mpv re-reports
     // an unchanged property on reconfiguration, and re-attaching on every event

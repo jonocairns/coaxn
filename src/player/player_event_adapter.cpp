@@ -7,7 +7,7 @@ namespace coax::player {
 void PlayerEventAdapter::track_load(std::uint64_t request_id, core::Generation generation,
                                     core::LoadAttempt load_attempt) {
     const LoadIdentity identity{generation, load_attempt};
-    pending_loads_.push_back({request_id, identity});
+    pending_loads_.push_back({request_id, identity, false});
     load_requests_[request_id] = identity;
     backend_failure_reported_ = false;
 }
@@ -18,6 +18,11 @@ void PlayerEventAdapter::track_property(std::uint64_t request_id, core::Generati
 }
 
 void PlayerEventAdapter::command_result(std::uint64_t request_id, int error) {
+    if (retired_load_requests_.contains(request_id)) {
+        if (error < 0) remove_pending_load(request_id);
+        retired_load_requests_.erase(request_id);
+        return;
+    }
     if (const auto load = load_requests_.find(request_id); load != load_requests_.end()) {
         events_.push_back({load->second.generation, load->second.load_attempt,
                            LoadCommandResult{request_id, error >= 0, error}});
@@ -39,10 +44,17 @@ void PlayerEventAdapter::command_rejected_immediately(std::uint64_t request_id, 
     command_result(request_id, error < 0 ? error : -1);
 }
 
-void PlayerEventAdapter::start_file(std::int64_t playlist_entry_id) {
+bool PlayerEventAdapter::start_file(std::int64_t playlist_entry_id) {
     if (!pending_loads_.empty()) {
         const auto pending = pending_loads_.front();
         pending_loads_.pop_front();
+        // Preserve a retired load's place in mpv's ordered START_FILE stream.
+        // Without the tombstone, its late edge could consume the fresh load
+        // queued by a rapid Stop -> Start and inherit the new generation.
+        if (pending.retired) {
+            retired_load_requests_.erase(pending.request_id);
+            return false;
+        }
         if (active_entry_) {
             const auto active = entries_.find(*active_entry_);
             if (active != entries_.end()) {
@@ -52,10 +64,11 @@ void PlayerEventAdapter::start_file(std::int64_t playlist_entry_id) {
         }
         entries_[playlist_entry_id] = pending.identity;
     } else if (!entries_.contains(playlist_entry_id)) {
-        return;
+        return false;
     }
     first_started_[playlist_entry_id] = false;
     active_entry_ = playlist_entry_id;
+    return true;
 }
 
 void PlayerEventAdapter::playback_restart(std::int64_t playlist_entry_id) {
@@ -131,6 +144,34 @@ void PlayerEventAdapter::transport_failure(core::Generation generation,
     events_.push_back({generation, load_attempt, TransportFailureDetected{reason}});
 }
 
+void PlayerEventAdapter::retire_generation(core::Generation generation) {
+    for (auto& pending : pending_loads_) {
+        if (pending.identity.generation == generation) {
+            pending.retired = true;
+            retired_load_requests_.insert(pending.request_id);
+        }
+    }
+    std::erase_if(load_requests_, [&](const auto& request) {
+        return request.second.generation == generation;
+    });
+    std::erase_if(property_requests_, [&](const auto& request) {
+        return request.second.generation == generation;
+    });
+    std::vector<std::int64_t> retired_entries;
+    for (const auto& [entry_id, identity] : entries_) {
+        if (identity.generation == generation) retired_entries.push_back(entry_id);
+    }
+    for (const auto entry_id : retired_entries) {
+        entries_.erase(entry_id);
+        stop_intents_.erase(entry_id);
+        first_started_.erase(entry_id);
+        if (active_entry_ == entry_id) active_entry_.reset();
+    }
+    std::erase_if(events_, [&](const PlayerEvent& event) {
+        return event.generation == generation;
+    });
+}
+
 std::vector<PlayerEvent> PlayerEventAdapter::drain() {
     auto result = std::move(events_);
     events_.clear();
@@ -160,6 +201,7 @@ void PlayerEventAdapter::dispose() {
 void PlayerEventAdapter::clear_correlations() {
     pending_loads_.clear();
     load_requests_.clear();
+    retired_load_requests_.clear();
     property_requests_.clear();
     entries_.clear();
     stop_intents_.clear();

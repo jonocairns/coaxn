@@ -49,17 +49,52 @@ core::PlaybackHealthObservation playing(double playback_time_seconds) {
 class RecoveryAppLoop {
 public:
     enum class ExecutionMode { Success, Missing, Reject, Throw, ThrowRestore };
+    struct LoadHandle {
+        std::uint64_t request_id;
+        std::int64_t entry_id;
+        core::Generation generation;
+        core::LoadAttempt load_attempt;
+    };
 
     explicit RecoveryAppLoop(
         ExecutionMode mode = ExecutionMode::Success,
         core::RecoveryPolicy policy = core::kDefaultRecoveryPolicy)
         : execution_mode_(mode), session_(clock_, make_callbacks(), policy) {}
 
-    void play() {
+    LoadHandle play(bool publish_start_file = true) {
         generation_ = session_.begin_channel();
-        issue_load(core::LoadAttempt{1}, core::LoadIntent::FreshSelection);
+        const auto load = issue_load(core::LoadAttempt{1}, core::LoadIntent::FreshSelection,
+                                     publish_start_file);
         session_.load_started(core::LoadAttempt{1}, core::LoadIntent::FreshSelection,
                               core::RecoveryTransport::MpegTs);
+        return load;
+    }
+
+    bool stop() {
+        const auto stopped_generation = generation_;
+        const bool settled = session_.stop(stopped_generation);
+        events_.retire_generation(stopped_generation);
+        active_load_.reset();
+        diagnostics_.core_idle = true;
+        return settled;
+    }
+
+    void deliver_load_command(const LoadHandle& load, int error = 0) {
+        events_.command_result(load.request_id, error);
+    }
+
+    bool deliver_start(const LoadHandle& load, bool first_frame = false) {
+        const bool accepted = events_.start_file(load.entry_id);
+        if (first_frame) events_.playback_restart(load.entry_id);
+        const auto drained = events_.drain();
+        session_.service_turn(drained);
+        return accepted;
+    }
+
+    void deliver_end(const LoadHandle& load, player::PlayerEndReason reason) {
+        events_.end_file(load.entry_id, reason, 0);
+        const auto drained = events_.drain();
+        session_.service_turn(drained);
     }
 
     void tick(double at, core::PlaybackHealthObservation observation,
@@ -122,6 +157,11 @@ public:
     }
 
     [[nodiscard]] double live_target() const { return session_.live_target_seconds(); }
+    [[nodiscard]] core::Generation generation() const { return generation_; }
+    [[nodiscard]] bool has_active_load() const { return active_load_.has_value(); }
+    [[nodiscard]] std::optional<core::Generation> adapter_generation() const {
+        return events_.active_generation();
+    }
 
     void backend_failed_turn(double at) {
         clock_.current = core::TimePoint{core::seconds(at)};
@@ -134,6 +174,8 @@ public:
     std::vector<core::SupervisorTransition> transitions;
     std::vector<std::exception_ptr> recovery_exceptions;
     std::vector<double> speed_writes;
+    int health_observations = 0;
+    int live_sync_writes = 0;
 
 private:
     player::PlaybackSessionCallbacks make_callbacks() {
@@ -142,7 +184,10 @@ private:
         callbacks.diagnostics = [this]() -> const player::Diagnostics& {
             return diagnostics_;
         };
-        callbacks.health_observation = [this] { return observation_; };
+        callbacks.health_observation = [this] {
+            ++health_observations;
+            return observation_;
+        };
         if (execution_mode_ != ExecutionMode::Missing) {
             callbacks.execute_recovery = [this](const core::SupervisorEffect& effect)
                 -> std::optional<core::RecoveryTransport> {
@@ -154,7 +199,8 @@ private:
                 issue_load(effect.load_attempt,
                            std::holds_alternative<core::RecreatePlayer>(effect.payload)
                                ? core::LoadIntent::PlayerRecreation
-                               : core::LoadIntent::RecoveryReopen);
+                               : core::LoadIntent::RecoveryReopen,
+                           true);
                 return core::RecoveryTransport::MpegTs;
             };
         }
@@ -171,13 +217,15 @@ private:
             diagnostics_.health_discontinuities = count;
         };
         callbacks.set_speed = [this](double speed) { speed_writes.push_back(speed); };
+        callbacks.set_live_sync_state = [this](double, int) { ++live_sync_writes; };
         callbacks.on_transition = [this](const core::SupervisorTransition& transition) {
             transitions.push_back(transition);
         };
         return callbacks;
     }
 
-    void issue_load(core::LoadAttempt load_attempt, core::LoadIntent) {
+    LoadHandle issue_load(core::LoadAttempt load_attempt, core::LoadIntent,
+                          bool publish_start_file) {
         active_attempt_ = load_attempt;
         active_load_ = player::ActiveLoad{generation_, load_attempt};
         diagnostics_.buffer_phase = core::BufferPhase::Zap;
@@ -188,7 +236,8 @@ private:
         const auto request_id = ++request_id_;
         active_entry_ = ++entry_id_;
         events_.track_load(request_id, generation_, load_attempt);
-        events_.start_file(active_entry_);
+        if (publish_start_file) events_.start_file(active_entry_);
+        return {request_id, active_entry_, generation_, load_attempt};
     }
 
     RecoveryClock clock_;
@@ -206,6 +255,71 @@ private:
 };
 
 }  // namespace
+
+TEST_CASE("session stop before start-file is synchronous and retires the player target") {
+    RecoveryAppLoop app;
+    const auto load = app.play(/*publish_start_file=*/false);
+    REQUIRE(app.state().name == core::SupervisorStateName::Zap);
+    REQUIRE(app.has_active_load());
+
+    CHECK(app.stop());
+    CHECK(app.state().name == core::SupervisorStateName::Idle);
+    CHECK_FALSE(app.state().deadlines.retry_at);
+    CHECK_FALSE(app.state().deadlines.steady_at);
+    CHECK_FALSE(app.has_active_load());
+    CHECK_FALSE(app.adapter_generation());
+
+    app.deliver_load_command(load);
+    CHECK_FALSE(app.deliver_start(load, /*first_frame=*/true));
+    app.deliver_end(load, player::PlayerEndReason::Error);
+    CHECK(app.state().name == core::SupervisorStateName::Idle);
+    CHECK(app.effects.empty());
+    CHECK_FALSE(app.stop());
+}
+
+TEST_CASE("stopped session performs no health live-sync deadline or recovery work") {
+    RecoveryAppLoop app;
+    app.play();
+    REQUIRE(app.stop());
+    app.health_observations = 0;
+    app.live_sync_writes = 0;
+    app.effects.clear();
+
+    for (int second = 1; second <= 60; ++second) {
+        app.poll(static_cast<double>(second));
+    }
+    CHECK(app.state().name == core::SupervisorStateName::Idle);
+    CHECK(app.health_observations == 0);
+    CHECK(app.live_sync_writes == 0);
+    CHECK(app.effects.empty());
+}
+
+TEST_CASE("rapid stop start fences late old-generation command frame stop and end edges") {
+    RecoveryAppLoop app;
+    const auto old = app.play(/*publish_start_file=*/false);
+    REQUIRE(app.stop());
+    const auto fresh = app.play(/*publish_start_file=*/false);
+    REQUIRE(fresh.generation > old.generation);
+    CHECK(fresh.load_attempt == core::LoadAttempt{1});
+    CHECK(app.state().generation == fresh.generation);
+    CHECK(app.state().load_attempt == core::LoadAttempt{1});
+    CHECK(app.state().load_intent == core::LoadIntent::FreshSelection);
+
+    app.deliver_load_command(old);
+    CHECK_FALSE(app.deliver_start(old, /*first_frame=*/true));
+    app.deliver_end(old, player::PlayerEndReason::Stop);
+    app.deliver_end(old, player::PlayerEndReason::Error);
+    CHECK(app.state().generation == fresh.generation);
+    CHECK(app.state().name == core::SupervisorStateName::Zap);
+    CHECK_FALSE(app.state().first_frame_at);
+
+    app.deliver_load_command(fresh);
+    CHECK(app.deliver_start(fresh, /*first_frame=*/true));
+    CHECK(app.state().generation == fresh.generation);
+    CHECK(app.state().name == core::SupervisorStateName::Zap);
+    CHECK(app.state().first_frame_at.has_value());
+    CHECK(app.effects.empty());
+}
 
 TEST_CASE("application ordering cancels an opening retry when its frame wins backoff") {
     RecoveryAppLoop app;

@@ -75,6 +75,9 @@ public:
     void load_started(core::LoadAttempt load_attempt, core::LoadIntent intent,
                       core::RecoveryTransport transport);
     void load_failed(core::LoadAttempt load_attempt);
+    // Synchronously retires the exact user-stopped generation. Backend stop
+    // acknowledgement is cleanup evidence and is not needed to reach Idle.
+    bool stop(core::Generation generation);
 
     void service_turn(std::span<const PlayerEvent> events,
                       const std::function<void()>& after_events = {});

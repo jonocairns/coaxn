@@ -17,7 +17,7 @@
 // down explicitly rather than read from a global.
 namespace coax::app::widgets {
 
-enum class Icon { Play, Pause, VolumeMuted, VolumeLow, VolumeHigh, Settings };
+enum class Icon { Play, Pause, Stop, VolumeMuted, VolumeLow, VolumeHigh, Settings };
 
 // A glyph with a hit box and no frame: hover and press show in the glyph and
 // a wash behind it. `box` is the square it occupies, which is also what the

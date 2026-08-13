@@ -7,6 +7,7 @@
 #include "player/buffer_phase_gate.hpp"
 #include "player/load_diagnostics.hpp"
 #include "player/player_event_adapter.hpp"
+#include "player/playback_control.hpp"
 #include "player/playback_observability.hpp"
 #include "player/session_target_registry.hpp"
 #include "player/transport_log_classifier.hpp"
@@ -179,6 +180,66 @@ TEST_CASE("backend failure and disposal release stale correlations") {
     CHECK(adapter.drain().empty());
     adapter.start_file(300);
     CHECK_FALSE(adapter.active_generation());
+}
+
+TEST_CASE("retiring a generation before start-file fences every late edge") {
+    player::PlayerEventAdapter adapter;
+    adapter.track_load(10, core::Generation{4}, core::LoadAttempt{1});
+    adapter.track_property(20, core::Generation{4}, core::BufferPhase::Zap,
+                           player::BufferProperty::CacheSeconds);
+    adapter.retire_generation(core::Generation{4});
+
+    // A rapid restart is already queued when the old backend edges arrive.
+    adapter.track_load(11, core::Generation{5}, core::LoadAttempt{1});
+    adapter.command_result(10, 0);
+    adapter.command_result(20, 0);
+    CHECK_FALSE(adapter.start_file(400));
+    adapter.playback_restart(400);
+    adapter.end_file(400, player::PlayerEndReason::Error, -13);
+
+    adapter.command_result(11, 0);
+    CHECK(adapter.start_file(500));
+    adapter.playback_restart(500);
+    const auto events = adapter.drain();
+    REQUIRE(events.size() == 2);
+    CHECK(events[0].generation == core::Generation{5});
+    CHECK(std::holds_alternative<player::LoadCommandResult>(events[0].payload));
+    CHECK(events[1].generation == core::Generation{5});
+    CHECK(std::holds_alternative<player::FirstPlaybackStart>(events[1].payload));
+    CHECK(adapter.active_generation() == core::Generation{5});
+    CHECK(adapter.active_load_attempt() == core::LoadAttempt{1});
+}
+
+TEST_CASE("a rejected retired load cannot consume the next start-file edge") {
+    player::PlayerEventAdapter adapter;
+    adapter.track_load(10, core::Generation{4}, core::LoadAttempt{1});
+    adapter.retire_generation(core::Generation{4});
+    adapter.track_load(11, core::Generation{5}, core::LoadAttempt{1});
+
+    adapter.command_result(10, -1);
+    adapter.command_result(11, 0);
+    CHECK(adapter.start_file(500));
+    adapter.playback_restart(500);
+    const auto events = adapter.drain();
+    REQUIRE(events.size() == 2);
+    CHECK(events[0].generation == core::Generation{5});
+    CHECK(events[1].generation == core::Generation{5});
+    CHECK(adapter.active_generation() == core::Generation{5});
+}
+
+TEST_CASE("retiring an active generation makes its stop acknowledgement cleanup-only") {
+    player::PlayerEventAdapter adapter;
+    adapter.track_load(10, core::Generation{4}, core::LoadAttempt{1});
+    adapter.command_result(10, 0);
+    adapter.start_file(400);
+    adapter.playback_restart(400);
+    REQUIRE(adapter.drain().size() == 2);
+
+    adapter.retire_generation(core::Generation{4});
+    adapter.end_file(400, player::PlayerEndReason::Stop, 0);
+    CHECK(adapter.drain().empty());
+    CHECK_FALSE(adapter.active_generation());
+    CHECK_FALSE(adapter.active_load_attempt());
 }
 
 TEST_CASE("explicit and replacement stops are classified separately") {
@@ -508,7 +569,7 @@ TEST_CASE("recovery telemetry is load scoped and cannot retain credentials") {
     }
 }
 
-TEST_CASE("session target identities correlate reselection without provider data") {
+TEST_CASE("session target identities retain selection grouping and refresh on live Start") {
     player::SessionTargetRegistry registry;
     CHECK(registry.begin_provider_session() == 1);
     const auto first = registry.identify_channel("provider-stream-id-42");
@@ -520,10 +581,55 @@ TEST_CASE("session target identities correlate reselection without provider data
     CHECK(reselected.provider_session == first.provider_session);
     CHECK(reselected.channel_session == first.channel_session);
 
+    const auto restarted = registry.identify_fresh_channel("provider-stream-id-42");
+    CHECK(restarted.provider_session == first.provider_session);
+    CHECK(restarted.channel_session == 3);
+    CHECK(registry.identify_channel("provider-stream-id-42").channel_session ==
+          restarted.channel_session);
+
     CHECK(registry.begin_provider_session() == 2);
     const auto replacement_provider = registry.identify_channel("provider-stream-id-42");
     CHECK(replacement_provider.provider_session == 2);
     CHECK(replacement_provider.channel_session == 1);
+}
+
+TEST_CASE("playback controls expose stop-start for TS and reserve pause-resume") {
+    using player::PlaybackControl;
+    using player::PlaybackControlCapability;
+    using player::PlaybackIntent;
+
+    CHECK(player::playback_control(PlaybackControlCapability::RestartAtLiveEdge,
+                                   PlaybackIntent::Running) == PlaybackControl::Stop);
+    CHECK(player::playback_control(PlaybackControlCapability::RestartAtLiveEdge,
+                                   PlaybackIntent::StoppedByUser) == PlaybackControl::Start);
+    CHECK(player::playback_control(PlaybackControlCapability::ResumeFromPosition,
+                                   PlaybackIntent::Running) == PlaybackControl::Pause);
+    CHECK(player::playback_control(PlaybackControlCapability::ResumeFromPosition,
+                                   PlaybackIntent::SuspendedByUser) == PlaybackControl::Resume);
+    CHECK_FALSE(player::position_preserving_pause_requested(
+        PlaybackControlCapability::RestartAtLiveEdge, PlaybackIntent::StoppedByUser));
+    CHECK(player::position_preserving_pause_requested(
+        PlaybackControlCapability::ResumeFromPosition, PlaybackIntent::SuspendedByUser));
+}
+
+TEST_CASE("live start distinguishes no selection missing retention and a fresh request") {
+    auto intent = player::PlaybackIntent::StoppedByUser;
+    std::string none;
+    CHECK(player::prepare_live_start(none, intent, false) ==
+          player::LiveStartDecision::NoSelection);
+    CHECK(intent == player::PlaybackIntent::StoppedByUser);
+
+    std::string missing = "retained";
+    CHECK(player::prepare_live_start(missing, intent, false) ==
+          player::LiveStartDecision::RetainedChannelMissing);
+    CHECK(missing.empty());
+    CHECK(intent == player::PlaybackIntent::StoppedByUser);
+
+    std::string retained = "retained";
+    CHECK(player::prepare_live_start(retained, intent, true) ==
+          player::LiveStartDecision::StartFresh);
+    CHECK(retained == "retained");
+    CHECK(intent == player::PlaybackIntent::Running);
 }
 
 TEST_CASE("pinned transport log patterns produce only sanitized classifications") {

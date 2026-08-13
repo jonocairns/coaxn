@@ -158,7 +158,11 @@ App::App()
            },
            .restore_backend_settings = [this] {
                player_.set_volume(volume_);
-               player_.set_paused(paused_);
+               if (playback_control_capability_ ==
+                   player::PlaybackControlCapability::ResumeFromPosition) {
+                   player_.set_paused(player::position_preserving_pause_requested(
+                       playback_control_capability_, playback_intent_));
+               }
                apply_vsr();
            },
            .apply_buffer_phase = [this](core::Generation generation,
@@ -270,19 +274,8 @@ bool App::initialize(std::string& error) {
     window_.on_resume([this] { handle_resume(); });
 
     if (!direct_media_.empty()) {
-        stage_                = Stage::Browsing;
-        playing_channel_name_ = "Direct media";
-        set_status("Direct media");
-        const auto generation = playback_session_.begin_channel();
-        const core::LoadAttempt load_attempt{1};
-        if (player_.play(direct_media_, generation, load_attempt,
-                         core::RecoveryTransport::MpegTs, false,
-                         {.provider_session = 0, .channel_session = 1})) {
-            playback_session_.load_started(load_attempt, core::LoadIntent::FreshSelection,
-                                           core::RecoveryTransport::MpegTs);
-        } else {
-            playback_session_.load_failed(load_attempt);
-        }
+        stage_ = Stage::Browsing;
+        play_direct_media();
     } else {
         load_saved_portal();
     }
@@ -542,18 +535,24 @@ void App::finish_connect() {
 }
 
 void App::play(const core::Channel& channel) {
+    play(channel, target_registry_.identify_channel(channel.id));
+}
+
+void App::play(const core::Channel& channel, player::SourceCorrelation correlation) {
     if (!client_) {
         return;
     }
+    direct_media_active_ = false;
     playing_channel_id_   = channel.id;
     playing_channel_name_ = channel.name;
-    paused_               = false;
+    playback_control_capability_ =
+        player::PlaybackControlCapability::RestartAtLiveEdge;
+    playback_intent_ = player::PlaybackIntent::Running;
 
     // Latency learned on one channel says nothing about the next.
     const auto generation = playback_session_.begin_channel();
     loading_channel_generation_ = generation;
     set_status(std::format("Loading {}", channel.name));
-    const auto correlation = target_registry_.identify_channel(channel.id);
     log::info("Channel selected generation {} provider-session={} channel-session={}",
               generation.value(), correlation.provider_session,
               correlation.channel_session);
@@ -568,6 +567,87 @@ void App::play(const core::Channel& channel) {
         playback_session_.load_failed(load_attempt);
     }
     apply_vsr();
+}
+
+void App::play_direct_media() {
+    if (direct_media_.empty()) return;
+    direct_media_active_ = true;
+    playing_channel_id_.clear();
+    playing_channel_name_ = "Direct media";
+    playback_control_capability_ =
+        player::PlaybackControlCapability::RestartAtLiveEdge;
+    playback_intent_ = player::PlaybackIntent::Running;
+
+    const auto generation = playback_session_.begin_channel();
+    loading_channel_generation_ = generation;
+    set_status("Loading Direct media");
+    const core::LoadAttempt load_attempt{1};
+    if (player_.play(direct_media_, generation, load_attempt,
+                     core::RecoveryTransport::MpegTs, false,
+                     {.provider_session = 0,
+                      .channel_session = generation.value()})) {
+        playback_session_.load_started(load_attempt, core::LoadIntent::FreshSelection,
+                                       core::RecoveryTransport::MpegTs);
+    } else {
+        playback_session_.load_failed(load_attempt);
+    }
+    apply_vsr();
+}
+
+void App::stop_playback() {
+    if (playback_control_capability_ !=
+            player::PlaybackControlCapability::RestartAtLiveEdge ||
+        (playing_channel_id_.empty() && playing_channel_name_.empty()) ||
+        (playback_intent_ == player::PlaybackIntent::StoppedByUser &&
+         playback_session_.state().name == core::SupervisorStateName::Idle)) return;
+
+    const auto generation = playback_session_.generation();
+    if (!playback_session_.stop(generation)) return;
+    playback_intent_ = player::PlaybackIntent::StoppedByUser;
+    loading_channel_generation_.reset();
+    player_.stop(generation);
+    set_status("Stopped");
+    update_playback_power();
+}
+
+void App::start_playback() {
+    if (playback_control_capability_ !=
+            player::PlaybackControlCapability::RestartAtLiveEdge ||
+        playback_intent_ != player::PlaybackIntent::StoppedByUser) return;
+
+    // Direct media is a presentation-path test source, not a retained catalog
+    // channel. It still follows Stop/Start semantics when that mode is active.
+    if (direct_media_active_) {
+        play_direct_media();
+        return;
+    }
+
+    const core::Channel* retained = channels_.find(playing_channel_id_);
+    switch (player::prepare_live_start(
+                playing_channel_id_, playback_intent_, retained != nullptr)) {
+        case player::LiveStartDecision::NoSelection:
+            return;
+        case player::LiveStartDecision::RetainedChannelMissing:
+            playing_channel_name_.clear();
+            loading_channel_generation_.reset();
+            set_status("Channel no longer available", true);
+            update_playback_power();
+            return;
+        case player::LiveStartDecision::StartFresh:
+            break;
+    }
+
+    // Resolution above deliberately precedes the Running intent and the fresh
+    // generation/channel-session correlation minted for returning live.
+    play(*retained, target_registry_.identify_fresh_channel(retained->id));
+}
+
+void App::toggle_playback() {
+    if (playing_channel_id_.empty() && playing_channel_name_.empty()) return;
+    if (playback_control_capability_ !=
+        player::PlaybackControlCapability::RestartAtLiveEdge) return;
+    if (playback_intent_ == player::PlaybackIntent::StoppedByUser) start_playback();
+    else stop_playback();
 }
 
 void App::observe_player_event(const player::PlayerEvent& event) {
@@ -730,7 +810,8 @@ void App::update_playback_power(const core::SupervisorState& state) {
                               supervisor_clock_.now() < *failure_power_grace_until_;
     power_request_.set_mode(core::decide_playback_power_mode({
         .session_active = state.name != core::SupervisorStateName::Idle,
-        .user_paused = paused_,
+        .user_paused = player::position_preserving_pause_requested(
+            playback_control_capability_, playback_intent_),
         .window_minimized = window_.minimized(),
         .terminal_failure = terminal_failure,
         .terminal_failure_grace_active = grace_active,
@@ -1291,12 +1372,19 @@ void App::draw_status_bar() {
     float cursor = origin.x + pad;
 
     place(cursor, row);
-    if (widgets::icon_button("##playpause",
-                             paused_ ? widgets::Icon::Play : widgets::Icon::Pause, row, fade)) {
-        paused_ = !paused_;
-        player_.set_paused(paused_);
-        update_playback_power();
+    const bool has_selection = !playing_channel_id_.empty() || !playing_channel_name_.empty();
+    const auto control = has_selection
+        ? player::playback_control(playback_control_capability_, playback_intent_)
+        : player::PlaybackControl::Start;
+    const auto control_icon =
+        control == player::PlaybackControl::Start || control == player::PlaybackControl::Resume
+            ? widgets::Icon::Play
+            : (control == player::PlaybackControl::Pause ? widgets::Icon::Pause
+                                                         : widgets::Icon::Stop);
+    if (widgets::icon_button("##playback-control", control_icon, row, fade)) {
+        toggle_playback();
     }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", player::control_label(control));
     cursor += row + gap;
 
     // Clipped rather than wrapped or shortened: a long channel name should run
@@ -1323,12 +1411,12 @@ void App::draw_status_bar() {
         theme::ScopedStyle style;
         style.color(ImGuiCol_Text, theme::kError);
         ImGui::TextUnformatted(status_.c_str());
+    } else if (playback_intent_ == player::PlaybackIntent::StoppedByUser) {
+        ImGui::TextDisabled("Stopped - Start to return live");
     } else if (channel_loading()) {
         ImGui::TextDisabled("Loading");
     } else if (diagnostics.paused_for_cache) {
         ImGui::TextDisabled("Buffering");
-    } else if (paused_) {
-        ImGui::TextDisabled("Paused");
     }
 
     ImGui::PopClipRect();
@@ -1709,9 +1797,7 @@ void App::draw_frame() {
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Space, false) && !io.WantTextInput &&
         stage_ == Stage::Browsing) {
-        paused_ = !paused_;
-        player_.set_paused(paused_);
-        update_playback_power();
+        toggle_playback();
     }
 
     // Until mpv owns the video plane there is nothing behind the UI layer but

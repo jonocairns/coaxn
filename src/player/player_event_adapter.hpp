@@ -4,6 +4,7 @@
 #include <deque>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -64,7 +65,7 @@ public:
     void command_result(std::uint64_t request_id, int error);
     void command_rejected_immediately(std::uint64_t request_id, int error);
 
-    void start_file(std::int64_t playlist_entry_id);
+    bool start_file(std::int64_t playlist_entry_id);
     void playback_restart(std::int64_t playlist_entry_id);
     void intentional_stop(std::int64_t playlist_entry_id, core::Generation report_as,
                           IntentionalStopKind kind);
@@ -75,6 +76,7 @@ public:
     void authentication_rejected(core::Generation generation, core::LoadAttempt load_attempt);
     void transport_failure(core::Generation generation, core::LoadAttempt load_attempt,
                            core::TransportFailureReason reason);
+    void retire_generation(core::Generation generation);
     void dispose();
 
     [[nodiscard]] std::vector<PlayerEvent> drain();
@@ -87,7 +89,11 @@ private:
         core::Generation generation;
         core::LoadAttempt load_attempt;
     };
-    struct PendingLoad { std::uint64_t request_id; LoadIdentity identity; };
+    struct PendingLoad {
+        std::uint64_t request_id;
+        LoadIdentity identity;
+        bool retired = false;
+    };
     struct PropertyRequest {
         core::Generation generation;
         core::BufferPhase phase;
@@ -100,6 +106,9 @@ private:
 
     std::deque<PendingLoad> pending_loads_;
     std::unordered_map<std::uint64_t, LoadIdentity> load_requests_;
+    // Retired requests keep only enough ordering state to discard a late
+    // command reply or remove a tombstone when mpv rejects the load outright.
+    std::unordered_set<std::uint64_t> retired_load_requests_;
     std::unordered_map<std::uint64_t, PropertyRequest> property_requests_;
     std::unordered_map<std::int64_t, LoadIdentity> entries_;
     std::unordered_map<std::int64_t, StopIntent> stop_intents_;

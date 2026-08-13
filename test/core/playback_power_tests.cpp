@@ -24,6 +24,17 @@ TEST_CASE("buffering and recovery do not enter the power decision") {
           PlaybackPowerMode::DisplayAndSystemRequired);
 }
 
+TEST_CASE("live TS stop releases power through Idle and a fresh start reacquires it") {
+    CHECK(decide_playback_power_mode({
+              .session_active = false,
+              .user_paused = false,
+          }) == PlaybackPowerMode::AllowSleep);
+    CHECK(decide_playback_power_mode({
+              .session_active = true,
+              .user_paused = false,
+          }) == PlaybackPowerMode::DisplayAndSystemRequired);
+}
+
 TEST_CASE("minimized playback lets the display sleep but keeps recovery running") {
     const PlaybackPowerContext context{
         .session_active = true,
@@ -34,6 +45,8 @@ TEST_CASE("minimized playback lets the display sleep but keeps recovery running"
 
 TEST_CASE("explicit inactivity releases every power request") {
     CHECK(decide_playback_power_mode({}) == PlaybackPowerMode::AllowSleep);
+    // user_paused remains the policy seam for a future source that can resume
+    // from position. Live TS Stop reaches this result through session_active.
     CHECK(decide_playback_power_mode({.session_active = true, .user_paused = true}) ==
           PlaybackPowerMode::AllowSleep);
     CHECK(decide_playback_power_mode({

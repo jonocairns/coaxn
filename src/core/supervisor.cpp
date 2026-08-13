@@ -354,6 +354,8 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
     }
     if (const auto* stopped = std::get_if<PlaybackStopped>(&event)) {
         if (stopped->generation < state.generation) return ignore(state);
+        if (stopped->generation == state.generation &&
+            state.name == SupervisorStateName::Idle) return ignore(state);
         auto next = initial_supervisor_state();
         next.generation = stopped->generation;
         return settle(state, next, "playback-stopped", now, policy);
@@ -508,6 +510,10 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
             return recover(state, DetectionReason::ProcessExited,
                            RecoveryAction::RecreatePlayer, now, policy);
         } else if constexpr (std::is_same_v<T, StreamEnded>) {
+            // An intentional stop owns Idle synchronously. Keep this guard in
+            // the branch even though recover() also ignores Idle: stream-end is
+            // the backend edge most likely to arrive after the stop command.
+            if (state.name == SupervisorStateName::Idle) return ignore(state);
             if (value.load_attempt != state.load_attempt) return ignore(state);
             if (state.name == SupervisorStateName::Failed) {
                 return retire_failed_late_completion(

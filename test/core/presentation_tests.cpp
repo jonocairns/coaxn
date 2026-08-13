@@ -44,6 +44,17 @@ TEST_CASE("a detached identity carries no epoch of its own") {
     CHECK(decide_swapchain_transition(chain(0, 7), chain(0, 9)) == SwapchainTransition::Ignore);
 }
 
+TEST_CASE("only an accepted playback entry may publish positive swap-chain content") {
+    CHECK(swapchain_publication_allowed(true, chain(0x1000, 2)));
+    CHECK(swapchain_publication_allowed(true, none));
+
+    // mpv retains its video output across stop and emits a teardown
+    // reconfiguration. That late edge may detach, but it must not put the old
+    // swap chain back into the visual while there is no accepted entry.
+    CHECK_FALSE(swapchain_publication_allowed(false, chain(0x1000, 3)));
+    CHECK(swapchain_publication_allowed(false, none));
+}
+
 TEST_CASE("device loss is raised once per episode, not once per frame") {
     DeviceLossLatch latch;
     CHECK_FALSE(latch.lost());

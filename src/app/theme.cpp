@@ -451,6 +451,12 @@ void draw_pause_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 col
                              color, 0.0f);
 }
 
+void draw_stop_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color) {
+    const float half = size * 0.39f;
+    draw_list->AddRectFilled(ImVec2(centre.x - half, centre.y - half),
+                             ImVec2(centre.x + half, centre.y + half), color, 0.0f);
+}
+
 void draw_volume_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color, int waves) {
     const float half      = size * 0.5f;
     const float thickness = std::max(size * 0.09f, 1.0f);

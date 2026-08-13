@@ -51,7 +51,7 @@ unsigned, so SmartScreen warns anyone who did not build it themselves.
 |---|---|
 | `Tab` | Show/hide the channel list |
 | `F1` | Show/hide diagnostics |
-| `Space` | Pause/resume |
+| `Space` | Stop/start live playback |
 | `Alt`+`Enter` | Toggle fullscreen |
 | `Esc` | Leave fullscreen |
 

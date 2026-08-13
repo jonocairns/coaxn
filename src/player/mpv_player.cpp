@@ -272,10 +272,20 @@ bool MpvPlayer::issue_load(bool force_probed_format) {
 }
 
 void MpvPlayer::stop(core::Generation generation) {
+    if (!target_ || target_->generation != generation) return;
+    events_.retire_generation(generation);
+    target_.reset();
+    current_entry_id_.reset();
+    buffer_phase_gate_.retire(generation);
+    load_in_flight_ = false;
+    file_loaded_ = false;
+    transport_log_armed_ = false;
+    transport_classification_reported_ = false;
+    engine_diagnostic_log_gate_.reset();
+    reset_load_observations(diagnostics_);
+    diagnostics_.core_idle = true;
+    detach_swapchain();
     if (!mpv_) return;
-    if (const auto entry = events_.active_entry()) {
-        events_.intentional_stop(*entry, generation, IntentionalStopKind::Requested);
-    }
     const char* command[] = {"stop", nullptr};
     mpv_command_async(mpv_, next_request_id(), command);
 }
@@ -404,6 +414,8 @@ void MpvPlayer::set_paused(bool paused) {
 
 void MpvPlayer::publish_swapchain(void* swapchain, SwapchainAcquisition source) {
     const core::SwapchainIdentity incoming{swapchain_address(swapchain), swapchain_epoch_};
+    if (!core::swapchain_publication_allowed(
+            events_.active_entry().has_value(), incoming)) return;
     const auto transition = core::decide_swapchain_transition(attached_, incoming);
     if (transition == core::SwapchainTransition::Ignore) return;
     // A replacement at a new address is mpv having built a different object. A
@@ -577,13 +589,15 @@ void MpvPlayer::pump() {
                 break;
             case MPV_EVENT_START_FILE: {
                 const auto* start = static_cast<mpv_event_start_file*>(event->data);
-                current_entry_id_ = start->playlist_entry_id;
-                events_.start_file(start->playlist_entry_id);
-                transport_log_armed_ = true;
-                applied_filter_.clear();
+                if (events_.start_file(start->playlist_entry_id)) {
+                    current_entry_id_ = start->playlist_entry_id;
+                    transport_log_armed_ = true;
+                    applied_filter_.clear();
+                }
                 break;
             }
             case MPV_EVENT_FILE_LOADED:
+                if (!target_ || events_.active_generation() != target_->generation) break;
                 file_loaded_ = true;
                 if (load_in_flight_) {
                     diagnostics_.last_load_seconds = std::chrono::duration<double>(
@@ -605,6 +619,10 @@ void MpvPlayer::pump() {
                 // the address of the object it replaced is indistinguishable
                 // from it without one.
                 bump_swapchain_epoch();
+                // END_FILE clears the accepted playlist entry before mpv may
+                // emit later reconfiguration edges. This covers both explicit
+                // Stop and the gap before an EOF-driven recovery START_FILE:
+                // identity still advances, but a retired frame cannot reattach.
                 acquire_swapchain(SwapchainAcquisition::VideoReconfig);
                 break;
             case MPV_EVENT_END_FILE: {

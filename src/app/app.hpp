@@ -12,6 +12,7 @@
 #include "core/channel_index.hpp"
 #include "core/presentation.hpp"
 #include "player/mpv_player.hpp"
+#include "player/playback_control.hpp"
 #include "player/playback_session.hpp"
 #include "player/session_target_registry.hpp"
 #include "win/app_window.hpp"
@@ -65,6 +66,11 @@ private:
     void observe_player_event(const player::PlayerEvent& event);
     void log_health_sample(const player::HealthSampleReport& report);
     void play(const core::Channel& channel);
+    void play(const core::Channel& channel, player::SourceCorrelation correlation);
+    void play_direct_media();
+    void stop_playback();
+    void start_playback();
+    void toggle_playback();
     void apply_vsr();
     void handle_resize(int width, int height);
     void handle_display_change();
@@ -120,6 +126,7 @@ private:
     std::string status_;
     bool        status_error_ = false;
     std::string direct_media_;
+    bool        direct_media_active_ = false;
 
     // Catalog loading runs off the UI thread; these hand the result back.
     std::thread              connect_thread_;
@@ -163,7 +170,9 @@ private:
     // the area behind the UI, so this decides whether the backdrop has to.
     bool        video_attached_   = false;
     bool        vsr_enabled_      = true;
-    bool        paused_           = false;
+    player::PlaybackIntent playback_intent_ = player::PlaybackIntent::Running;
+    player::PlaybackControlCapability playback_control_capability_ =
+        player::PlaybackControlCapability::RestartAtLiveEdge;
     std::optional<core::TimePoint> failure_power_grace_until_;
     int         volume_           = 100;
     // Where the volume was before the speaker was clicked, so unmuting puts it

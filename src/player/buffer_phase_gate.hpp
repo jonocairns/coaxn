@@ -31,6 +31,13 @@ public:
         steady_ = {};
     }
 
+    void retire(core::Generation generation) {
+        if (!has_load_ || generation != generation_) return;
+        has_load_ = false;
+        zap_ = {};
+        steady_ = {};
+    }
+
     bool begin(core::Generation generation, core::BufferPhase phase) {
         if (!has_load_ || generation != generation_) return false;
         auto& record = phase == core::BufferPhase::Zap ? zap_ : steady_;
