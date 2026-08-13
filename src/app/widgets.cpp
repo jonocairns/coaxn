@@ -18,6 +18,7 @@ void paint_icon(ImDrawList* draw_list, Icon icon, ImVec2 centre, float size, ImU
     switch (icon) {
         case Icon::Play:        theme::draw_play_icon(draw_list, centre, size, color); break;
         case Icon::Pause:       theme::draw_pause_icon(draw_list, centre, size, color); break;
+        case Icon::Stop:        theme::draw_stop_icon(draw_list, centre, size, color); break;
         case Icon::VolumeMuted: theme::draw_volume_icon(draw_list, centre, size, color, 0); break;
         case Icon::VolumeLow:   theme::draw_volume_icon(draw_list, centre, size, color, 1); break;
         case Icon::VolumeHigh:  theme::draw_volume_icon(draw_list, centre, size, color, 2); break;

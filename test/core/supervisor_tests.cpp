@@ -68,6 +68,51 @@ TEST_CASE("idle owns no stream and clean playback reaches steady after five seco
     CHECK_FALSE(next_deadline_at(state));
 }
 
+TEST_CASE("explicit stop settles every live supervisor state and is idempotent in idle") {
+    const auto loading = step(initial_supervisor_state(), ChannelRequested{Generation{1}}, 0);
+    const auto zap = step(loading, StreamLoadIssued{
+        Generation{1}, LoadAttempt{1}, LoadIntent::FreshSelection,
+        RecoveryTransport::MpegTs}, 0.1);
+    const auto steady = reach_steady();
+    const auto recovering = step(steady, StreamEnded{
+        Generation{1}, LoadAttempt{1}, EndReason::Error, {}}, 10);
+    const auto failed = step(loading, SourceFailed{Generation{1}, LoadAttempt{1}}, 1);
+
+    for (const auto& active : {loading, zap, steady, recovering, failed}) {
+        CAPTURE(active.name);
+        const auto stopped = apply(active, PlaybackStopped{active.generation}, 20);
+        REQUIRE(stopped.transition);
+        CHECK(stopped.transition->reason == "playback-stopped");
+        CHECK(stopped.state.name == SupervisorStateName::Idle);
+        CHECK(stopped.state.generation == active.generation);
+        CHECK_FALSE(next_deadline_at(stopped.state));
+        CHECK(stopped.effects.empty());
+
+        const auto duplicate = apply(stopped.state,
+                                     PlaybackStopped{active.generation}, 21);
+        CHECK_FALSE(duplicate.transition);
+        CHECK(duplicate.effects.empty());
+        CHECK(duplicate.state.name == SupervisorStateName::Idle);
+        CHECK(duplicate.state.generation == active.generation);
+    }
+}
+
+TEST_CASE("matching stream end is explicitly inert in idle") {
+    auto idle = initial_supervisor_state();
+    idle.generation = Generation{7};
+    idle.load_attempt = LoadAttempt{3};
+
+    const auto ended = apply(idle, StreamEnded{
+        Generation{7}, LoadAttempt{3}, EndReason::Error,
+        TransportFailureReason::HttpRequestTimeout}, 10);
+    CHECK_FALSE(ended.transition);
+    CHECK(ended.effects.empty());
+    CHECK(ended.state.name == SupervisorStateName::Idle);
+    CHECK(ended.state.generation == Generation{7});
+    CHECK(ended.state.load_attempt == LoadAttempt{3});
+    CHECK_FALSE(next_deadline_at(ended.state));
+}
+
 TEST_CASE("continuous TS terminal end schedules and emits a generation-scoped reopen") {
     auto result = apply(reach_steady(), StreamEnded{Generation{1}, LoadAttempt{1}, EndReason::Error, {}}, 10);
     CHECK(result.state.name == SupervisorStateName::Recovering);

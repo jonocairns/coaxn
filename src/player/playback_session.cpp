@@ -21,6 +21,12 @@ bool is_current(const PlayerEvent& event, core::Generation generation,
            event.load_attempt == active->load_attempt;
 }
 
+bool accepts_generic_stream_end(const PlayerEvent& event, core::Generation generation,
+                                const std::optional<ActiveLoad>& active,
+                                bool exact_failure_reported) {
+    return is_current(event, generation, active) && !exact_failure_reported;
+}
+
 }  // namespace
 
 const Diagnostics& PlaybackSession::diagnostics() const {
@@ -63,6 +69,25 @@ void PlaybackSession::load_started(core::LoadAttempt load_attempt,
 
 void PlaybackSession::load_failed(core::LoadAttempt load_attempt) {
     supervisor_.dispatch(core::SourceFailed{generation_, load_attempt});
+}
+
+bool PlaybackSession::stop(core::Generation generation) {
+    if (generation != generation_ ||
+        (supervisor_.current().name == core::SupervisorStateName::Idle &&
+         supervisor_.current().generation == generation)) return false;
+
+    supervisor_.dispatch(core::PlaybackStopped{generation});
+    playback_health_.reset();
+    health_snapshot_ = {};
+    timeline_classification_ = TimelineClassification::Unavailable;
+    next_health_sample_ = {};
+    stall_reported_ = false;
+    decode_stall_reported_ = false;
+    exact_failure_reported_ = false;
+    last_cache_state_dispatched_.reset();
+    pending_stream_ends_.clear();
+    reset_live_state();
+    return true;
 }
 
 void PlaybackSession::backend_recreated() {
@@ -180,7 +205,8 @@ void PlaybackSession::process_events(std::span<const PlayerEvent> events) {
                     ended.reason == PlayerEndReason::Quit ||
                     ended.reason == PlayerEndReason::Redirect) return;
                 active = callbacks_.active_load ? callbacks_.active_load() : std::nullopt;
-                if (is_current(event, generation_, active) && exact_failure_reported_) return;
+                if (!accepts_generic_stream_end(
+                        event, generation_, active, exact_failure_reported_)) return;
                 auto reason = core::EndReason::Unknown;
                 if (ended.reason == PlayerEndReason::Eof) reason = core::EndReason::Eof;
                 else if (ended.reason == PlayerEndReason::Error) reason = core::EndReason::Error;
@@ -328,6 +354,7 @@ void PlaybackSession::sample_health() {
 }
 
 void PlaybackSession::update_live_sync() {
+    if (supervisor_.current().name == core::SupervisorStateName::Idle) return;
     const auto step = live_sync_turn_.observe(diagnostics());
     if (step.rebuffered) {
         ++rebuffer_count_;

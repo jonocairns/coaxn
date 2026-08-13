@@ -1,9 +1,9 @@
 #pragma once
 
 #include <cstdint>
-#include <deque>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -61,10 +61,11 @@ public:
                     core::LoadAttempt load_attempt);
     void track_property(std::uint64_t request_id, core::Generation generation,
                         core::BufferPhase phase, BufferProperty property);
-    void command_result(std::uint64_t request_id, int error);
+    void command_result(std::uint64_t request_id, int error,
+                        std::optional<std::int64_t> playlist_entry_id = std::nullopt);
     void command_rejected_immediately(std::uint64_t request_id, int error);
 
-    void start_file(std::int64_t playlist_entry_id);
+    bool start_file(std::int64_t playlist_entry_id);
     void playback_restart(std::int64_t playlist_entry_id);
     void intentional_stop(std::int64_t playlist_entry_id, core::Generation report_as,
                           IntentionalStopKind kind);
@@ -75,6 +76,7 @@ public:
     void authentication_rejected(core::Generation generation, core::LoadAttempt load_attempt);
     void transport_failure(core::Generation generation, core::LoadAttempt load_attempt,
                            core::TransportFailureReason reason);
+    void retire_generation(core::Generation generation);
     void dispose();
 
     [[nodiscard]] std::vector<PlayerEvent> drain();
@@ -87,7 +89,6 @@ private:
         core::Generation generation;
         core::LoadAttempt load_attempt;
     };
-    struct PendingLoad { std::uint64_t request_id; LoadIdentity identity; };
     struct PropertyRequest {
         core::Generation generation;
         core::BufferPhase phase;
@@ -95,11 +96,16 @@ private:
     };
     struct StopIntent { core::Generation report_as; IntentionalStopKind kind; };
 
-    void remove_pending_load(std::uint64_t request_id);
+    [[nodiscard]] bool has_pending_load() const;
     void clear_correlations();
 
-    std::deque<PendingLoad> pending_loads_;
+    // A load is first correlated by async request id, then by the playlist
+    // entry id returned in that command's reply. START_FILE names the latter,
+    // so it never has to consume an unrelated load by queue position.
     std::unordered_map<std::uint64_t, LoadIdentity> load_requests_;
+    std::unordered_map<std::int64_t, LoadIdentity> pending_entries_;
+    // Retired requests keep only enough state to discard a late command reply.
+    std::unordered_set<std::uint64_t> retired_load_requests_;
     std::unordered_map<std::uint64_t, PropertyRequest> property_requests_;
     std::unordered_map<std::int64_t, LoadIdentity> entries_;
     std::unordered_map<std::int64_t, StopIntent> stop_intents_;
