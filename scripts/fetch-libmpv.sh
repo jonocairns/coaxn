@@ -6,8 +6,8 @@
 # tag, the commit and the archive digest below are all recorded, so the runtime
 # can be re-obtained byte-for-byte and checked that it is.
 #
-# The rationale is not restated here: see docs/packaging.md, and PRD 7.1 for
-# the checks behind it.
+# The rationale and upstream checks are not restated here: see
+# docs/packaging.md.
 set -euo pipefail
 
 MPV_BUILD_TAG="20260610"
