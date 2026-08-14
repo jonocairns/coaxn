@@ -114,10 +114,15 @@ composition path, but none of upstream's Windows archives ships a libmpv DLL,
 import library or headers, so the pin follows a build that publishes a
 development package.
 
-PRD §7.1 is the canonical statement of this and records the checks behind both
-halves. It is deliberately the only place the argument is made in full — the
-same reasoning written out here and in the fetch script drifted apart once
-already.
+Both halves were checked against upstream on 3 August 2026. The
+[v0.41.0 property documentation](https://github.com/mpv-player/mpv/blob/v0.41.0/DOCS/man/input.rst)
+defines `display-swapchain`, while the same tag documents the required D3D11
+composition options. Its `x86_64-pc-windows-msvc` archive contains only the
+player, symbols, Vulkan loader and registration scripts; the
+`x86_64-w64-mingw32` archive is likewise a player build with runtime libraries.
+Neither archive contains a libmpv DLL, import library or C headers. This section
+is the repository's canonical pin rationale; the fetch script deliberately
+points here rather than maintaining a second copy.
 
 The archive is verified against a pinned SHA-256 before it is unpacked, because
 the commit pins provenance rather than content: a release asset can be replaced
@@ -135,7 +140,7 @@ themselves; fixing that needs a code-signing certificate, not a build change.
 The 117 MB libmpv blob that makes up most of a release is content-verified at
 fetch time now, but the release is still not legally complete: mpv's and
 FFmpeg's licence terms and the corresponding source offer are not shipped with
-it (PRD §8.2). And a release stays two files: one self-contained `.exe`
+it. A release stays two files: one self-contained `.exe`
 would mean embedding `libmpv-2.dll` as a resource and extracting it on first
 run, since static libmpv would mean building ffmpeg and its dependency tree
 here.
