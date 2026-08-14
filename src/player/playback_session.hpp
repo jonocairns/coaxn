@@ -14,12 +14,18 @@
 #include "player/load_diagnostics.hpp"
 #include "player/playback_observability.hpp"
 #include "player/player_event_adapter.hpp"
+#include "player/timeline_recovery.hpp"
 
 namespace coax::player {
 
 struct ActiveLoad {
     core::Generation generation;
     core::LoadAttempt load_attempt;
+};
+
+enum class TimelineRecoveryCapability {
+    Disabled,
+    ContinuousRawMpegTs,
 };
 
 struct HealthSampleReport {
@@ -29,6 +35,7 @@ struct HealthSampleReport {
     std::uint64_t engine_messages_since_sample = 0;
     std::uint64_t unattributed_engine_messages_since_sample = 0;
     std::optional<SanitizedEngineWarning> engine_warning;
+    TimelineRecoveryStep timeline_recovery;
 };
 
 // The concrete player remains outside the portable coordinator. These callbacks
@@ -73,7 +80,9 @@ public:
 
     [[nodiscard]] core::Generation begin_channel();
     void load_started(core::LoadAttempt load_attempt, core::LoadIntent intent,
-                      core::RecoveryTransport transport);
+                      core::RecoveryTransport transport,
+                      TimelineRecoveryCapability timeline_recovery_capability =
+                          TimelineRecoveryCapability::Disabled);
     void load_failed(core::LoadAttempt load_attempt);
     // Synchronously retires the exact user-stopped generation. Backend stop
     // acknowledgement is cleanup evidence and is not needed to reach Idle.
@@ -140,6 +149,11 @@ private:
     std::uint64_t last_health_unattributed_engine_message_count_ = 0;
     std::optional<bool> last_cache_state_dispatched_;
     std::vector<PendingStreamEnd> pending_stream_ends_;
+    TimelineRecovery timeline_recovery_;
+    bool timeline_recovery_pending_ = false;
+    TimelineRecoveryCapability timeline_recovery_capability_ =
+        TimelineRecoveryCapability::Disabled;
+    std::optional<core::TimePoint> last_rebuffer_at_;
 
     LiveSync live_sync_;
     LiveSyncTurn live_sync_turn_;

@@ -9,7 +9,7 @@
 namespace coax::core {
 
 inline constexpr std::string_view kTransportPolicyVersion = "coax-transport-recovery-v7";
-inline constexpr std::string_view kRecoveryPolicyVersion = "coax-recovery-v3";
+inline constexpr std::string_view kRecoveryPolicyVersion = "coax-recovery-v4";
 inline constexpr int kHlsLiveStartIndex = -1;
 inline constexpr std::string_view kHlsRuntimeRetryOptions =
     "http_persistent=0,http_multiple=0,seg_max_retry=0";

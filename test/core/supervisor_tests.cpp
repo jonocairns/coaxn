@@ -41,7 +41,7 @@ TEST_CASE("recovery schedule budget phases and versions are pinned") {
     CHECK(kDefaultRecoveryPolicy.wall_clock_budget == seconds(30));
     CHECK(kDefaultRecoveryPolicy.steady_healthy_window == seconds(5));
     CHECK(kDefaultRecoveryPolicy.short_reopens_before_recreation == 2);
-    CHECK(kDefaultRecoveryPolicy.version == "coax-recovery-v3");
+    CHECK(kDefaultRecoveryPolicy.version == "coax-recovery-v4");
     CHECK(kTransportPolicyVersion == "coax-transport-recovery-v7");
 }
 
@@ -127,6 +127,32 @@ TEST_CASE("continuous TS terminal end schedules and emits a generation-scoped re
     CHECK(result.effects[0].generation == Generation{1});
     CHECK(std::holds_alternative<ReopenStream>(result.effects[0].payload));
     CHECK_FALSE(next_deadline_at(result.state));
+}
+
+TEST_CASE("timeline regression reopens only established current MPEG-TS playback") {
+    const auto steady_ts = reach_steady();
+    auto result = apply(steady_ts, TimelineRegressed{
+        Generation{1}, LoadAttempt{1}}, 10.0);
+    REQUIRE(result.transition);
+    CHECK(result.transition->reason == "timeline-regression");
+    CHECK(result.state.name == SupervisorStateName::Recovering);
+    CHECK(result.state.detection == DetectionReason::TimelineRegression);
+    CHECK(recovery(result.state) == RecoveryAction::ReopenStream);
+    CHECK(next_deadline_at(result.state) == at(10.5));
+
+    CHECK_FALSE(apply(steady_ts, TimelineRegressed{
+        Generation{1}, LoadAttempt{2}}, 10.0).transition);
+
+    const auto steady_hls = reach_steady(Generation{1}, RecoveryTransport::Hls);
+    CHECK_FALSE(apply(steady_hls, TimelineRegressed{
+        Generation{1}, LoadAttempt{1}}, 10.0).transition);
+
+    auto zap = step(initial_supervisor_state(), ChannelRequested{Generation{1}}, 0.0);
+    zap = step(zap, StreamLoadIssued{
+        Generation{1}, LoadAttempt{1}, LoadIntent::FreshSelection,
+        RecoveryTransport::MpegTs}, 0.1);
+    CHECK_FALSE(apply(zap, TimelineRegressed{
+        Generation{1}, LoadAttempt{1}}, 1.0).transition);
 }
 
 TEST_CASE("unexpected active live EOF reopens the current TS load") {
