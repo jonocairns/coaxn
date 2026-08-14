@@ -154,11 +154,12 @@ The Electron implementation is frozen. This is the version under development.
 
 | | |
 |---|---|
-| [PRD.md](PRD.md) | Product requirements and the rationale for the native rewrite |
-| [docs/design/live-playback.md](docs/design/live-playback.md) | Live playback, recovery and buffering design |
 | [docs/packaging.md](docs/packaging.md) | Packaging, releases, debug symbols, pinned libmpv |
-| [docs/architecture-audit.md](docs/architecture-audit.md) | What the structure gets right, where it does not hold, and the evidence for each |
 | [AGENTS.md](AGENTS.md) | Build commands, commit-prefix rules, generated files — the short version |
+
+Product requirements, design notes, audits, evidence and implementation
+handoffs are maintained in the project's private knowledge base rather than in
+the source tree.
 
 ## Licence
 

@@ -2,8 +2,8 @@
 
 Things that are easy to get wrong here, and the rules that are mechanical
 rather than stylistic. Reasoning lives in [README.md](README.md),
-[docs/packaging.md](docs/packaging.md) and [PRD.md](PRD.md) — this file is the
-short version.
+[docs/packaging.md](docs/packaging.md) and the project's private knowledge base
+— this file is the short version.
 
 ## Tools live in nix, not on PATH
 
