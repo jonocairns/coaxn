@@ -69,8 +69,6 @@ public:
 
 private:
     struct Candidate {
-        core::Generation generation;
-        core::LoadAttempt load_attempt;
         core::TimePoint armed_at;
         std::optional<double> baseline_live_gap_seconds;
         std::optional<double> cache_relative_loss_seconds;

@@ -55,12 +55,19 @@ void TimelineRecovery::prune(core::TimePoint now) {
 
 void TimelineRecovery::remember_trusted_live_gap(
     const TimelineRecoveryObservation& observation) {
-    if (observation.healthy) {
-        if (const auto gap = live_gap(observation)) {
-            trusted_live_gap_seconds_ = gap;
-            trusted_live_gap_at_ = observation.observed_at;
-        }
-    }
+    if (!observation.healthy) return;
+    const auto gap = live_gap(observation);
+    if (!gap || *gap < -policy_.common_clock_tolerance_seconds) return;
+
+    const auto playback_movement = observation.timeline.playback_movement_seconds;
+    const auto cache_movement = observation.timeline.cache_end_movement_seconds;
+    const bool coherent_movement = playback_movement && cache_movement &&
+        std::abs(*cache_movement - *playback_movement) <=
+            policy_.common_clock_tolerance_seconds;
+    if (!coherent_movement) return;
+
+    trusted_live_gap_seconds_ = gap;
+    trusted_live_gap_at_ = observation.observed_at;
 }
 
 TimelineRecoveryStep TimelineRecovery::decide_recovery(
@@ -137,13 +144,14 @@ TimelineRecoveryStep TimelineRecovery::observe(
             const bool confirmed_gap = gap_increase &&
                 *gap_increase >= policy_.material_live_gap_seconds;
             step.live_gap_increase_seconds = gap_increase;
-            if (material_rewind) {
+            if (material_rewind && !gap_increase) {
                 return decide_recovery(observation.observed_at, step);
             }
             if (confirmed_gap) {
                 if (candidate.requires_gap_persistence &&
                     !candidate.gap_persistence_observed) {
                     candidate.gap_persistence_observed = true;
+                    candidate.armed_at = observation.observed_at;
                     candidate_ = candidate;
                     step.outcome =
                         TimelineRecoveryOutcome::CandidatePersistencePending;
@@ -168,6 +176,15 @@ TimelineRecoveryStep TimelineRecovery::observe(
     }
 
     if (material_rewind) {
+        if (common_clock_reset) {
+            step.current_live_gap_seconds = current_gap;
+            step.cache_relative_loss_seconds = cache_relative_loss;
+            step.rebuffer_age_seconds = observation.rebuffer_age_seconds;
+            step.cache_resume_related = refill_related;
+            step.outcome = TimelineRecoveryOutcome::CommonClockReset;
+            return step;
+        }
+
         std::optional<double> baseline;
         if (trusted_live_gap_seconds_ && trusted_live_gap_at_ &&
             observation.observed_at - *trusted_live_gap_at_ <=
@@ -175,8 +192,6 @@ TimelineRecoveryStep TimelineRecovery::observe(
             baseline = trusted_live_gap_seconds_;
         }
         candidate_ = Candidate{
-            observation.generation,
-            observation.load_attempt,
             observation.observed_at,
             baseline,
             cache_relative_loss,
@@ -188,14 +203,7 @@ TimelineRecoveryStep TimelineRecovery::observe(
         step.cache_relative_loss_seconds = cache_relative_loss;
         step.rebuffer_age_seconds = observation.rebuffer_age_seconds;
         step.cache_resume_related = refill_related;
-        step.outcome = common_clock_reset
-            ? TimelineRecoveryOutcome::CommonClockReset
-            : TimelineRecoveryOutcome::CandidateArmed;
-        return step;
-    }
-
-    if (step.outcome == TimelineRecoveryOutcome::CandidateCleared) {
-        remember_trusted_live_gap(observation);
+        step.outcome = TimelineRecoveryOutcome::CandidateArmed;
         return step;
     }
 

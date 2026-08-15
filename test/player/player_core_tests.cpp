@@ -48,7 +48,7 @@ TEST_CASE("timeline recovery ignores a shared MPEG-TS clock reset") {
     player::TimelineRecovery recovery;
     recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
     (void)recovery.observe(timeline_observation(0.0, 100.0, 104.0,
-                                                std::nullopt, std::nullopt), true);
+                                                0.5, 0.5), true);
 
     const auto step = recovery.observe(timeline_observation(
         0.5, 76.5, 81.0, -23.5, -23.0, false), true);
@@ -66,11 +66,73 @@ TEST_CASE("timeline recovery ignores a shared MPEG-TS clock reset") {
     CHECK(settled.outcome == player::TimelineRecoveryOutcome::None);
 }
 
+TEST_CASE("a shared clock reset does not arm an unrelated later rewind") {
+    player::TimelineRecovery recovery;
+    recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
+    (void)recovery.observe(timeline_observation(
+        0.0, 100.0, 104.0, 0.5, 0.5), true);
+
+    const auto reset = recovery.observe(timeline_observation(
+        0.5, 76.5, 81.0, -23.5, -23.0, false), true);
+    REQUIRE(reset.outcome == player::TimelineRecoveryOutcome::CommonClockReset);
+
+    const auto rewind = recovery.observe(timeline_observation(
+        1.0, 70.0, 81.5, -6.5, 0.5, false), true);
+    CHECK_FALSE(rewind.recover);
+    CHECK(rewind.outcome == player::TimelineRecoveryOutcome::CandidateArmed);
+}
+
+TEST_CASE("timeline recovery ignores a cache-first split clock reset") {
+    player::TimelineRecovery recovery;
+    recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
+    (void)recovery.observe(timeline_observation(0.0, 100.0, 104.0,
+                                                0.5, 0.5), true);
+
+    const auto cache_reset = recovery.observe(timeline_observation(
+        0.5, 100.5, 81.0, 0.5, -23.0), true);
+    CHECK_FALSE(cache_reset.recover);
+    CHECK(cache_reset.outcome == player::TimelineRecoveryOutcome::None);
+
+    const auto playback_reset = recovery.observe(timeline_observation(
+        1.0, 77.0, 81.5, -23.5, 0.5, false), true);
+    CHECK_FALSE(playback_reset.recover);
+    CHECK(playback_reset.outcome == player::TimelineRecoveryOutcome::CandidateArmed);
+    REQUIRE(playback_reset.baseline_live_gap_seconds);
+    CHECK(*playback_reset.baseline_live_gap_seconds == 4.0);
+
+    const auto settled = recovery.observe(timeline_observation(
+        1.5, 77.5, 82.0, 0.5, 0.5), true);
+    CHECK_FALSE(settled.recover);
+    CHECK(settled.outcome == player::TimelineRecoveryOutcome::CandidateCleared);
+}
+
+TEST_CASE("timeline recovery ignores a playback-first split clock reset") {
+    player::TimelineRecovery recovery;
+    recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
+    (void)recovery.observe(timeline_observation(0.0, 100.0, 104.0,
+                                                0.5, 0.5), true);
+
+    const auto playback_reset = recovery.observe(timeline_observation(
+        0.5, 77.0, 104.5, -23.0, 0.5, false), true);
+    CHECK_FALSE(playback_reset.recover);
+    CHECK(playback_reset.outcome == player::TimelineRecoveryOutcome::CandidateArmed);
+
+    const auto cache_reset = recovery.observe(timeline_observation(
+        1.0, 77.5, 81.0, 0.5, -23.5), true);
+    CHECK_FALSE(cache_reset.recover);
+    CHECK(cache_reset.outcome == player::TimelineRecoveryOutcome::CandidateCleared);
+
+    const auto settled = recovery.observe(timeline_observation(
+        1.5, 78.0, 81.5, 0.5, 0.5), true);
+    CHECK_FALSE(settled.recover);
+    CHECK(settled.outcome == player::TimelineRecoveryOutcome::None);
+}
+
 TEST_CASE("timeline recovery confirms cache-relative lost ground on a later sample") {
     player::TimelineRecovery recovery;
     recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
     (void)recovery.observe(timeline_observation(0.0, 100.0, 104.0,
-                                                std::nullopt, std::nullopt), true);
+                                                0.5, 0.5), true);
 
     const auto armed = recovery.observe(timeline_observation(
         0.5, 95.02, 104.19, -4.98, 0.19, false), true);
@@ -91,7 +153,7 @@ TEST_CASE("timeline recovery confirms a rewind with missing cache on one later s
     player::TimelineRecovery recovery;
     recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
     (void)recovery.observe(timeline_observation(0.0, 100.0, 104.0,
-                                                std::nullopt, std::nullopt), true);
+                                                0.5, 0.5), true);
 
     const auto armed = recovery.observe(timeline_observation(
         0.5, 75.0, std::nullopt, -25.0, std::nullopt, false), true);
@@ -106,11 +168,47 @@ TEST_CASE("timeline recovery confirms a rewind with missing cache on one later s
     CHECK(*confirmed.live_gap_increase_seconds == 5.0);
 }
 
+TEST_CASE("consecutive material rewinds confirm when cache telemetry stays unavailable") {
+    player::TimelineRecovery recovery;
+    recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
+
+    const auto armed = recovery.observe(timeline_observation(
+        0.5, 94.0, std::nullopt, -6.0, std::nullopt, false), true);
+    CHECK_FALSE(armed.recover);
+    CHECK(armed.outcome == player::TimelineRecoveryOutcome::CandidateArmed);
+
+    const auto confirmed = recovery.observe(timeline_observation(
+        1.0, 88.0, std::nullopt, -6.0, std::nullopt, false), true);
+    CHECK(confirmed.recover);
+    CHECK(confirmed.outcome == player::TimelineRecoveryOutcome::Recover);
+    CHECK_FALSE(confirmed.live_gap_increase_seconds);
+}
+
+TEST_CASE("contradictory live-gap evidence clears consecutive rewinds") {
+    player::TimelineRecovery recovery;
+    recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
+    (void)recovery.observe(timeline_observation(
+        0.0, 100.0, 110.0, 0.5, 0.5), true);
+
+    const auto armed = recovery.observe(timeline_observation(
+        0.5, 94.0, 100.0, -6.0, -10.0, false), true);
+    REQUIRE(armed.outcome == player::TimelineRecoveryOutcome::CandidateArmed);
+    REQUIRE(armed.baseline_live_gap_seconds);
+    CHECK(*armed.baseline_live_gap_seconds == 10.0);
+
+    const auto contradicted = recovery.observe(timeline_observation(
+        1.0, 88.0, 96.0, -6.0, -4.0, false), true);
+    CHECK_FALSE(contradicted.recover);
+    CHECK(contradicted.outcome == player::TimelineRecoveryOutcome::CandidateCleared);
+    REQUIRE(contradicted.live_gap_increase_seconds);
+    CHECK(*contradicted.live_gap_increase_seconds == -2.0);
+}
+
 TEST_CASE("timeline recovery requires persistent live-gap loss after cache resume") {
     player::TimelineRecovery recovery;
     recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
     (void)recovery.observe(timeline_observation(0.0, 100.0, 104.0,
-                                                std::nullopt, std::nullopt), true);
+                                                0.5, 0.5), true);
 
     auto rewind = timeline_observation(
         0.5, 68.42, 74.74, -31.58, -29.26, false);
@@ -139,11 +237,39 @@ TEST_CASE("timeline recovery requires persistent live-gap loss after cache resum
     CHECK(*persisted.current_live_gap_seconds > 14.0);
 }
 
+TEST_CASE("persistence gets a fresh window after missing refill telemetry") {
+    player::TimelineRecovery recovery;
+    recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
+    (void)recovery.observe(timeline_observation(
+        0.0, 100.0, 104.0, 0.5, 0.5), true);
+
+    auto rewind = timeline_observation(
+        0.5, 68.42, std::nullopt, -31.58, std::nullopt, false);
+    rewind.timeline.previous_cache_paused = true;
+    REQUIRE(recovery.observe(rewind, true).outcome ==
+            player::TimelineRecoveryOutcome::CandidateArmed);
+
+    const auto unavailable = recovery.observe(timeline_observation(
+        1.0, 68.92, std::nullopt, 0.5, std::nullopt), true);
+    REQUIRE(unavailable.outcome ==
+            player::TimelineRecoveryOutcome::CandidateAwaitingTelemetry);
+
+    const auto refill = recovery.observe(timeline_observation(
+        1.6, 69.42, 83.551, 0.5, std::nullopt), true);
+    REQUIRE(refill.outcome ==
+            player::TimelineRecoveryOutcome::CandidatePersistencePending);
+
+    const auto persisted = recovery.observe(timeline_observation(
+        2.2, 70.02, 84.151, 0.6, 0.6), true);
+    CHECK(persisted.recover);
+    CHECK(persisted.outcome == player::TimelineRecoveryOutcome::Recover);
+}
+
 TEST_CASE("a transient post-resume cache refill does not reconnect") {
     player::TimelineRecovery recovery;
     recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
     (void)recovery.observe(timeline_observation(0.0, 100.0, 104.0,
-                                                std::nullopt, std::nullopt), true);
+                                                0.5, 0.5), true);
 
     auto rewind = timeline_observation(
         0.5, 68.42, 74.74, -31.58, -29.26, false);
@@ -164,16 +290,21 @@ TEST_CASE("the second soak regression also waits beyond its refill sample") {
     player::TimelineRecovery recovery;
     recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
     (void)recovery.observe(timeline_observation(0.0, 100.0, 104.0,
-                                                std::nullopt, std::nullopt), true);
+                                                0.5, 0.5), true);
+
+    const auto split_rebase = recovery.observe(timeline_observation(
+        0.5, 100.5, 76.88, 0.5, -27.12), true);
+    CHECK_FALSE(split_rebase.recover);
+    CHECK(split_rebase.outcome == player::TimelineRecoveryOutcome::None);
 
     auto rewind = timeline_observation(
-        0.5, 76.56, 80.56, -23.44, 3.68, false);
+        1.0, 76.56, 80.56, -23.94, 3.68, false);
     rewind.timeline.previous_cache_paused = true;
     REQUIRE(recovery.observe(rewind, true).outcome ==
             player::TimelineRecoveryOutcome::CandidateArmed);
 
     const auto refill = recovery.observe(timeline_observation(
-        1.0, 76.8, 90.606, 0.24, 8.06), true);
+        1.5, 76.8, 90.606, 0.24, 10.046), true);
     CHECK_FALSE(refill.recover);
     CHECK(refill.outcome ==
           player::TimelineRecoveryOutcome::CandidatePersistencePending);
@@ -181,7 +312,7 @@ TEST_CASE("the second soak regression also waits beyond its refill sample") {
     CHECK(*refill.live_gap_increase_seconds > 9.8);
 
     const auto persisted = recovery.observe(timeline_observation(
-        1.5, 77.3, 91.106, 0.5, 0.5), true);
+        2.0, 77.3, 91.106, 0.5, 0.5), true);
     CHECK(persisted.recover);
     CHECK(persisted.outcome == player::TimelineRecoveryOutcome::Recover);
 }
@@ -190,7 +321,7 @@ TEST_CASE("missing confirmation telemetry retains a candidate within its window"
     player::TimelineRecovery recovery;
     recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
     (void)recovery.observe(timeline_observation(0.0, 100.0, 104.0,
-                                                std::nullopt, std::nullopt), true);
+                                                0.5, 0.5), true);
     REQUIRE(recovery.observe(timeline_observation(
         0.5, 75.0, std::nullopt, -25.0, std::nullopt, false), true).outcome ==
             player::TimelineRecoveryOutcome::CandidateArmed);
@@ -211,7 +342,7 @@ TEST_CASE("timeline recovery cooldown and rolling cap stop reconnect churn") {
     player::TimelineRecovery recovery;
     recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
     (void)recovery.observe(timeline_observation(0.0, 100.0, 104.0,
-                                                std::nullopt, std::nullopt), true);
+                                                0.5, 0.5), true);
     const auto first_armed = recovery.observe(timeline_observation(
         0.5, 95.0, 105.0, -5.0, 1.0, false), true);
     REQUIRE(first_armed.outcome == player::TimelineRecoveryOutcome::CandidateArmed);
@@ -221,7 +352,7 @@ TEST_CASE("timeline recovery cooldown and rolling cap stop reconnect churn") {
 
     recovery.begin_load(core::Generation{1}, core::LoadAttempt{2});
     (void)recovery.observe(timeline_observation(
-        1.5, 100.0, 104.0, std::nullopt, std::nullopt, true,
+        1.5, 100.0, 104.0, 0.5, 0.5, true,
         core::LoadAttempt{2}), true);
     const auto armed = recovery.observe(timeline_observation(
         2.0, 95.0, 105.0, -5.0, 1.0, false,
@@ -262,7 +393,7 @@ TEST_CASE("timeline recovery cooldown and rolling cap stop reconnect churn") {
     recovery.reset();
     recovery.begin_load(core::Generation{2}, core::LoadAttempt{1});
     auto new_generation = timeline_observation(
-        64.0, 400.0, 404.0, std::nullopt, std::nullopt);
+        64.0, 400.0, 404.0, 0.5, 0.5);
     new_generation.generation = core::Generation{2};
     new_generation.timeline.generation = core::Generation{2};
     (void)recovery.observe(new_generation, true);

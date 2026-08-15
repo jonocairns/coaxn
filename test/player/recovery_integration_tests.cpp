@@ -500,6 +500,10 @@ TEST_CASE("timeline recovery requires an explicit continuous raw TS source") {
         exercise_regression(app);
         CHECK(app.state().name == core::SupervisorStateName::Steady);
         CHECK(app.effects.empty());
+        REQUIRE_FALSE(app.health_reports.empty());
+        CHECK_FALSE(app.health_reports.back().timeline_recovery.recover);
+        CHECK(app.health_reports.back().timeline_recovery.outcome ==
+              player::TimelineRecoveryOutcome::None);
     }
 
     SECTION("HLS is excluded even if a caller supplies the raw-TS capability") {
@@ -510,6 +514,10 @@ TEST_CASE("timeline recovery requires an explicit continuous raw TS source") {
         exercise_regression(app);
         CHECK(app.state().name == core::SupervisorStateName::Steady);
         CHECK(app.effects.empty());
+        REQUIRE_FALSE(app.health_reports.empty());
+        CHECK_FALSE(app.health_reports.back().timeline_recovery.recover);
+        CHECK(app.health_reports.back().timeline_recovery.outcome ==
+              player::TimelineRecoveryOutcome::None);
     }
 }
 
