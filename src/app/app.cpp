@@ -562,7 +562,9 @@ void App::play(const core::Channel& channel, player::SourceCorrelation correlati
     if (player_.play(client_->stream_url(channel), generation, load_attempt,
                      core::RecoveryTransport::MpegTs, false, correlation)) {
         playback_session_.load_started(load_attempt, core::LoadIntent::FreshSelection,
-                                       core::RecoveryTransport::MpegTs);
+                                       core::RecoveryTransport::MpegTs,
+                                       player::TimelineRecoveryCapability::
+                                           ContinuousRawMpegTs);
     } else {
         playback_session_.load_failed(load_attempt);
     }
@@ -702,7 +704,10 @@ void App::log_health_sample(const player::HealthSampleReport& report) {
         "control-playback-deviation={} control-baseline={} cache-paused={} playback-speed={:.2f}x "
         "previous-cache-paused={} engine-messages-since-sample={} "
         "unattributed-engine-messages-since-sample={} warning-severity={} "
-        "warning-component={} warning-category={}",
+        "warning-component={} warning-category={} timeline-recovery={} "
+        "baseline-live-gap={} current-live-gap={} cache-relative-loss={} "
+        "live-gap-increase={} rebuffer-age={} cache-resume-related={} "
+        "supervisor-accepted={}",
         evidence_generation.value(), health_snapshot.timeline.load_attempt.value(),
         player::to_string(report.classification),
         signed_seconds(health_snapshot.timeline.elapsed_seconds),
@@ -717,7 +722,15 @@ void App::log_health_sample(const player::HealthSampleReport& report) {
         optional_pause(health_snapshot.timeline.previous_cache_paused),
         report.engine_messages_since_sample,
         report.unattributed_engine_messages_since_sample,
-        warning_severity, warning_component, warning_category);
+        warning_severity, warning_component, warning_category,
+        player::to_string(report.timeline_recovery.outcome),
+        signed_seconds(report.timeline_recovery.baseline_live_gap_seconds),
+        signed_seconds(report.timeline_recovery.current_live_gap_seconds),
+        signed_seconds(report.timeline_recovery.cache_relative_loss_seconds),
+        signed_seconds(report.timeline_recovery.live_gap_increase_seconds),
+        signed_seconds(report.timeline_recovery.rebuffer_age_seconds),
+        report.timeline_recovery.cache_resume_related ? "yes" : "no",
+        optional_pause(report.timeline_recovery.supervisor_accepted));
     if (fold.discontinuity) {
         log::warn(
             "Timeline discontinuity #{} generation {} load-attempt={} kind={} playback-move={} "

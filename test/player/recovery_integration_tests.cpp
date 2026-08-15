@@ -61,12 +61,17 @@ public:
         core::RecoveryPolicy policy = core::kDefaultRecoveryPolicy)
         : execution_mode_(mode), session_(clock_, make_callbacks(), policy) {}
 
-    LoadHandle play(bool publish_start_file = true) {
+    LoadHandle play(
+        bool publish_start_file = true,
+        player::TimelineRecoveryCapability timeline_recovery_capability =
+            player::TimelineRecoveryCapability::ContinuousRawMpegTs,
+        core::RecoveryTransport transport = core::RecoveryTransport::MpegTs) {
         generation_ = session_.begin_channel();
         const auto load = issue_load(core::LoadAttempt{1}, core::LoadIntent::FreshSelection,
                                      publish_start_file);
         session_.load_started(core::LoadAttempt{1}, core::LoadIntent::FreshSelection,
-                              core::RecoveryTransport::MpegTs);
+                              transport,
+                              timeline_recovery_capability);
         return load;
     }
 
@@ -174,6 +179,7 @@ public:
 
     std::vector<core::SupervisorEffect> effects;
     std::vector<core::SupervisorTransition> transitions;
+    std::vector<player::HealthSampleReport> health_reports;
     std::vector<std::exception_ptr> recovery_exceptions;
     std::vector<double> speed_writes;
     int health_observations = 0;
@@ -222,6 +228,9 @@ private:
         callbacks.set_live_sync_state = [this](double, int) { ++live_sync_writes; };
         callbacks.on_transition = [this](const core::SupervisorTransition& transition) {
             transitions.push_back(transition);
+        };
+        callbacks.on_health_sample = [this](const player::HealthSampleReport& report) {
+            health_reports.push_back(report);
         };
         return callbacks;
     }
@@ -438,6 +447,78 @@ TEST_CASE("the production session holds unity through a stall and controls immed
     app.tick(6.5, correction);
     REQUIRE(app.speed_writes.size() == 2);
     CHECK(app.speed_writes.back() == 0.97);
+}
+
+TEST_CASE("confirmed cache-relative timeline regression reopens through the supervisor") {
+    RecoveryAppLoop app;
+    app.play();
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    app.tick(5.1, playing(5.0));
+    REQUIRE(app.state().name == core::SupervisorStateName::Steady);
+
+    app.tick(5.6, playing(5.5));
+    auto regressed = playing(0.52);
+    regressed.cache_end_seconds = 10.19;
+    app.tick(6.1, regressed);
+
+    REQUIRE(app.state().name == core::SupervisorStateName::Steady);
+    auto confirmed = playing(1.02);
+    confirmed.cache_end_seconds = 10.69;
+    app.tick(6.6, confirmed);
+
+    REQUIRE(app.state().name == core::SupervisorStateName::Recovering);
+    REQUIRE(app.state().detection == core::DetectionReason::TimelineRegression);
+    REQUIRE_FALSE(app.health_reports.empty());
+    const auto& decision = app.health_reports.back().timeline_recovery;
+    CHECK(decision.outcome == player::TimelineRecoveryOutcome::Recover);
+    CHECK(decision.supervisor_accepted == true);
+    CHECK(app.effects.empty());
+
+    app.poll(7.1);
+    REQUIRE(app.effects.size() == 1);
+    CHECK(app.effects.front().load_attempt == core::LoadAttempt{2});
+    CHECK(std::holds_alternative<core::ReopenStream>(app.effects.front().payload));
+}
+
+TEST_CASE("timeline recovery requires an explicit continuous raw TS source") {
+    const auto exercise_regression = [](RecoveryAppLoop& app) {
+        app.tick(0.1, playing(0.0), /*frame_started=*/true);
+        app.tick(5.1, playing(5.0));
+        REQUIRE(app.state().name == core::SupervisorStateName::Steady);
+        app.tick(5.6, playing(5.5));
+        auto regressed = playing(0.52);
+        regressed.cache_end_seconds = 10.19;
+        app.tick(6.1, regressed);
+        auto confirmed = playing(1.02);
+        confirmed.cache_end_seconds = 10.69;
+        app.tick(6.6, confirmed);
+    };
+
+    SECTION("direct media is disabled even on the MPEG-TS recovery branch") {
+        RecoveryAppLoop app;
+        app.play(true, player::TimelineRecoveryCapability::Disabled);
+        exercise_regression(app);
+        CHECK(app.state().name == core::SupervisorStateName::Steady);
+        CHECK(app.effects.empty());
+        REQUIRE_FALSE(app.health_reports.empty());
+        CHECK_FALSE(app.health_reports.back().timeline_recovery.recover);
+        CHECK(app.health_reports.back().timeline_recovery.outcome ==
+              player::TimelineRecoveryOutcome::None);
+    }
+
+    SECTION("HLS is excluded even if a caller supplies the raw-TS capability") {
+        RecoveryAppLoop app;
+        app.play(true,
+                 player::TimelineRecoveryCapability::ContinuousRawMpegTs,
+                 core::RecoveryTransport::Hls);
+        exercise_regression(app);
+        CHECK(app.state().name == core::SupervisorStateName::Steady);
+        CHECK(app.effects.empty());
+        REQUIRE_FALSE(app.health_reports.empty());
+        CHECK_FALSE(app.health_reports.back().timeline_recovery.recover);
+        CHECK(app.health_reports.back().timeline_recovery.outcome ==
+              player::TimelineRecoveryOutcome::None);
+    }
 }
 
 TEST_CASE("ordinary recovery preserves learned live target while recreation resets it") {

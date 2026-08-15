@@ -43,6 +43,7 @@ enum class DetectionReason {
     PresentationDeviceLost,
     ProcessExited,
     ProgressStall,
+    TimelineRegression,
     StreamEndedEof,
     StreamEndedError,
     StreamEndedUnknown,
@@ -107,6 +108,7 @@ struct PresentationLost { Generation generation; };
 struct ProcessExited { Generation generation; LoadAttempt load_attempt; };
 struct SourceFailed { Generation generation; LoadAttempt load_attempt; };
 struct PlaybackStalled { Generation generation; LoadAttempt load_attempt; StallKind stall; };
+struct TimelineRegressed { Generation generation; LoadAttempt load_attempt; };
 struct StreamEnded {
     Generation generation;
     LoadAttempt load_attempt;
@@ -124,7 +126,7 @@ using SupervisorEvent = std::variant<
     DeadlineReached, CacheState, AuthRejected, DecodeStalled, FirstFrame,
     IpcUnresponsive, ChannelRequested, PlaybackHealthObserved, ForwardProgressObserved,
     PlaybackStopped,
-    PresentationLost, ProcessExited, SourceFailed, PlaybackStalled, StreamEnded,
+    PresentationLost, ProcessExited, SourceFailed, PlaybackStalled, TimelineRegressed, StreamEnded,
     StreamLoadIssued>;
 
 struct ReopenStream {};

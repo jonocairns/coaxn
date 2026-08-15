@@ -52,6 +52,9 @@ PlaybackSession::PlaybackSession(const core::SupervisorClock& clock,
 
 core::Generation PlaybackSession::begin_channel() {
     reset_live_state();
+    timeline_recovery_.reset();
+    timeline_recovery_pending_ = false;
+    timeline_recovery_capability_ = TimelineRecoveryCapability::Disabled;
 
     generation_ = core::Generation{generation_.value() + 1};
     supervisor_.dispatch(core::ChannelRequested{generation_});
@@ -60,7 +63,10 @@ core::Generation PlaybackSession::begin_channel() {
 
 void PlaybackSession::load_started(core::LoadAttempt load_attempt,
                                    core::LoadIntent intent,
-                                   core::RecoveryTransport transport) {
+                                   core::RecoveryTransport transport,
+                                   TimelineRecoveryCapability
+                                       timeline_recovery_capability) {
+    timeline_recovery_capability_ = timeline_recovery_capability;
     restart_health_supervision(load_attempt);
     live_sync_turn_.begin_load();
     supervisor_.dispatch(core::StreamLoadIssued{
@@ -86,6 +92,9 @@ bool PlaybackSession::stop(core::Generation generation) {
     exact_failure_reported_ = false;
     last_cache_state_dispatched_.reset();
     pending_stream_ends_.clear();
+    timeline_recovery_.reset();
+    timeline_recovery_pending_ = false;
+    timeline_recovery_capability_ = TimelineRecoveryCapability::Disabled;
     reset_live_state();
     return true;
 }
@@ -98,6 +107,7 @@ void PlaybackSession::reset_live_state() {
     live_sync_.reset();
     live_sync_turn_.reset();
     rebuffer_count_ = 0;
+    last_rebuffer_at_.reset();
     if (callbacks_.set_speed) callbacks_.set_speed(1.0);
 }
 
@@ -155,6 +165,7 @@ void PlaybackSession::restart_health_supervision(core::LoadAttempt load_attempt)
     const auto target = core::buffer_phase_targets(core::BufferPhase::Zap);
     playback_health_ = core::initial_playback_health(
         generation_, load_attempt, core::BufferPhase::Zap, now, target.cache_seconds);
+    timeline_recovery_.begin_load(generation_, load_attempt);
     health_snapshot_ = playback_health_->snapshot;
     timeline_classification_ = TimelineClassification::Unavailable;
     next_health_sample_ = now + core::kDefaultHealthPolicy.sample_interval;
@@ -319,17 +330,28 @@ void PlaybackSession::sample_health() {
             : unattributed_count;
     last_health_unattributed_engine_message_count_ = unattributed_count;
     timeline_classification_ = classify_timeline(health_snapshot_.timeline, options.policy);
-
-    if (callbacks_.on_health_sample) {
-        callbacks_.on_health_sample({
-            .fold = fold,
-            .observed_generation = observation.generation,
-            .classification = timeline_classification_,
-            .engine_messages_since_sample = engine_delta,
-            .unattributed_engine_messages_since_sample = unattributed_delta,
-            .engine_warning = current_diagnostics.last_engine_message,
-        });
+    const bool timeline_recovery_eligible =
+        supervisor_.current().name == core::SupervisorStateName::Steady &&
+        supervisor_.current().transport == core::RecoveryTransport::MpegTs &&
+        timeline_recovery_capability_ ==
+            TimelineRecoveryCapability::ContinuousRawMpegTs &&
+        live_sync_turn_.first_frame_seen();
+    std::optional<double> rebuffer_age_seconds;
+    if (last_rebuffer_at_ && now >= *last_rebuffer_at_) {
+        rebuffer_age_seconds =
+            std::chrono::duration<double>(now - *last_rebuffer_at_).count();
     }
+    auto timeline_recovery_step = timeline_recovery_.observe({
+        .generation = fold.state.generation,
+        .load_attempt = fold.state.load_attempt,
+        .observed_at = now,
+        .timeline = health_snapshot_.timeline,
+        .cache_end_seconds = observation.cache_end_seconds,
+        .playback_time_seconds = observation.playback_time_seconds,
+        .rebuffer_age_seconds = rebuffer_age_seconds,
+        .healthy = fold.state.verdict == core::PlaybackHealthVerdict::Healthy,
+    }, timeline_recovery_eligible);
+
     if (fold.state.snapshot.progressing && *fold.state.snapshot.progressing) {
         supervisor_.dispatch(core::ForwardProgressObserved{
             fold.state.generation, fold.state.load_attempt});
@@ -350,6 +372,33 @@ void PlaybackSession::sample_health() {
         decode_stall_reported_ = true;
         supervisor_.dispatch(core::DecodeStalled{
             fold.state.generation, fold.state.load_attempt});
+    } else if (timeline_recovery_step.recover) {
+        supervisor_.dispatch(core::TimelineRegressed{
+            fold.state.generation, fold.state.load_attempt});
+        const auto& state = supervisor_.current();
+        const bool accepted =
+            state.name == core::SupervisorStateName::Recovering &&
+            state.detection == core::DetectionReason::TimelineRegression &&
+            state.generation == fold.state.generation &&
+            state.load_attempt == fold.state.load_attempt;
+        timeline_recovery_step.supervisor_accepted = accepted;
+        timeline_recovery_pending_ = accepted;
+    }
+    if (timeline_recovery_step.recover &&
+        !timeline_recovery_step.supervisor_accepted) {
+        timeline_recovery_step.supervisor_accepted = false;
+    }
+
+    if (callbacks_.on_health_sample) {
+        callbacks_.on_health_sample({
+            .fold = fold,
+            .observed_generation = observation.generation,
+            .classification = timeline_classification_,
+            .engine_messages_since_sample = engine_delta,
+            .unattributed_engine_messages_since_sample = unattributed_delta,
+            .engine_warning = current_diagnostics.last_engine_message,
+            .timeline_recovery = timeline_recovery_step,
+        });
     }
 }
 
@@ -357,6 +406,7 @@ void PlaybackSession::update_live_sync() {
     if (supervisor_.current().name == core::SupervisorStateName::Idle) return;
     const auto step = live_sync_turn_.observe(diagnostics());
     if (step.rebuffered) {
+        last_rebuffer_at_ = clock_.now();
         ++rebuffer_count_;
         live_sync_.notify_rebuffer();
         if (callbacks_.on_rebuffer) {
@@ -383,6 +433,12 @@ void PlaybackSession::update_live_sync() {
 void PlaybackSession::on_supervisor_state_changed(const core::SupervisorState& state) {
     const auto previous = supervisor_state_name_;
     supervisor_state_name_ = state.name;
+
+    if (timeline_recovery_pending_ && state.name == core::SupervisorStateName::Zap &&
+        state.load_intent != core::LoadIntent::FreshSelection && state.first_frame_at) {
+        timeline_recovery_.note_recovered_first_frame(*state.first_frame_at);
+        timeline_recovery_pending_ = false;
+    }
 
     if (previous == core::SupervisorStateName::Failed &&
         state.name == core::SupervisorStateName::Zap &&

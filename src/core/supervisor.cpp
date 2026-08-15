@@ -483,6 +483,12 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
                 : (value.stall == StallKind::Open ? DetectionReason::OpenStall
                                                   : DetectionReason::ProgressStall);
             return recover(state, detection, reopen_action(state), now, policy);
+        } else if constexpr (std::is_same_v<T, TimelineRegressed>) {
+            if (value.load_attempt != state.load_attempt ||
+                state.name != SupervisorStateName::Steady ||
+                state.transport != RecoveryTransport::MpegTs) return ignore(state);
+            return recover(state, DetectionReason::TimelineRegression,
+                           RecoveryAction::ReopenStream, now, policy);
         } else if constexpr (std::is_same_v<T, IpcUnresponsive>) {
             if (value.load_attempt != state.load_attempt) return ignore(state);
             if (state.name == SupervisorStateName::Failed) {
@@ -672,6 +678,7 @@ const char* to_string(DetectionReason value) {
         case DetectionReason::PresentationDeviceLost: return "presentation-device-lost";
         case DetectionReason::ProcessExited: return "process-exited";
         case DetectionReason::ProgressStall: return "progress-stall";
+        case DetectionReason::TimelineRegression: return "timeline-regression";
         case DetectionReason::StreamEndedEof: return "stream-ended-eof";
         case DetectionReason::StreamEndedError: return "stream-ended-error";
         case DetectionReason::StreamEndedUnknown: return "stream-ended-unknown";
