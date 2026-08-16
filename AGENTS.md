@@ -21,6 +21,23 @@ rather than stylistic. Reasoning lives in [README.md](README.md),
 - `build/coax.exe` runs directly from WSL; there is no Windows runner anywhere
   in this project.
 
+## Running it from WSL lies to you twice
+
+Both of these produce a confident wrong answer rather than an error, so a run
+can appear to prove something it did not.
+
+- **`timeout N ./coax.exe` does not stop the program.** It kills the WSL interop
+  stub and leaves the Windows process running. Orphans accumulate, every one of
+  them reopens `coax.log` with a truncating handle, and the log you then read
+  belongs to whichever instance wrote last — very possibly an older build. Start
+  it in the background and stop it for real:
+  `powershell.exe -NoProfile -Command "Stop-Process -Name coax -Force"`, then
+  check `Get-Process coax` returns nothing.
+- **`/mnt/c` serves stale metadata and stale content.** After the application
+  rewrites a file under `%LOCALAPPDATA%\Coax`, its size, mtime and hash read
+  from WSL can all be unchanged. Check anything the Windows process wrote
+  through `powershell.exe -NoProfile -Command "Get-ChildItem …"` instead.
+
 ## Commit prefixes decide the next version
 
 - Conventional Commits are wired to the release machinery. release-please reads

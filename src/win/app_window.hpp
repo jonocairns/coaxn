@@ -37,6 +37,67 @@ public:
     void set_fullscreen(bool fullscreen);
     [[nodiscard]] bool fullscreen() const { return fullscreen_; }
 
+    // Whether the window keeps its caption. Off, the client area covers the
+    // whole window and the strip below stands in for the title bar. Every
+    // WS_OVERLAPPEDWINDOW style bit is kept either way — what changes is only
+    // whether WM_NCCALCSIZE hands the frame's pixels back — so the shadow,
+    // Aero Snap, the minimise animation and the Alt-Tab thumbnail are the
+    // system's in both modes. Safe to call before the window exists, and
+    // applied immediately when it does.
+    void set_minimal_frame(bool minimal);
+    [[nodiscard]] bool minimal_frame() const { return minimal_frame_; }
+
+    // The band along the top edge that behaves as a title bar: drag, double
+    // click to maximise, drag to an edge to snap, and the system menu on right
+    // click. Physical pixels, because the caller has already scaled it; zero
+    // means the window has no draggable strip at all.
+    void set_caption_height(int pixels) { caption_height_ = pixels; }
+
+    // Whether the interface has something under the pointer that wants the
+    // click. Published once per frame rather than asked for, because the hit
+    // test runs inside the window procedure and must not reach into the UI.
+    // One frame stale by construction, which the hit test is built to tolerate.
+    void set_caption_blocked(bool blocked) { caption_blocked_ = blocked; }
+
+    void minimize();
+    // Posts rather than destroys, so the request leaves through WM_CLOSE and
+    // the ordinary shutdown path exactly as the system button did. Unguarded
+    // below because posting is what makes it safe: the message is handled after
+    // whatever is running now, which is the same thing the guard enforces.
+    void close();
+    [[nodiscard]] bool maximized() const;
+    void toggle_maximize();
+
+    // Held for as long as a frame is being drawn. The reason every call above
+    // has to be made from the loop rather than from anything drawing, and the
+    // only place that reason is written down.
+    //
+    // They all resize the client area, and the SetWindowPos that does it
+    // delivers WM_SIZE synchronously — from which this class draws, because a
+    // resize drag owns the thread and the picture would otherwise stretch for
+    // the length of the gesture. Called mid-frame that is a frame begun inside
+    // a frame and a render target rebuilt under a live draw list. ImGui checks
+    // for exactly this and the check is compiled out of release builds, so the
+    // result is a crash with nothing to read.
+    //
+    // Hence the refusal: a call from the wrong place is dropped and logged
+    // instead of taking the process with it. Scoped rather than paired calls
+    // for the same reason ScopedStyle is — a return added to the draw path
+    // later would leave the flag raised and refuse everything after it.
+    class FrameScope {
+    public:
+        explicit FrameScope(AppWindow& window) : window_(window) {
+            window_.frame_in_progress_ = true;
+        }
+        ~FrameScope() { window_.frame_in_progress_ = false; }
+
+        FrameScope(const FrameScope&)            = delete;
+        FrameScope& operator=(const FrameScope&) = delete;
+
+    private:
+        AppWindow& window_;
+    };
+
     void on_resize(ResizeHandler handler) { resize_handler_ = std::move(handler); }
     void on_close(CloseHandler handler)   { close_handler_  = std::move(handler); }
     // Called when the window needs a frame while the application's own loop
@@ -67,6 +128,23 @@ private:
                                         WPARAM wparam, LPARAM lparam);
     LRESULT handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 
+    // Whether the frame is being drawn by this class rather than by Windows.
+    // Fullscreen is already a WS_POPUP with no frame to remove, so the two
+    // never overlap.
+    [[nodiscard]] bool custom_frame() const { return minimal_frame_ && !fullscreen_; }
+    // The resize border, which is also the amount a maximised window overhangs
+    // its monitor by. Takes the window rather than reading the member so it can
+    // be called from the messages that arrive during CreateWindowEx.
+    [[nodiscard]] static int frame_thickness(HWND window, bool vertical);
+    // The narrowed resize band left showing past a control in the strip, so the
+    // window stays resizable along the edge its buttons occupy.
+    [[nodiscard]] static int control_resize_band(HWND window);
+    [[nodiscard]] LRESULT hit_test(HWND window, POINT screen) const;
+    void apply_frame_appearance();
+    // Whether `what` is being asked for from inside a frame, in which case it
+    // has already been logged and must not be carried out.
+    [[nodiscard]] bool refuse_during_frame(const char* what) const;
+
     HWND          window_ = nullptr;
     HBRUSH        background_brush_ = nullptr;
     int           width_  = 0;
@@ -74,6 +152,10 @@ private:
     bool          running_ = true;
     bool          fullscreen_ = false;
     bool          minimized_ = false;
+    bool          minimal_frame_ = false;
+    int           caption_height_ = 0;
+    bool          caption_blocked_ = false;
+    bool          frame_in_progress_ = false;
     WINDOWPLACEMENT saved_placement_{};
     ResizeHandler  resize_handler_;
     CloseHandler   close_handler_;

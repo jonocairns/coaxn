@@ -265,4 +265,14 @@ void draw_stop_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 colo
 void draw_volume_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color, int waves);
 void draw_settings_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
 
+// The window controls. Plain geometry at the sizes Windows itself uses for
+// these, because they are the one place in the application where being
+// recognised instantly matters more than having a voice of its own.
+void draw_minimise_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
+void draw_close_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
+// Four corner brackets, pointing out. `collapse` turns them inward, for the
+// same control while the window is already fullscreen.
+void draw_fullscreen_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color,
+                          bool collapse);
+
 }  // namespace coax::app::theme

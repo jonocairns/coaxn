@@ -1,6 +1,8 @@
 #include "win/app_window.hpp"
 
 #include <dwmapi.h>
+#include <shellapi.h>
+#include <windowsx.h>
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 
@@ -19,6 +21,46 @@ namespace coax::win {
 namespace {
 
 constexpr const wchar_t* kWindowClass = L"CoaxNativeWindow";
+
+// The system metric at a particular DPI. GetSystemMetricsForDpi is Windows 10
+// 1607 and mingw's headers predate it, so it is resolved rather than linked;
+// the fallback is the same metric at the system DPI, which is only wrong on a
+// mixed-scale desktop and only by a couple of pixels of resize border.
+int metric_for_dpi(int index, UINT dpi) {
+    using MetricForDpi = int(WINAPI*)(int, UINT);
+    static const auto resolved = reinterpret_cast<MetricForDpi>(reinterpret_cast<void*>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetSystemMetricsForDpi")));
+    return resolved ? resolved(index, dpi) : GetSystemMetrics(index);
+}
+
+// Which edge an auto-hiding taskbar occupies on this window's monitor, or -1
+// for none. A maximised window that covers every pixel of a monitor leaves the
+// shell nowhere to notice the pointer arriving, so an auto-hidden bar can never
+// come back — the client area has to stop one pixel short of that edge.
+int autohide_taskbar_edge(HWND window) {
+    APPBARDATA state{};
+    state.cbSize = sizeof(state);
+    if ((SHAppBarMessage(ABM_GETSTATE, &state) & ABS_AUTOHIDE) == 0) {
+        return -1;
+    }
+
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        return -1;
+    }
+
+    for (const UINT edge : {ABE_TOP, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT}) {
+        APPBARDATA query{};
+        query.cbSize = sizeof(query);
+        query.uEdge  = edge;
+        query.rc     = monitor.rcMonitor;
+        if (SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &query) != 0) {
+            return static_cast<int>(edge);
+        }
+    }
+    return -1;
+}
 
 }  // namespace
 
@@ -43,6 +85,56 @@ LRESULT AppWindow::handle_message(HWND window, UINT message, WPARAM wparam, LPAR
     }
 
     switch (message) {
+        case WM_NCCALCSIZE: {
+            // What removes the caption. The frame's pixels are still there —
+            // the style keeps every WS_OVERLAPPEDWINDOW bit, so DWM goes on
+            // providing the shadow, the snap behaviour and the animations —
+            // but the client area is given all of them, and the composition
+            // tree draws over what Windows would have drawn a title bar on.
+            //
+            // wparam FALSE asks about a rectangle rather than the window, and
+            // DefWindowProc answers that case correctly on its own.
+            if (!custom_frame() || wparam == FALSE) {
+                break;
+            }
+
+            auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+            RECT& client = params->rgrc[0];
+
+            // Restored, the proposed rectangle is taken whole: that is the one
+            // move that makes client and window the same rectangle. Maximised
+            // it cannot be, because Windows sizes a maximised window to the
+            // monitor *plus* the frame it expects to be drawn outside it. Kept
+            // whole, the top of the application would be off the screen.
+            if (IsZoomed(window)) {
+                const int border_x = frame_thickness(window, false);
+                const int border_y = frame_thickness(window, true);
+                client.left   += border_x;
+                client.top    += border_y;
+                client.right  -= border_x;
+                client.bottom -= border_y;
+
+                switch (autohide_taskbar_edge(window)) {
+                    case ABE_TOP:    client.top    += 1; break;
+                    case ABE_BOTTOM: client.bottom -= 1; break;
+                    case ABE_LEFT:   client.left   += 1; break;
+                    case ABE_RIGHT:  client.right  -= 1; break;
+                    default: break;
+                }
+            }
+            return 0;
+        }
+
+        case WM_NCHITTEST: {
+            // With the frame consumed above, every pixel of the window is
+            // client area — including the ones that used to resize it and the
+            // one that used to be the title bar. This is what gives them back.
+            if (!custom_frame()) {
+                break;
+            }
+            return hit_test(window, POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
+        }
+
         case WM_SIZE: {
             const bool minimized = wparam == SIZE_MINIMIZED;
             if (minimized != minimized_) {
@@ -195,8 +287,14 @@ bool AppWindow::create(const wchar_t* title, int width, int height, std::string&
         return false;
     }
 
+    // Outer size from the requested client size. With a minimal frame the two
+    // are the same rectangle — WM_NCCALCSIZE gives the client everything — so
+    // adjusting for a caption that will not exist would open the window short
+    // by its height.
     RECT bounds{0, 0, width, height};
-    AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
+    if (!minimal_frame_) {
+        AdjustWindowRect(&bounds, WS_OVERLAPPEDWINDOW, FALSE);
+    }
 
     window_ = CreateWindowExW(
         0, kWindowClass, title, WS_OVERLAPPEDWINDOW,
@@ -217,7 +315,9 @@ bool AppWindow::create(const wchar_t* title, int width, int height, std::string&
     const float scale = dpi_scale();
     RECT        desired{0, 0, static_cast<LONG>(static_cast<float>(width) * scale),
                  static_cast<LONG>(static_cast<float>(height) * scale)};
-    AdjustWindowRect(&desired, WS_OVERLAPPEDWINDOW, FALSE);
+    if (!minimal_frame_) {
+        AdjustWindowRect(&desired, WS_OVERLAPPEDWINDOW, FALSE);
+    }
     int outer_width  = desired.right - desired.left;
     int outer_height = desired.bottom - desired.top;
 
@@ -240,12 +340,16 @@ bool AppWindow::create(const wchar_t* title, int width, int height, std::string&
                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
-    // Windows draws the caption from the system theme, so a light-themed
-    // desktop puts a white title bar above a black application. 20 is
-    // DWMWA_USE_IMMERSIVE_DARK_MODE, which mingw's dwmapi.h predates; older
-    // Windows builds ignore the attribute rather than failing the call.
-    const BOOL dark_caption = TRUE;
-    DwmSetWindowAttribute(window_, 20, &dark_caption, sizeof(dark_caption));
+    apply_frame_appearance();
+
+    // Nothing has asked the window for its non-client size yet, so a window
+    // created minimal still has the frame Windows gave it. This is what makes
+    // WM_NCCALCSIZE run.
+    if (custom_frame()) {
+        SetWindowPos(window_, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED |
+                         SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+    }
 
     RECT client{};
     GetClientRect(window_, &client);
@@ -255,8 +359,192 @@ bool AppWindow::create(const wchar_t* title, int width, int height, std::string&
     ShowWindow(window_, SW_SHOW);
     UpdateWindow(window_);
 
-    log::info("Window created ({}x{})", width_, height_);
+    log::info("Window created ({}x{}, {} frame)", width_, height_,
+              minimal_frame_ ? "minimal" : "system");
     return true;
+}
+
+void AppWindow::apply_frame_appearance() {
+    if (!window_) {
+        return;
+    }
+
+    // Windows draws the caption from the system theme, so a light-themed
+    // desktop puts a white title bar above a black application. 20 is
+    // DWMWA_USE_IMMERSIVE_DARK_MODE, which mingw's dwmapi.h predates; older
+    // Windows builds ignore the attribute rather than failing the call. Set
+    // even with a minimal frame, because the frame is a setting and the caption
+    // has to be right the moment it comes back.
+    const BOOL dark_caption = TRUE;
+    DwmSetWindowAttribute(window_, 20, &dark_caption, sizeof(dark_caption));
+
+    // 33 is DWMWA_WINDOW_CORNER_PREFERENCE and 2 is DWMWCP_ROUND. Windows 11
+    // rounds most top-level windows on its own, but not one whose non-client
+    // area has been emptied — which is exactly what the WM_NCCALCSIZE above
+    // does, and which Microsoft names as a thing that breaks the heuristic.
+    // This is the documented way back in: an opt-in for apps that customise
+    // their frame and still want the system's corners, shadow and border.
+    //
+    // Asking the desktop to round rather than rounding anything here. Cutting
+    // the corners out of what this application draws would be a second, harder
+    // edged shape just inside DWM's antialiased one.
+    const DWORD corner_preference = 2;
+    DwmSetWindowAttribute(window_, 33, &corner_preference, sizeof(corner_preference));
+
+    // 34 is DWMWA_BORDER_COLOR, Windows 11 and ignored before it. Without it a
+    // light-themed desktop draws a pale hairline around a black window, which
+    // with no caption above it is the only part of the frame anyone can see.
+    // The same colour as the class brush: the border reads as the edge of the
+    // application rather than as a line drawn on top of it.
+    const COLORREF border = RGB(0x04, 0x06, 0x0A);
+    DwmSetWindowAttribute(window_, 34, &border, sizeof(border));
+}
+
+bool AppWindow::refuse_during_frame(const char* what) const {
+    if (!frame_in_progress_) {
+        return false;
+    }
+
+    // Dropped rather than carried out: a command that does nothing is a bug
+    // report with a log line pointing at the cause, and one that goes ahead is
+    // a crash whose stack does not mention the menu item that started it.
+    log::error("{} was requested while a frame was being drawn, and has been ignored. "
+               "Window changes belong to the loop — leave the request for "
+               "App::apply_pending_window_changes rather than calling from a draw path.",
+               what);
+    return true;
+}
+
+int AppWindow::control_resize_band(HWND window) {
+    // Design pixels, scaled. Deliberately not on the frame's own metric: this
+    // is not a frame, it is the sliver of one left showing past a button, and
+    // it wants to be the smallest band a deliberate reach can still land on.
+    constexpr float kBandPixels = 4.0f;
+    const float     scale = window ? ImGui_ImplWin32_GetDpiScaleForHwnd(window) : 1.0f;
+    return std::max(1, static_cast<int>(kBandPixels * scale));
+}
+
+int AppWindow::frame_thickness(HWND window, bool vertical) {
+    const UINT dpi = static_cast<UINT>(
+        (window ? ImGui_ImplWin32_GetDpiScaleForHwnd(window) : 1.0f) * 96.0f);
+    // The padded border is the invisible part of the grab handle and applies to
+    // both axes, which is why it is CX on a vertical measurement too.
+    return metric_for_dpi(vertical ? SM_CYFRAME : SM_CXFRAME, dpi) +
+           metric_for_dpi(SM_CXPADDEDBORDER, dpi);
+}
+
+LRESULT AppWindow::hit_test(HWND window, POINT screen) const {
+    RECT bounds{};
+    GetWindowRect(window, &bounds);
+
+    const bool in_caption =
+        caption_height_ > 0 && screen.y < bounds.top + caption_height_;
+
+    // The controls sit hard against the top-right corner, which is also the
+    // corner grab. At full width the border wins and the outer pixels of close
+    // resize instead of closing; given away entirely, the edge those controls
+    // occupy stops resizing at all. So over a control the band narrows — the
+    // compromise Windows makes with its own caption buttons.
+    //
+    // Confined to the strip rather than granted wherever the interface wants
+    // the pointer: the channel list reaches the window's left edge, and a rule
+    // keyed on any hovered item would make that whole edge hard to grab.
+    const bool over_control = in_caption && caption_blocked_;
+
+    // A maximised window has no resize edges — restoring it is what a drag on
+    // one would mean, and Windows does not offer that either.
+    if (!IsZoomed(window)) {
+        const int  border_x = over_control ? control_resize_band(window)
+                                           : frame_thickness(window, false);
+        const int  border_y = over_control ? control_resize_band(window)
+                                           : frame_thickness(window, true);
+        const bool left     = screen.x < bounds.left + border_x;
+        const bool right    = screen.x >= bounds.right - border_x;
+        const bool top      = screen.y < bounds.top + border_y;
+        const bool bottom   = screen.y >= bounds.bottom - border_y;
+
+        // Corners first. The bands overlap, so whichever is asked about first
+        // is the one the pointer gets, and a corner tested after its two edges
+        // can never be reached.
+        if (top && left)     return HTTOPLEFT;
+        if (top && right)    return HTTOPRIGHT;
+        if (bottom && left)  return HTBOTTOMLEFT;
+        if (bottom && right) return HTBOTTOMRIGHT;
+        if (top)             return HTTOP;
+        if (bottom)          return HTBOTTOM;
+        if (left)            return HTLEFT;
+        if (right)           return HTRIGHT;
+    }
+
+    // The strip. One return value buys the whole of what a title bar does:
+    // dragging, double click to maximise, drag to an edge to snap, Alt+Space,
+    // and the system menu on right click — all of it DefWindowProc's.
+    //
+    // Blocked whenever the interface has something under the pointer, so a
+    // control drawn inside the strip keeps its clicks. The answer is a frame
+    // old, which is survivable here because the backend goes on feeding ImGui
+    // the pointer position through WM_NCMOUSEMOVE even while this returns
+    // HTCAPTION: hover state stays live under the strip rather than freezing at
+    // the boundary and trapping the pointer outside the client area.
+    if (in_caption && !caption_blocked_) {
+        return HTCAPTION;
+    }
+
+    return HTCLIENT;
+}
+
+void AppWindow::set_minimal_frame(bool minimal) {
+    if (refuse_during_frame("A frame change")) {
+        return;
+    }
+    if (minimal == minimal_frame_) {
+        return;
+    }
+    minimal_frame_ = minimal;
+
+    // Fullscreen is a WS_POPUP that already has no frame, so there is nothing
+    // to apply until it ends — and set_fullscreen asks for the frame again on
+    // the way out, which is where this takes effect.
+    if (!window_ || fullscreen_) {
+        return;
+    }
+
+    // No style change is needed: the frame is decided entirely by whether
+    // WM_NCCALCSIZE hands its pixels back, and this is what makes Windows ask
+    // again. The client area changes size without the window moving, so the
+    // WM_SIZE that follows is what resizes the surfaces.
+    SetWindowPos(window_, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED |
+                     SWP_NOOWNERZORDER);
+    apply_frame_appearance();
+}
+
+void AppWindow::minimize() {
+    if (refuse_during_frame("Minimise")) {
+        return;
+    }
+    if (window_) {
+        ShowWindow(window_, SW_MINIMIZE);
+    }
+}
+
+void AppWindow::close() {
+    if (window_) {
+        PostMessageW(window_, WM_CLOSE, 0, 0);
+    }
+}
+
+bool AppWindow::maximized() const {
+    return window_ && IsZoomed(window_);
+}
+
+void AppWindow::toggle_maximize() {
+    if (refuse_during_frame("Maximise or restore")) {
+        return;
+    }
+    if (window_) {
+        ShowWindow(window_, maximized() ? SW_RESTORE : SW_MAXIMIZE);
+    }
 }
 
 float AppWindow::dpi_scale() const {
@@ -266,9 +554,19 @@ float AppWindow::dpi_scale() const {
 }
 
 void AppWindow::set_fullscreen(bool fullscreen) {
+    if (refuse_during_frame("A fullscreen change")) {
+        return;
+    }
     if (!window_ || fullscreen == fullscreen_) {
         return;
     }
+
+    // Recorded before the calls below rather than after them. Both paths end in
+    // an SWP_FRAMECHANGED, which asks the window procedure for its frame
+    // synchronously — and the answer depends on this flag. Set afterwards, the
+    // window leaving fullscreen would be measured as though it were still in
+    // it, and a minimal frame would come back wearing a caption.
+    fullscreen_ = fullscreen;
 
     if (fullscreen) {
         saved_placement_.length = sizeof(saved_placement_);
@@ -278,6 +576,9 @@ void AppWindow::set_fullscreen(bool fullscreen) {
         MONITORINFO    info{};
         info.cbSize = sizeof(info);
         if (!GetMonitorInfoW(monitor, &info)) {
+            // Nothing has changed, so the flag set above has to be put back or
+            // the window would be described as fullscreen while it is not.
+            fullscreen_ = false;
             return;
         }
         SetWindowLongW(window_, GWL_STYLE, WS_POPUP | WS_VISIBLE);
@@ -293,8 +594,6 @@ void AppWindow::set_fullscreen(bool fullscreen) {
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED |
                          SWP_NOOWNERZORDER);
     }
-
-    fullscreen_ = fullscreen;
 }
 
 bool AppWindow::pump_messages(DWORD timeout_ms) {
