@@ -387,6 +387,23 @@ void AppWindow::apply_frame_appearance() {
     DwmSetWindowAttribute(window_, 34, &border, sizeof(border));
 }
 
+bool AppWindow::refuse_during_frame(const char* what) const {
+    if (!frame_in_progress_) {
+        return false;
+    }
+
+    // Dropped rather than carried out. Going ahead is the crash this exists to
+    // name, and the two outcomes are not comparable: a window command that
+    // quietly does nothing is a bug report with a log line pointing straight at
+    // the cause, and one that goes ahead is an afternoon spent on a stack that
+    // does not mention the menu item that started it.
+    log::error("{} was requested while a frame was being drawn, and has been ignored. "
+               "Window changes belong to the loop — leave the request for "
+               "App::apply_pending_window_changes rather than calling from a draw path.",
+               what);
+    return true;
+}
+
 int AppWindow::control_resize_band(HWND window) {
     // Design pixels, scaled. Deliberately not on the frame's own metric: this
     // is not a frame, it is the sliver of one left showing past a button, and
@@ -476,6 +493,9 @@ LRESULT AppWindow::hit_test(HWND window, POINT screen) const {
 }
 
 void AppWindow::set_minimal_frame(bool minimal) {
+    if (refuse_during_frame("A frame change")) {
+        return;
+    }
     if (minimal == minimal_frame_) {
         return;
     }
@@ -499,6 +519,9 @@ void AppWindow::set_minimal_frame(bool minimal) {
 }
 
 void AppWindow::minimize() {
+    if (refuse_during_frame("Minimise")) {
+        return;
+    }
     if (window_) {
         ShowWindow(window_, SW_MINIMIZE);
     }
@@ -515,6 +538,9 @@ bool AppWindow::maximized() const {
 }
 
 void AppWindow::toggle_maximize() {
+    if (refuse_during_frame("Maximise or restore")) {
+        return;
+    }
     if (window_) {
         ShowWindow(window_, maximized() ? SW_RESTORE : SW_MAXIMIZE);
     }
@@ -527,6 +553,9 @@ float AppWindow::dpi_scale() const {
 }
 
 void AppWindow::set_fullscreen(bool fullscreen) {
+    if (refuse_during_frame("A fullscreen change")) {
+        return;
+    }
     if (!window_ || fullscreen == fullscreen_) {
         return;
     }

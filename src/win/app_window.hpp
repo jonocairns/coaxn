@@ -61,10 +61,45 @@ public:
 
     void minimize();
     // Posts rather than destroys, so the request leaves through WM_CLOSE and
-    // the ordinary shutdown path exactly as the system button did.
+    // the ordinary shutdown path exactly as the system button did. Unguarded
+    // below because posting is what makes it safe: the message is handled after
+    // whatever is running now, which is the same thing the guard enforces.
     void close();
     [[nodiscard]] bool maximized() const;
     void toggle_maximize();
+
+    // Held for as long as a frame is being drawn.
+    //
+    // Every call above resizes the client area, and Windows delivers WM_SIZE
+    // for that synchronously — from which this class draws, because a resize
+    // drag owns the thread and the picture would otherwise stretch for the
+    // length of the gesture. Called while a frame is already in progress, that
+    // is a frame begun inside a frame and a render target rebuilt under a live
+    // draw list. The UI toolkit checks for exactly this and the check is
+    // compiled out of release builds, so the result is a crash with nothing to
+    // read.
+    //
+    // Window changes therefore belong to the loop, not to anything drawing:
+    // see App::apply_pending_window_changes. This makes the rule enforceable
+    // rather than advisory — a call made from the wrong place is refused and
+    // says so, instead of taking the process with it.
+    //
+    // Scoped rather than a pair of calls, for the same reason ScopedStyle is:
+    // a return added to the draw path later would leave the flag raised and
+    // turn every window command after it into a refusal.
+    class FrameScope {
+    public:
+        explicit FrameScope(AppWindow& window) : window_(window) {
+            window_.frame_in_progress_ = true;
+        }
+        ~FrameScope() { window_.frame_in_progress_ = false; }
+
+        FrameScope(const FrameScope&)            = delete;
+        FrameScope& operator=(const FrameScope&) = delete;
+
+    private:
+        AppWindow& window_;
+    };
 
     void on_resize(ResizeHandler handler) { resize_handler_ = std::move(handler); }
     void on_close(CloseHandler handler)   { close_handler_  = std::move(handler); }
@@ -109,6 +144,9 @@ private:
     [[nodiscard]] static int control_resize_band(HWND window);
     [[nodiscard]] LRESULT hit_test(HWND window, POINT screen) const;
     void apply_frame_appearance();
+    // Whether `what` is being asked for from inside a frame, in which case it
+    // has already been logged and must not be carried out.
+    [[nodiscard]] bool refuse_during_frame(const char* what) const;
 
     HWND          window_ = nullptr;
     HBRUSH        background_brush_ = nullptr;
@@ -120,6 +158,7 @@ private:
     bool          minimal_frame_ = false;
     int           caption_height_ = 0;
     bool          caption_blocked_ = false;
+    bool          frame_in_progress_ = false;
     WINDOWPLACEMENT saved_placement_{};
     ResizeHandler  resize_handler_;
     CloseHandler   close_handler_;

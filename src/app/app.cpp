@@ -2171,6 +2171,12 @@ void App::draw_frame() {
         return;
     }
 
+    // Everything below this point is drawing, and nothing drawing may change
+    // the window: doing so delivers WM_SIZE synchronously and re-enters this
+    // function. The guard makes that refusable rather than fatal — see the
+    // pending_ fields, which are how a surface asks for it instead.
+    const win::AppWindow::FrameScope frame_scope(window_);
+
     ui_.begin_frame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
