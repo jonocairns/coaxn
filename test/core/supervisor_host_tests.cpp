@@ -183,7 +183,7 @@ TEST_CASE("host reports accepted transitions and ignores stale events") {
     REQUIRE_FALSE(host.transitions.empty());
     const auto& transition = host.transitions.back();
     CHECK(transition.reason == "stream-ended-eof");
-    CHECK(transition.policy_version == "coax-recovery-v4");
+    CHECK(transition.policy_version == "coax-recovery-v5");
     CHECK(transition.transport_policy_version == "coax-transport-recovery-v7");
 }
 

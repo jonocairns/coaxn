@@ -185,7 +185,7 @@ App::App()
            },
            .on_transition = [this](const core::SupervisorTransition& transition) {
                log::info("Supervisor {} -> {} generation {} load-attempt {} intent {} "
-                         "attempt {} reason {} budget {:.0f}ms",
+                         "attempt {} reason {} command-admission-elapsed {:.0f}ms",
                          core::to_string(transition.from), core::to_string(transition.to),
                          transition.generation.value(), transition.load_attempt.value(),
                          core::to_string(transition.load_intent), transition.attempt,

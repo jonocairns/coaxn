@@ -28,8 +28,33 @@ SupervisorState reach_steady(Generation generation = Generation{1},
     return step(state, DeadlineReached{}, 6.0);
 }
 RecoveryAction recovery(const SupervisorState& state) {
-    REQUIRE(state.recovery);
-    return *state.recovery;
+    REQUIRE(state.recovery_plan);
+    return state.recovery_plan->mechanism;
+}
+const RecreationDetails& recreation(const SupervisorState& state) {
+    REQUIRE(state.recovery_plan);
+    REQUIRE(state.recovery_plan->recreation);
+    return *state.recovery_plan->recreation;
+}
+RecoveryEffectStatus recovery_status(const SupervisorState& state) {
+    REQUIRE(state.recovery_plan);
+    return state.recovery_plan->status;
+}
+SupervisorState schedule_heuristic_recreation() {
+    auto state = step(reach_steady(), StreamEnded{
+        Generation{1}, LoadAttempt{1}, EndReason::Eof, {}}, 10);
+    state = step(state, DeadlineReached{}, 10.5);
+    state = step(state, StreamLoadIssued{
+        Generation{1}, LoadAttempt{2}, LoadIntent::RecoveryReopen,
+        RecoveryTransport::MpegTs}, 10.51);
+    state = step(state, PlaybackStalled{
+        Generation{1}, LoadAttempt{2}, StallKind::Open}, 18.6);
+    state = step(state, DeadlineReached{}, 19.6);
+    state = step(state, StreamLoadIssued{
+        Generation{1}, LoadAttempt{3}, LoadIntent::RecoveryReopen,
+        RecoveryTransport::MpegTs}, 19.61);
+    return step(state, PlaybackStalled{
+        Generation{1}, LoadAttempt{3}, StallKind::Open}, 27.7);
 }
 }  // namespace
 
@@ -38,10 +63,10 @@ TEST_CASE("recovery schedule budget phases and versions are pinned") {
     for (std::size_t i = 0; i < expected.size(); ++i) {
         CHECK(kDefaultRecoveryPolicy.attempt_delays[i].count() == expected[i]);
     }
-    CHECK(kDefaultRecoveryPolicy.wall_clock_budget == seconds(30));
+    CHECK(kDefaultRecoveryPolicy.command_admission_budget == seconds(30));
     CHECK(kDefaultRecoveryPolicy.steady_healthy_window == seconds(5));
     CHECK(kDefaultRecoveryPolicy.short_reopens_before_recreation == 2);
-    CHECK(kDefaultRecoveryPolicy.version == "coax-recovery-v4");
+    CHECK(kDefaultRecoveryPolicy.version == "coax-recovery-v5");
     CHECK(kTransportPolicyVersion == "coax-transport-recovery-v7");
 }
 
@@ -295,7 +320,9 @@ TEST_CASE("repeated short recovered loads recreate once without resetting budget
     state = step(state, PlaybackStalled{
         Generation{1}, LoadAttempt{3}, StallKind::Progress}, 13);
     CHECK(recovery(state) == RecoveryAction::RecreatePlayer);
-    CHECK(state.short_load_recreation_used);
+    CHECK(recreation(state).authority == RecreationAuthority::HeuristicShortLoad);
+    CHECK(recovery_status(state) == RecoveryEffectStatus::Scheduled);
+    CHECK_FALSE(state.short_load_recreation_used);
     CHECK(state.attempt == 3);
     CHECK(state.recovery_started_at == episode_started);
 
@@ -303,6 +330,8 @@ TEST_CASE("repeated short recovered loads recreate once without resetting budget
     REQUIRE(fired.effects.size() == 1);
     CHECK(fired.effects[0].load_attempt == LoadAttempt{4});
     CHECK(std::holds_alternative<RecreatePlayer>(fired.effects[0].payload));
+    CHECK(recovery_status(fired.state) == RecoveryEffectStatus::Issued);
+    CHECK(fired.state.short_load_recreation_used);
     state = step(fired.state, StreamLoadIssued{
         Generation{1}, LoadAttempt{4}, LoadIntent::PlayerRecreation,
         RecoveryTransport::MpegTs}, 15.01);
@@ -320,6 +349,158 @@ TEST_CASE("repeated short recovered loads recreate once without resetting budget
     CHECK(recovery(state) == RecoveryAction::ReopenStream);
     CHECK(state.short_load_recreation_used);
     CHECK(state.recovery_started_at == episode_started);
+}
+
+TEST_CASE("exact current first frame cancels scheduled heuristic recreation into probation") {
+    const auto scheduled = schedule_heuristic_recreation();
+    REQUIRE(recovery(scheduled) == RecoveryAction::RecreatePlayer);
+    REQUIRE(recreation(scheduled).authority ==
+            RecreationAuthority::HeuristicShortLoad);
+    REQUIRE(recovery_status(scheduled) == RecoveryEffectStatus::Scheduled);
+    REQUIRE(next_deadline_at(scheduled) == at(29.7));
+    CHECK(scheduled.attempt == 3);
+    CHECK_FALSE(scheduled.short_load_recreation_used);
+
+    const auto rescued = apply(scheduled, FirstFrame{
+        Generation{1}, LoadAttempt{3}}, 28.0);
+    REQUIRE(rescued.transition);
+    CHECK(rescued.transition->reason ==
+          "first-frame-cancelled-heuristic-recreation");
+    CHECK(rescued.transition->outcome == RecoveryOutcome::LateFirstFrame);
+    REQUIRE(rescued.transition->recovery_plan);
+    REQUIRE(rescued.transition->recovery_plan->recreation);
+    CHECK(rescued.transition->recovery_plan->mechanism ==
+          RecoveryAction::RecreatePlayer);
+    CHECK(rescued.transition->recovery_plan->recreation->authority ==
+          RecreationAuthority::HeuristicShortLoad);
+    CHECK(rescued.transition->recovery_plan->recreation->provenance ==
+          RecreationProvenance::HeuristicShortLoad);
+    CHECK(rescued.transition->recovery_plan->status ==
+          RecoveryEffectStatus::Scheduled);
+    CHECK(rescued.state.name == SupervisorStateName::Zap);
+    CHECK(rescued.state.attempt == scheduled.attempt);
+    CHECK(rescued.state.recovery_started_at == scheduled.recovery_started_at);
+    CHECK_FALSE(rescued.state.short_load_recreation_used);
+    CHECK_FALSE(rescued.state.recovery_plan);
+    REQUIRE(next_deadline_at(rescued.state) == at(33.0));
+    CHECK(rescued.effects.empty());
+
+    const auto failed = apply(rescued.state, StreamEnded{
+        Generation{1}, LoadAttempt{3}, EndReason::Eof, {}}, 29.0);
+    REQUIRE(failed.transition);
+    CHECK(failed.transition->outcome == RecoveryOutcome::RenewedEof);
+    CHECK(failed.state.name == SupervisorStateName::Recovering);
+    CHECK(failed.state.attempt == 4);
+    CHECK(failed.state.recovery_started_at == scheduled.recovery_started_at);
+    CHECK(recovery(failed.state) == RecoveryAction::ReopenStream);
+    CHECK(recovery_status(failed.state) == RecoveryEffectStatus::Scheduled);
+    CHECK_FALSE(failed.state.short_load_recreation_used);
+}
+
+TEST_CASE("mandatory evidence monotonically upgrades scheduled heuristic recreation") {
+    const std::array<std::pair<SupervisorEvent, DetectionReason>, 3> faults{
+        std::pair<SupervisorEvent, DetectionReason>{
+            IpcUnresponsive{Generation{1}, LoadAttempt{3}},
+            DetectionReason::IpcUnresponsive},
+        std::pair<SupervisorEvent, DetectionReason>{
+            ProcessExited{Generation{1}, LoadAttempt{3}},
+            DetectionReason::ProcessExited},
+        std::pair<SupervisorEvent, DetectionReason>{
+            PresentationLost{Generation{1}},
+            DetectionReason::PresentationDeviceLost},
+    };
+
+    for (const auto& [fault, detection] : faults) {
+        const auto scheduled = schedule_heuristic_recreation();
+        const auto deadline = next_deadline_at(scheduled);
+        const auto upgraded = apply(scheduled, fault, 28.0);
+        REQUIRE(upgraded.transition);
+        CHECK(upgraded.state.detection == detection);
+        CHECK(recovery(upgraded.state) == RecoveryAction::RecreatePlayer);
+        CHECK(recreation(upgraded.state).authority ==
+              RecreationAuthority::Mandatory);
+        CHECK(recreation(upgraded.state).provenance ==
+              RecreationProvenance::HeuristicShortLoad);
+        CHECK(recovery_status(upgraded.state) ==
+              RecoveryEffectStatus::Scheduled);
+        CHECK(upgraded.state.attempt == scheduled.attempt);
+        CHECK(next_deadline_at(upgraded.state) == deadline);
+        CHECK(upgraded.effects.empty());
+
+        const auto frame = apply(upgraded.state, FirstFrame{
+            Generation{1}, LoadAttempt{3}}, 28.1);
+        CHECK_FALSE(frame.transition);
+        CHECK(recreation(frame.state).authority == RecreationAuthority::Mandatory);
+        CHECK(next_deadline_at(frame.state) == deadline);
+    }
+}
+
+TEST_CASE("upgraded heuristic recreation consumes its one-shot only when issued") {
+    auto state = schedule_heuristic_recreation();
+    const auto upgraded = apply(state, IpcUnresponsive{
+        Generation{1}, LoadAttempt{3}}, 28.0);
+    REQUIRE(recreation(upgraded.state).authority == RecreationAuthority::Mandatory);
+    REQUIRE(recreation(upgraded.state).provenance ==
+            RecreationProvenance::HeuristicShortLoad);
+    CHECK_FALSE(upgraded.state.short_load_recreation_used);
+
+    const auto issued = apply(upgraded.state, DeadlineReached{}, 29.7);
+    REQUIRE(issued.effects.size() == 1);
+    CHECK(issued.state.short_load_recreation_used);
+    CHECK(recreation(issued.state).authority == RecreationAuthority::Mandatory);
+    CHECK(recreation(issued.state).provenance ==
+          RecreationProvenance::HeuristicShortLoad);
+
+    state = step(issued.state, StreamLoadIssued{
+        Generation{1}, LoadAttempt{4}, LoadIntent::PlayerRecreation,
+        RecoveryTransport::MpegTs}, 29.71);
+    state = step(state, StreamEnded{
+        Generation{1}, LoadAttempt{4}, EndReason::Eof, {}}, 30.0);
+    state = step(state, DeadlineReached{}, 34.0);
+    state = step(state, StreamLoadIssued{
+        Generation{1}, LoadAttempt{5}, LoadIntent::RecoveryReopen,
+        RecoveryTransport::MpegTs}, 34.01);
+    state = step(state, PlaybackStalled{
+        Generation{1}, LoadAttempt{5}, StallKind::Open}, 34.1);
+    CHECK(recovery(state) == RecoveryAction::ReopenStream);
+    CHECK_FALSE(state.recovery_plan->recreation);
+    CHECK(state.short_load_recreation_used);
+}
+
+TEST_CASE("issued heuristic recreation can upgrade but frames remain non-cancellable") {
+    const auto scheduled = schedule_heuristic_recreation();
+    for (const auto frame : {
+             FirstFrame{Generation{2}, LoadAttempt{3}},
+             FirstFrame{Generation{1}, LoadAttempt{2}}}) {
+        const auto stale = apply(scheduled, frame, 28.0);
+        CHECK_FALSE(stale.transition);
+        CHECK(recovery_status(stale.state) == RecoveryEffectStatus::Scheduled);
+        CHECK(next_deadline_at(stale.state) == next_deadline_at(scheduled));
+    }
+
+    const auto issued = apply(scheduled, DeadlineReached{}, 29.7);
+    REQUIRE(issued.effects.size() == 1);
+    CHECK(std::holds_alternative<RecreatePlayer>(issued.effects.front().payload));
+    CHECK(recovery_status(issued.state) == RecoveryEffectStatus::Issued);
+    CHECK(issued.state.short_load_recreation_used);
+
+    const auto upgraded = apply(issued.state, IpcUnresponsive{
+        Generation{1}, LoadAttempt{3}}, 29.705);
+    REQUIRE(upgraded.transition);
+    CHECK(upgraded.effects.empty());
+    CHECK(upgraded.state.attempt == issued.state.attempt);
+    CHECK(upgraded.state.pending_load_attempt == issued.state.pending_load_attempt);
+    CHECK(upgraded.state.pending_load_intent == issued.state.pending_load_intent);
+    CHECK(recovery_status(upgraded.state) == RecoveryEffectStatus::Issued);
+    CHECK(recreation(upgraded.state).authority == RecreationAuthority::Mandatory);
+    CHECK(recreation(upgraded.state).provenance ==
+          RecreationProvenance::HeuristicShortLoad);
+
+    const auto frame = apply(upgraded.state, FirstFrame{
+        Generation{1}, LoadAttempt{3}}, 29.71);
+    CHECK_FALSE(frame.transition);
+    CHECK(recovery_status(frame.state) == RecoveryEffectStatus::Issued);
+    CHECK(frame.state.pending_load_attempt == LoadAttempt{4});
 }
 
 TEST_CASE("backend failures map to in-process player recreation for both transports") {
@@ -379,7 +560,7 @@ TEST_CASE("a late frame cannot cancel backend IPC or presentation recreation") {
         auto state = step(reach_steady(), PlaybackStalled{
             Generation{1}, LoadAttempt{1}, StallKind::Open}, 10);
         state = step(state, fault, 10.1);
-        REQUIRE(state.recovery == RecoveryAction::RecreatePlayer);
+        REQUIRE(recovery(state) == RecoveryAction::RecreatePlayer);
         const auto deadline = next_deadline_at(state);
         REQUIRE(deadline);
 
@@ -387,7 +568,7 @@ TEST_CASE("a late frame cannot cancel backend IPC or presentation recreation") {
             Generation{1}, LoadAttempt{1}}, 10.2);
         CHECK_FALSE(late.transition);
         CHECK(late.state.name == SupervisorStateName::Recovering);
-        CHECK(late.state.recovery == RecoveryAction::RecreatePlayer);
+        CHECK(recovery(late.state) == RecoveryAction::RecreatePlayer);
         CHECK(next_deadline_at(late.state) == deadline);
     }
 }
@@ -409,7 +590,16 @@ TEST_CASE("a stale in-flight reopen cannot discard a recreation upgrade") {
     CHECK(upgraded.state.pending_load_intent == LoadIntent::PlayerRecreation);
     REQUIRE(next_deadline_at(upgraded.state) == at(11.6));
 
-    const auto stale = apply(upgraded.state, StreamLoadIssued{
+    const auto current_frame = apply(upgraded.state, FirstFrame{
+        Generation{1}, LoadAttempt{1}}, 10.65);
+    CHECK_FALSE(current_frame.transition);
+    CHECK(current_frame.state.attempt == upgraded.state.attempt);
+    CHECK(current_frame.state.pending_load_attempt == LoadAttempt{3});
+    CHECK(recreation(current_frame.state).authority == RecreationAuthority::Mandatory);
+    CHECK(recovery_status(current_frame.state) == RecoveryEffectStatus::Scheduled);
+    CHECK(next_deadline_at(current_frame.state) == at(11.6));
+
+    const auto stale = apply(current_frame.state, StreamLoadIssued{
         Generation{1}, LoadAttempt{2}, LoadIntent::RecoveryReopen,
         RecoveryTransport::MpegTs}, 10.7);
     CHECK_FALSE(stale.transition);
@@ -438,6 +628,27 @@ TEST_CASE("a stale in-flight reopen cannot discard a recreation upgrade") {
     REQUIRE(following.effects.size() == 1);
     CHECK(std::holds_alternative<ReopenStream>(following.effects[0].payload));
     CHECK(following.effects[0].load_attempt == LoadAttempt{4});
+}
+
+TEST_CASE("failed issued mandatory recreation reports player escalation") {
+    auto state = step(reach_steady(), ProcessExited{
+        Generation{1}, LoadAttempt{1}}, 10.0);
+    state = step(state, DeadlineReached{}, 10.5);
+    REQUIRE(state.pending_load_attempt == LoadAttempt{2});
+    REQUIRE(recovery_status(state) == RecoveryEffectStatus::Issued);
+
+    const auto failed = apply(state, SourceFailed{
+        Generation{1}, LoadAttempt{2}}, 10.6);
+    REQUIRE(failed.transition);
+    CHECK(failed.state.name == SupervisorStateName::Failed);
+    CHECK(failed.transition->escalation == RecoveryEscalation::PlayerRecreation);
+    REQUIRE(failed.transition->recovery_plan);
+    REQUIRE(failed.transition->recovery_plan->recreation);
+    CHECK(failed.transition->recovery_plan->mechanism == RecoveryAction::RecreatePlayer);
+    CHECK(failed.transition->recovery_plan->recreation->authority == RecreationAuthority::Mandatory);
+    CHECK(failed.transition->recovery_plan->recreation->provenance ==
+          RecreationProvenance::MandatoryEvidence);
+    CHECK(failed.transition->recovery_plan->status == RecoveryEffectStatus::Issued);
 }
 
 TEST_CASE("presentation loss recreates the player through the shared recovery path") {
@@ -566,6 +777,38 @@ TEST_CASE("a late deadline cannot issue a command after the episode budget") {
     CHECK(result.effects.empty());
     REQUIRE(result.transition);
     CHECK(result.transition->outcome == RecoveryOutcome::TerminalFailure);
+}
+
+TEST_CASE("an admitted command may complete probation after the admission budget") {
+    auto policy = kDefaultRecoveryPolicy;
+    policy.attempt_delays[0] = seconds(29);
+    auto state = reach_steady();
+
+    auto scheduled = reduce_supervisor_state(state, StreamEnded{
+        Generation{1}, LoadAttempt{1}, EndReason::Eof, {}}, at(10), policy);
+    REQUIRE(scheduled.state.deadlines.retry_at == at(39));
+    auto issued = reduce_supervisor_state(
+        scheduled.state, DeadlineReached{}, at(39), policy);
+    REQUIRE(issued.effects.size() == 1);
+    state = reduce_supervisor_state(issued.state, StreamLoadIssued{
+        Generation{1}, LoadAttempt{2}, LoadIntent::RecoveryReopen,
+        RecoveryTransport::MpegTs}, at(39.1), policy).state;
+    state = reduce_supervisor_state(state, FirstFrame{
+        Generation{1}, LoadAttempt{2}}, at(40.5), policy).state;
+
+    const auto renewed_after_window = reduce_supervisor_state(state, StreamEnded{
+        Generation{1}, LoadAttempt{2}, EndReason::Eof, {}}, at(41), policy);
+    CHECK(renewed_after_window.state.name == SupervisorStateName::Failed);
+    CHECK(renewed_after_window.state.failure == FailureReason::BudgetExpired);
+    CHECK(renewed_after_window.effects.empty());
+
+    const auto clean = reduce_supervisor_state(
+        state, DeadlineReached{}, at(45.5), policy);
+    CHECK(clean.state.name == SupervisorStateName::Steady);
+    CHECK(clean.state.attempt == 0);
+    CHECK(clean.effects.empty());
+    CHECK(reduce_supervisor_state(
+        clean.state, DeadlineReached{}, at(60), policy).effects.empty());
 }
 
 TEST_CASE("the exact exhausted current load gets one bounded late probation") {
@@ -811,6 +1054,9 @@ TEST_CASE("recovery timing phases stay attached to their load attempt") {
         Generation{1}, LoadAttempt{2}}, 12.1);
     REQUIRE(first.transition);
     CHECK(first.transition->load_attempt == LoadAttempt{2});
+    REQUIRE(first.transition->recovery_plan);
+    CHECK(first.transition->recovery_plan->mechanism == RecoveryAction::ReopenStream);
+    CHECK(first.transition->recovery_plan->status == RecoveryEffectStatus::Issued);
     REQUIRE(first.transition->command_to_first_frame);
     CHECK(first.transition->command_to_first_frame->count() == Approx(1.5));
     CHECK(first.transition->outcome == RecoveryOutcome::FirstFrame);
@@ -1043,4 +1289,30 @@ TEST_CASE("reachable supervisor states keep deadline kinds paired with their own
     invalid.deadlines.steady_at = TimePoint{};
     invalid.deadlines.retry_at = TimePoint{};
     CHECK_FALSE(supervisor_deadlines_valid(invalid));
+
+    // Plan presence makes mechanism and lifecycle atomic, while recreation
+    // details make authority and provenance atomic. Mechanism-to-details
+    // compatibility remains a semantic invariant and is validated here.
+    invalid = initial_supervisor_state();
+    invalid.recovery_plan = RecoveryPlan{
+        RecoveryAction::ReopenStream,
+        RecreationDetails{RecreationAuthority::Mandatory,
+                          RecreationProvenance::MandatoryEvidence},
+        RecoveryEffectStatus::Scheduled};
+    CHECK_FALSE(supervisor_deadlines_valid(invalid));
+    invalid.recovery_plan = RecoveryPlan{
+        RecoveryAction::RecreatePlayer, std::nullopt,
+        RecoveryEffectStatus::Scheduled};
+    CHECK_FALSE(supervisor_deadlines_valid(invalid));
+    invalid.recovery_plan->recreation = RecreationDetails{
+        RecreationAuthority::HeuristicShortLoad,
+        RecreationProvenance::MandatoryEvidence};
+    CHECK_FALSE(supervisor_deadlines_valid(invalid));
+    invalid.recovery_plan->recreation->provenance =
+        RecreationProvenance::HeuristicShortLoad;
+    CHECK(supervisor_deadlines_valid(invalid));
+    invalid.recovery_plan->recreation->authority = RecreationAuthority::Mandatory;
+    invalid.recovery_plan->recreation->provenance =
+        RecreationProvenance::MandatoryEvidence;
+    CHECK(supervisor_deadlines_valid(invalid));
 }
