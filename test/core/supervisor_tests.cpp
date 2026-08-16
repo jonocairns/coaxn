@@ -467,7 +467,7 @@ TEST_CASE("upgraded heuristic recreation consumes its one-shot only when issued"
     CHECK(state.short_load_recreation_used);
 }
 
-TEST_CASE("issued heuristic recreation and stale frames are non-cancellable") {
+TEST_CASE("issued heuristic recreation can upgrade but frames remain non-cancellable") {
     const auto scheduled = schedule_heuristic_recreation();
     for (const auto frame : {
              FirstFrame{Generation{2}, LoadAttempt{3}},
@@ -484,7 +484,19 @@ TEST_CASE("issued heuristic recreation and stale frames are non-cancellable") {
     CHECK(recovery_status(issued.state) == RecoveryEffectStatus::Issued);
     CHECK(issued.state.short_load_recreation_used);
 
-    const auto frame = apply(issued.state, FirstFrame{
+    const auto upgraded = apply(issued.state, IpcUnresponsive{
+        Generation{1}, LoadAttempt{3}}, 29.705);
+    REQUIRE(upgraded.transition);
+    CHECK(upgraded.effects.empty());
+    CHECK(upgraded.state.attempt == issued.state.attempt);
+    CHECK(upgraded.state.pending_load_attempt == issued.state.pending_load_attempt);
+    CHECK(upgraded.state.pending_load_intent == issued.state.pending_load_intent);
+    CHECK(recovery_status(upgraded.state) == RecoveryEffectStatus::Issued);
+    CHECK(recreation(upgraded.state).authority == RecreationAuthority::Mandatory);
+    CHECK(recreation(upgraded.state).provenance ==
+          RecreationProvenance::HeuristicShortLoad);
+
+    const auto frame = apply(upgraded.state, FirstFrame{
         Generation{1}, LoadAttempt{3}}, 29.71);
     CHECK_FALSE(frame.transition);
     CHECK(recovery_status(frame.state) == RecoveryEffectStatus::Issued);
