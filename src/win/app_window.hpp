@@ -104,6 +104,9 @@ private:
     // its monitor by. Takes the window rather than reading the member so it can
     // be called from the messages that arrive during CreateWindowEx.
     [[nodiscard]] static int frame_thickness(HWND window, bool vertical);
+    // The narrowed resize band left showing past a control in the strip, so the
+    // window stays resizable along the edge its buttons occupy.
+    [[nodiscard]] static int control_resize_band(HWND window);
     [[nodiscard]] LRESULT hit_test(HWND window, POINT screen) const;
     void apply_frame_appearance();
 

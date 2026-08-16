@@ -387,6 +387,15 @@ void AppWindow::apply_frame_appearance() {
     DwmSetWindowAttribute(window_, 34, &border, sizeof(border));
 }
 
+int AppWindow::control_resize_band(HWND window) {
+    // Design pixels, scaled. Deliberately not on the frame's own metric: this
+    // is not a frame, it is the sliver of one left showing past a button, and
+    // it wants to be the smallest band a deliberate reach can still land on.
+    constexpr float kBandPixels = 4.0f;
+    const float     scale = window ? ImGui_ImplWin32_GetDpiScaleForHwnd(window) : 1.0f;
+    return std::max(1, static_cast<int>(kBandPixels * scale));
+}
+
 int AppWindow::frame_thickness(HWND window, bool vertical) {
     const UINT dpi = static_cast<UINT>(
         (window ? ImGui_ImplWin32_GetDpiScaleForHwnd(window) : 1.0f) * 96.0f);
@@ -403,26 +412,34 @@ LRESULT AppWindow::hit_test(HWND window, POINT screen) const {
     const bool in_caption =
         caption_height_ > 0 && screen.y < bounds.top + caption_height_;
 
-    // A control inside the strip outranks the resize border it overlaps. The
-    // window controls sit hard against the top-right corner, which is also
-    // where the corner grab is, and the border is tested first — so without
-    // this the outer pixels of the close button would resize the window
-    // instead of closing it, and the corner would be the one part of the
-    // easiest target on the display that did not work.
+    // The window controls sit hard against the top-right corner, which is also
+    // where the corner grab is. Tested at full width the border wins and the
+    // outer pixels of close resize the window instead of closing it; given away
+    // entirely, a restored window cannot be resized from the length of edge the
+    // controls occupy. So over a control the band narrows rather than going:
+    // enough to still be reached deliberately at the very edge, not enough to
+    // intercept a click aimed at the button. It is the compromise Windows makes
+    // with its own caption buttons, which keep a few pixels of resize along
+    // their top edge and no more.
     //
-    // Confined to the strip rather than applied wherever the interface wants
+    // Nothing to reconcile when maximised: there are no resize edges then, so
+    // the buttons already own the corner outright — which is the case the
+    // corner matters in, because that is when it is the *screen's* corner and
+    // the pointer stops dead in it.
+    //
+    // Confined to the strip rather than granted wherever the interface wants
     // the pointer. The channel list reaches the window's left edge, and a rule
-    // that let any hovered item win would take the whole of that edge out of
-    // service for resizing whenever the pointer was over a row.
-    if (in_caption && caption_blocked_) {
-        return HTCLIENT;
-    }
+    // that let any hovered item narrow the border would leave that whole edge
+    // hard to grab whenever the pointer was over a row.
+    const bool over_control = in_caption && caption_blocked_;
 
     // A maximised window has no resize edges — restoring it is what a drag on
     // one would mean, and Windows does not offer that either.
     if (!IsZoomed(window)) {
-        const int  border_x = frame_thickness(window, false);
-        const int  border_y = frame_thickness(window, true);
+        const int  border_x = over_control ? control_resize_band(window)
+                                           : frame_thickness(window, false);
+        const int  border_y = over_control ? control_resize_band(window)
+                                           : frame_thickness(window, true);
         const bool left     = screen.x < bounds.left + border_x;
         const bool right    = screen.x >= bounds.right - border_x;
         const bool top      = screen.y < bounds.top + border_y;
@@ -446,13 +463,12 @@ LRESULT AppWindow::hit_test(HWND window, POINT screen) const {
     // and the system menu on right click — all of it DefWindowProc's.
     //
     // Blocked whenever the interface has something under the pointer, so a
-    // control drawn inside the strip keeps its clicks — handled above, before
-    // the border, for the corner it shares with the resize grab. The answer is
-    // a frame old, which is survivable here because the backend goes on feeding
-    // ImGui the pointer position through WM_NCMOUSEMOVE even while this returns
+    // control drawn inside the strip keeps its clicks. The answer is a frame
+    // old, which is survivable here because the backend goes on feeding ImGui
+    // the pointer position through WM_NCMOUSEMOVE even while this returns
     // HTCAPTION: hover state stays live under the strip rather than freezing at
     // the boundary and trapping the pointer outside the client area.
-    if (in_caption) {
+    if (in_caption && !caption_blocked_) {
         return HTCAPTION;
     }
 
