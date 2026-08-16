@@ -400,6 +400,24 @@ LRESULT AppWindow::hit_test(HWND window, POINT screen) const {
     RECT bounds{};
     GetWindowRect(window, &bounds);
 
+    const bool in_caption =
+        caption_height_ > 0 && screen.y < bounds.top + caption_height_;
+
+    // A control inside the strip outranks the resize border it overlaps. The
+    // window controls sit hard against the top-right corner, which is also
+    // where the corner grab is, and the border is tested first — so without
+    // this the outer pixels of the close button would resize the window
+    // instead of closing it, and the corner would be the one part of the
+    // easiest target on the display that did not work.
+    //
+    // Confined to the strip rather than applied wherever the interface wants
+    // the pointer. The channel list reaches the window's left edge, and a rule
+    // that let any hovered item win would take the whole of that edge out of
+    // service for resizing whenever the pointer was over a row.
+    if (in_caption && caption_blocked_) {
+        return HTCLIENT;
+    }
+
     // A maximised window has no resize edges — restoring it is what a drag on
     // one would mean, and Windows does not offer that either.
     if (!IsZoomed(window)) {
@@ -428,13 +446,13 @@ LRESULT AppWindow::hit_test(HWND window, POINT screen) const {
     // and the system menu on right click — all of it DefWindowProc's.
     //
     // Blocked whenever the interface has something under the pointer, so a
-    // control drawn inside the strip keeps its clicks. The answer is a frame
-    // old, which is survivable here because the backend goes on feeding ImGui
-    // the pointer position through WM_NCMOUSEMOVE even while this returns
+    // control drawn inside the strip keeps its clicks — handled above, before
+    // the border, for the corner it shares with the resize grab. The answer is
+    // a frame old, which is survivable here because the backend goes on feeding
+    // ImGui the pointer position through WM_NCMOUSEMOVE even while this returns
     // HTCAPTION: hover state stays live under the strip rather than freezing at
     // the boundary and trapping the pointer outside the client area.
-    if (!caption_blocked_ && caption_height_ > 0 &&
-        screen.y < bounds.top + caption_height_) {
+    if (in_caption) {
         return HTCAPTION;
     }
 

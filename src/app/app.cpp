@@ -1691,9 +1691,14 @@ void App::draw_title_bar() {
     // Square on the strip's own height, so the row of them is the strip rather
     // than something floating in it. Close is outermost, in the order Windows
     // has put these in for thirty years — this is not the place to be original.
-    const float pad = theme::scaled(theme::kSpace2);
-    const float row = height;
-    float       cursor = corner.x - pad - row * 3.0f;
+    //
+    // Hard against the corner, with no inset of any kind. The pointer stops at
+    // the edge of the screen, so a maximised window's corner catches a throw
+    // from anywhere on the desktop and costs no aim at all; a few pixels of
+    // margin turn the easiest target on the display into one that has to be
+    // hit. Every window manager puts close in the corner for this reason.
+    const float row    = height;
+    float       cursor = corner.x - row * 3.0f;
 
     const auto place = [&](widgets::Icon icon, const char* id) {
         ImGui::SetCursorScreenPos(ImVec2(cursor, origin.y));
