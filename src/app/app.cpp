@@ -492,18 +492,6 @@ void App::load_saved_portal() {
     // URL. Masking a string that turns out to have had no secret in it costs
     // nothing; the other way round cannot be undone.
     log::info("Restored saved portal");
-
-    // Straight through to the catalogue. Someone whose credentials are already
-    // on this machine has said what they want to connect to, and a login screen
-    // whose only remaining action is to press a button is a screen that exists
-    // to be dismissed.
-    //
-    // Only when all three fields survived. A partial record would reach
-    // begin_connect and come back as an error banner over an empty form, which
-    // is a worse first frame than the form on its own.
-    if (!portal_url_.empty() && !username_.empty() && !password_.empty()) {
-        begin_connect();
-    }
 }
 
 void App::save_portal() const {
