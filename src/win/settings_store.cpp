@@ -7,6 +7,7 @@
 
 #include "util/log.hpp"
 #include "win/app_paths.hpp"
+#include "win/file_write.hpp"
 
 namespace coax::win {
 namespace {
@@ -70,25 +71,11 @@ bool SettingsStore::save(const core::Settings& settings) {
         return false;
     }
 
-    const std::string text = core::serialize(settings);
-
-    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        log::warn("Settings could not be written ({})", GetLastError());
-        return false;
-    }
-
-    DWORD written = 0;
-    const bool ok = WriteFile(file, text.data(), static_cast<DWORD>(text.size()),
-                              &written, nullptr) &&
-                    written == text.size();
-    CloseHandle(file);
-
-    if (!ok) {
-        log::warn("Settings were written incompletely ({})", GetLastError());
-    }
-    return ok;
+    // Replaced rather than rewritten in place. The old file is worth more than
+    // the new one until the new one is complete: a write cut short would
+    // otherwise cost the frame and volume someone had chosen, and hand them
+    // defaults on the next launch with nothing to say why.
+    return write_file_atomically(path, core::serialize(settings), "Settings");
 }
 
 }  // namespace coax::win

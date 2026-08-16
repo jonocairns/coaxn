@@ -173,6 +173,7 @@ if(COAX_BUILD_APP)
         src/win/app_window.cpp
         src/win/composition.cpp
         src/win/credential_store.cpp
+        src/win/file_write.cpp
         src/win/power_request.cpp
         src/win/settings_store.cpp
         src/win/ui_layer.cpp

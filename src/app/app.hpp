@@ -176,6 +176,7 @@ private:
     std::optional<bool> pending_minimal_frame_;
     std::optional<bool> pending_fullscreen_;
     bool                pending_minimize_ = false;
+    bool                pending_maximize_ = false;
 
     Stage       stage_ = Stage::Login;
     std::string status_;

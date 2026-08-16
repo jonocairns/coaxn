@@ -4,10 +4,12 @@
 #include <dpapi.h>
 
 #include <cstdio>
+#include <string_view>
 #include <vector>
 
 #include "util/log.hpp"
 #include "win/app_paths.hpp"
+#include "win/file_write.hpp"
 
 namespace coax::win {
 namespace {
@@ -52,15 +54,13 @@ bool CredentialStore::save(const std::string& plaintext) {
         return false;
     }
 
-    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    bool ok = false;
-    if (file != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        ok = WriteFile(file, output.pbData, output.cbData, &written, nullptr) &&
-             written == output.cbData;
-        CloseHandle(file);
-    }
+    // Replaced rather than rewritten in place, which matters more here than it
+    // does for the settings beside it: this file cannot be reconstructed, and
+    // losing it to a half-finished write means typing a portal, a username and
+    // a password again to find out what went missing.
+    const bool ok = write_file_atomically(
+        path, std::string_view(reinterpret_cast<const char*>(output.pbData), output.cbData),
+        "Saved portal");
 
     LocalFree(output.pbData);
     return ok;

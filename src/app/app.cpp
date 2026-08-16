@@ -1577,6 +1577,7 @@ void App::apply_pending_window_changes() {
     const auto minimal    = std::exchange(pending_minimal_frame_, std::nullopt);
     const auto fullscreen = std::exchange(pending_fullscreen_, std::nullopt);
     const bool minimize   = std::exchange(pending_minimize_, false);
+    const bool maximize   = std::exchange(pending_maximize_, false);
 
     // Fullscreen first: it owns the frame while it is on, and set_minimal_frame
     // defers to it rather than fighting over the same window styles.
@@ -1585,6 +1586,9 @@ void App::apply_pending_window_changes() {
     }
     if (minimal) {
         window_.set_minimal_frame(*minimal);
+    }
+    if (maximize) {
+        window_.toggle_maximize();
     }
     if (minimize) {
         window_.minimize();
@@ -1801,6 +1805,13 @@ void App::draw_window_menu() {
             }
             if (ImGui::MenuItem("Minimise")) {
                 pending_minimize_ = true;
+            }
+            // Not the same control as fullscreen, and the caption's version of
+            // it went with the caption. Double-clicking the strip does this and
+            // always has, but a gesture is not a replacement for something
+            // there used to be a button for.
+            if (ImGui::MenuItem(window_.maximized() ? "Restore" : "Maximise")) {
+                pending_maximize_ = true;
             }
             if (ImGui::MenuItem("Close", "Alt+F4")) {
                 window_.close();
