@@ -37,6 +37,35 @@ public:
     void set_fullscreen(bool fullscreen);
     [[nodiscard]] bool fullscreen() const { return fullscreen_; }
 
+    // Whether the window keeps its caption. Off, the client area covers the
+    // whole window and the strip below stands in for the title bar. Every
+    // WS_OVERLAPPEDWINDOW style bit is kept either way — what changes is only
+    // whether WM_NCCALCSIZE hands the frame's pixels back — so the shadow,
+    // Aero Snap, the minimise animation and the Alt-Tab thumbnail are the
+    // system's in both modes. Safe to call before the window exists, and
+    // applied immediately when it does.
+    void set_minimal_frame(bool minimal);
+    [[nodiscard]] bool minimal_frame() const { return minimal_frame_; }
+
+    // The band along the top edge that behaves as a title bar: drag, double
+    // click to maximise, drag to an edge to snap, and the system menu on right
+    // click. Physical pixels, because the caller has already scaled it; zero
+    // means the window has no draggable strip at all.
+    void set_caption_height(int pixels) { caption_height_ = pixels; }
+
+    // Whether the interface has something under the pointer that wants the
+    // click. Published once per frame rather than asked for, because the hit
+    // test runs inside the window procedure and must not reach into the UI.
+    // One frame stale by construction, which the hit test is built to tolerate.
+    void set_caption_blocked(bool blocked) { caption_blocked_ = blocked; }
+
+    void minimize();
+    // Posts rather than destroys, so the request leaves through WM_CLOSE and
+    // the ordinary shutdown path exactly as the system button did.
+    void close();
+    [[nodiscard]] bool maximized() const;
+    void toggle_maximize();
+
     void on_resize(ResizeHandler handler) { resize_handler_ = std::move(handler); }
     void on_close(CloseHandler handler)   { close_handler_  = std::move(handler); }
     // Called when the window needs a frame while the application's own loop
@@ -67,6 +96,17 @@ private:
                                         WPARAM wparam, LPARAM lparam);
     LRESULT handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 
+    // Whether the frame is being drawn by this class rather than by Windows.
+    // Fullscreen is already a WS_POPUP with no frame to remove, so the two
+    // never overlap.
+    [[nodiscard]] bool custom_frame() const { return minimal_frame_ && !fullscreen_; }
+    // The resize border, which is also the amount a maximised window overhangs
+    // its monitor by. Takes the window rather than reading the member so it can
+    // be called from the messages that arrive during CreateWindowEx.
+    [[nodiscard]] static int frame_thickness(HWND window, bool vertical);
+    [[nodiscard]] LRESULT hit_test(HWND window, POINT screen) const;
+    void apply_frame_appearance();
+
     HWND          window_ = nullptr;
     HBRUSH        background_brush_ = nullptr;
     int           width_  = 0;
@@ -74,6 +114,9 @@ private:
     bool          running_ = true;
     bool          fullscreen_ = false;
     bool          minimized_ = false;
+    bool          minimal_frame_ = false;
+    int           caption_height_ = 0;
+    bool          caption_blocked_ = false;
     WINDOWPLACEMENT saved_placement_{};
     ResizeHandler  resize_handler_;
     CloseHandler   close_handler_;

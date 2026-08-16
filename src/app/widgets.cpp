@@ -23,6 +23,14 @@ void paint_icon(ImDrawList* draw_list, Icon icon, ImVec2 centre, float size, ImU
         case Icon::VolumeLow:   theme::draw_volume_icon(draw_list, centre, size, color, 1); break;
         case Icon::VolumeHigh:  theme::draw_volume_icon(draw_list, centre, size, color, 2); break;
         case Icon::Settings:    theme::draw_settings_icon(draw_list, centre, size, color); break;
+        case Icon::Minimise:    theme::draw_minimise_icon(draw_list, centre, size, color); break;
+        case Icon::Fullscreen:
+            theme::draw_fullscreen_icon(draw_list, centre, size, color, false);
+            break;
+        case Icon::FullscreenExit:
+            theme::draw_fullscreen_icon(draw_list, centre, size, color, true);
+            break;
+        case Icon::Close:       theme::draw_close_icon(draw_list, centre, size, color); break;
     }
 }
 

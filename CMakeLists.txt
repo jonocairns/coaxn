@@ -22,6 +22,7 @@ include(FetchContent)
 add_library(coax_core
     src/core/playback_health.cpp
     src/core/presentation.cpp
+    src/core/settings.cpp
     src/core/supervisor.cpp
     src/core/supervisor_host.cpp
     src/core/version.cpp
@@ -64,6 +65,7 @@ if(BUILD_TESTING)
         test/core/playback_health_tests.cpp
         test/core/playback_power_tests.cpp
         test/core/presentation_tests.cpp
+        test/core/settings_tests.cpp
         test/core/supervisor_tests.cpp
         test/core/supervisor_host_tests.cpp
         test/core/version_tests.cpp
@@ -167,10 +169,12 @@ if(COAX_BUILD_APP)
         src/core/channel_index.cpp
         src/xtream/xtream_client.cpp
         src/util/http.cpp
+        src/win/app_paths.cpp
         src/win/app_window.cpp
         src/win/composition.cpp
         src/win/credential_store.cpp
         src/win/power_request.cpp
+        src/win/settings_store.cpp
         src/win/ui_layer.cpp
         src/util/log.cpp)
 

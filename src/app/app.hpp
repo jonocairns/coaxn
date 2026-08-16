@@ -11,6 +11,7 @@
 #include "app/update_check.hpp"
 #include "core/channel_index.hpp"
 #include "core/presentation.hpp"
+#include "core/settings.hpp"
 #include "player/mpv_player.hpp"
 #include "player/playback_control.hpp"
 #include "player/playback_session.hpp"
@@ -52,8 +53,41 @@ private:
     // which starts where it ends rather than running underneath it.
     [[nodiscard]] static float browser_width();
     void draw_status_bar();
+    // The window controls, revealed on the same terms as the playback bar and
+    // over the strip the window is dragged by. The controls are the lesser
+    // half: what the reveal is really for is showing where that strip is.
+    void draw_title_bar();
     void draw_update_banner();
     void draw_diagnostics();
+    // The right-click menu, and the surface that catches the click for it.
+    // Submitted before every other surface so it stays behind them.
+    void draw_window_menu();
+    // Tells the window how much of its top edge is a drag strip and whether the
+    // interface currently wants the clicks in it. Last thing in the frame, once
+    // every surface has been submitted and hover is known.
+    void publish_caption_region();
+    // The rows the right-click menu and the overlay's settings menu both carry.
+    // Two doors onto one room rather than two lists to keep in step.
+    void draw_shared_menu_items();
+    // Applies the frame change and persists it. The setting is the only thing
+    // that survives a restart; the frame itself is applied immediately.
+    void set_minimal_mode(bool minimal);
+    // Forgets the provider and returns to the login screen. Reachable from the
+    // right-click menu because auto-login means the login screen — and the
+    // button on it that does this — is otherwise never seen again.
+    void sign_out();
+    // Carries out whatever the interface asked of the window. Called by the
+    // loop, between turns, and never from inside a frame — see the fields it
+    // drains for why.
+    void apply_pending_window_changes();
+    // Records the volume once it has stopped moving. Called every frame, and
+    // writes almost never: a drag and a wheel flick both change the value many
+    // times over, and none of those intermediate readings is worth a file.
+    void persist_volume();
+    // The height of the draggable strip, in physical pixels. Zero unless the
+    // window is drawing its own frame — with a caption there is nothing to
+    // stand in for, and in fullscreen there is no frame at all.
+    [[nodiscard]] float caption_height() const;
 
     void begin_connect();
     void finish_connect();
@@ -122,6 +156,27 @@ private:
     std::unique_ptr<xtream::Client> client_;
     xtream::Credentials             credentials_;
 
+    // What survives a restart. Loaded before the window exists, because the
+    // frame it asks for has to be in place by the time the window is created
+    // rather than applied over a caption the user then watches disappear.
+    core::Settings settings_;
+
+    // Window changes the interface has asked for, held until the turn ends.
+    //
+    // Every one of these resizes the client area, and the SetWindowPos that
+    // does it delivers WM_SIZE *synchronously* — from which the window
+    // procedure draws a frame, because a resize drag owns the thread and would
+    // otherwise show a stretched copy of the last one. Applied from a menu item
+    // that is itself being drawn, that is a frame begun inside a frame and a
+    // render target rebuilt under a live draw list.
+    //
+    // So the rule is that nothing drawing a frame touches the window: it leaves
+    // the request here and the loop makes the call, where the WM_SIZE that
+    // follows draws an ordinary frame like any other.
+    std::optional<bool> pending_minimal_frame_;
+    std::optional<bool> pending_fullscreen_;
+    bool                pending_minimize_ = false;
+
     Stage       stage_ = Stage::Login;
     std::string status_;
     bool        status_error_ = false;
@@ -178,14 +233,21 @@ private:
     // Where the volume was before the speaker was clicked, so unmuting puts it
     // back instead of leaving the way up to a drag.
     int         pre_mute_volume_  = 100;
+    // The reading on the previous frame. A value that matches it is one that
+    // has stopped moving, which is the point at which it is worth recording.
+    int         volume_last_frame_ = 100;
 
     // The playback overlay hides itself once the pointer settles. Held as a
     // fraction rather than a boolean so it crosses rather than blinks.
     double      last_pointer_activity_ = 0.0;
     float       status_bar_fade_       = 1.0f;
-    // Whether the overlay's settings menu was open last frame. The fade is
-    // decided before the window owning that popup is submitted, so the answer
-    // has to be carried over rather than asked for.
+    // The title strip crosses on its own clock. Same constants as the bar
+    // below, but it is held open by a different region and has to survive the
+    // stages the playback bar is not drawn in.
+    float       title_bar_fade_        = 1.0f;
+    // Whether either menu was open last frame. The fade is decided before the
+    // window owning those popups is submitted, so the answer has to be carried
+    // over rather than asked for.
     bool        overlay_menu_open_     = false;
 
     // mpv reports video dimensions asynchronously after a load, so the scale

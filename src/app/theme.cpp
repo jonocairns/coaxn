@@ -341,6 +341,16 @@ void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_ri
     draw_list->AddRectFilledMultiColor(top_left, bottom_right, top, top, bottom, bottom);
 }
 
+void draw_title_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade) {
+    // The same two colours, swapped. Not a second palette entry: this is the
+    // playback bar's scrim standing on its head, and the two reading as one
+    // material is the point — a window whose top and bottom edges darkened
+    // differently would look like two overlays rather than one frame.
+    const ImU32 solid = with_alpha(kOverlayScrimBottom, fade);
+    const ImU32 clear = with_alpha(kOverlayScrimTop, fade);
+    draw_list->AddRectFilledMultiColor(top_left, bottom_right, solid, solid, clear, clear);
+}
+
 namespace {
 
 // Proportions of the mark, as fractions of its radius. scripts/make-icon.py
@@ -513,6 +523,50 @@ void draw_settings_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 
                            color, thickness);
         draw_list->AddRectFilled(ImVec2(x - knob, y - knob), ImVec2(x + knob, y + knob),
                                  color, 0.0f);
+    }
+}
+
+void draw_minimise_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color) {
+    const float half      = size * 0.5f;
+    const float thickness = std::max(size * 0.09f, 1.0f);
+    // Centred rather than sitting on the baseline. Windows moved it to the
+    // middle and the older position now reads as a misaligned rule.
+    draw_list->AddLine(ImVec2(centre.x - half * 0.78f, centre.y),
+                       ImVec2(centre.x + half * 0.78f, centre.y), color, thickness);
+}
+
+void draw_close_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color) {
+    const float reach     = size * 0.36f;
+    const float thickness = std::max(size * 0.09f, 1.0f);
+    draw_list->AddLine(ImVec2(centre.x - reach, centre.y - reach),
+                       ImVec2(centre.x + reach, centre.y + reach), color, thickness);
+    draw_list->AddLine(ImVec2(centre.x - reach, centre.y + reach),
+                       ImVec2(centre.x + reach, centre.y - reach), color, thickness);
+}
+
+void draw_fullscreen_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color,
+                          bool collapse) {
+    const float half      = size * 0.42f;
+    const float arm       = size * 0.24f;
+    const float thickness = std::max(size * 0.09f, 1.0f);
+
+    // Corner brackets rather than a framed rectangle: at this size a rectangle
+    // with a border is a filled box, and the gap between the arms is what says
+    // the picture is going to grow past them. Collapsed, the same four corners
+    // are pulled in and the arms point the other way.
+    const float corners[4][2] = {{-1.0f, -1.0f}, {1.0f, -1.0f}, {-1.0f, 1.0f}, {1.0f, 1.0f}};
+    for (const auto& corner : corners) {
+        const float sx = corner[0];
+        const float sy = corner[1];
+        // Expanding, the elbow sits at the outer corner and the arms run back
+        // towards the middle. Collapsing, it sits inboard by one arm's length
+        // and they run out — so the two glyphs are each other's opposite rather
+        // than two unrelated drawings.
+        const float x = centre.x + sx * (collapse ? half - arm : half);
+        const float y = centre.y + sy * (collapse ? half - arm : half);
+        const float reach = collapse ? -arm : arm;
+        draw_list->AddLine(ImVec2(x, y), ImVec2(x - sx * reach, y), color, thickness);
+        draw_list->AddLine(ImVec2(x, y), ImVec2(x, y - sy * reach), color, thickness);
     }
 }
 

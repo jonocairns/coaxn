@@ -2,12 +2,12 @@
 
 #include <windows.h>
 #include <dpapi.h>
-#include <shlobj.h>
 
 #include <cstdio>
 #include <vector>
 
 #include "util/log.hpp"
+#include "win/app_paths.hpp"
 
 namespace coax::win {
 namespace {
@@ -26,16 +26,10 @@ DATA_BLOB entropy_blob() {
 }  // namespace
 
 std::wstring CredentialStore::storage_path() {
-    PWSTR local_app_data = nullptr;
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local_app_data))) {
+    const std::wstring directory = app_data_dir();
+    if (directory.empty()) {
         return {};
     }
-
-    std::wstring directory = local_app_data;
-    CoTaskMemFree(local_app_data);
-
-    directory += L"\\Coax";
-    CreateDirectoryW(directory.c_str(), nullptr);
     return directory + L"\\portal.dat";
 }
 

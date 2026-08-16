@@ -11,11 +11,13 @@
 #include <exception>
 #include <format>
 #include <string_view>
+#include <utility>
 
 #include "app/theme.hpp"
 #include "app/widgets.hpp"
 #include "util/log.hpp"
 #include "win/credential_store.hpp"
+#include "win/settings_store.hpp"
 
 namespace coax::app {
 namespace {
@@ -34,6 +36,29 @@ constexpr float kOverlayRampExtra = 46.0f;
 constexpr float kVolumeWidth      = 124.0f;
 constexpr float kLogWidth         = 560.0f;
 constexpr float kLogHeight        = 200.0f;
+
+// The strip along the top edge that stands in for a title bar when the window
+// draws its own frame. On the spacing scale rather than measured from a
+// caption, because nothing is drawn in it: it is a margin the interface leaves
+// clear so the window has somewhere to be dragged by.
+constexpr float kCaptionHeight = theme::kSpace7;
+
+// The right-click menu. Named rather than inlined because it is opened from one
+// place and drawn in another.
+constexpr const char* kWindowMenu = "##window-menu";
+
+// Where the volume track marks unity. The ceiling above it is core::kMaxVolume,
+// which is also the range the settings file is validated against — one number,
+// one home. This one is only ever a tick on a slider, so it stays here.
+constexpr int kUnityVolume = 100;
+
+// Idle time before the overlays start to go, and how long they take to cross.
+// Long enough that reaching for the volume does not race it. Shared by the
+// playback bar and the title strip: they are two edges of one frame, and an
+// application whose chrome arrived and left at two different speeds would read
+// as two overlays that happen to be on screen together.
+constexpr double kIdleSeconds = 2.5;
+constexpr float  kFadeSeconds = 0.22f;
 
 // Copies a std::string into a fixed ImGui text buffer and back out again.
 struct TextField {
@@ -221,6 +246,19 @@ App::~App() {
 }
 
 bool App::initialize(std::string& error) {
+    // Before the window, not after it: the frame is chosen at creation, and
+    // applying it afterwards would open every session with a caption that then
+    // vanishes. Defaults on any failure, so a missing or damaged file costs a
+    // preference rather than a start-up.
+    settings_ = win::SettingsStore::load();
+    window_.set_minimal_frame(settings_.minimal_mode);
+
+    volume_            = settings_.volume;
+    volume_last_frame_ = volume_;
+    // Unmuting has to land somewhere audible. A session restored at zero would
+    // otherwise put the speaker back to zero and look broken.
+    pre_mute_volume_ = volume_ > 0 ? volume_ : kUnityVolume;
+
     if (!window_.create(L"Coax", kInitialWidth, kInitialHeight, error)) {
         return false;
     }
@@ -250,6 +288,11 @@ bool App::initialize(std::string& error) {
     if (!player_.initialize(config, error)) {
         return false;
     }
+
+    // The engine starts at unity, so a restored volume has to be pushed to it.
+    // restore_backend_settings replays this after a rebuild; nothing replays it
+    // for the first one.
+    player_.set_volume(volume_);
 
     // Attaching on the callback rather than polling: the property is
     // unavailable until mpv's video output exists, and mpv may replace the
@@ -449,6 +492,18 @@ void App::load_saved_portal() {
     // URL. Masking a string that turns out to have had no secret in it costs
     // nothing; the other way round cannot be undone.
     log::info("Restored saved portal");
+
+    // Straight through to the catalogue. Someone whose credentials are already
+    // on this machine has said what they want to connect to, and a login screen
+    // whose only remaining action is to press a button is a screen that exists
+    // to be dismissed.
+    //
+    // Only when all three fields survived. A partial record would reach
+    // begin_connect and come back as an error banner over an empty form, which
+    // is a worse first frame than the form on its own.
+    if (!portal_url_.empty() && !username_.empty() && !password_.empty()) {
+        begin_connect();
+    }
 }
 
 void App::save_portal() const {
@@ -1078,6 +1133,17 @@ void App::draw_browser() {
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
 
+    // The panel still reaches the top edge — a band of video above it would
+    // read as a mistake rather than as a margin — but its contents start below
+    // the drag strip. What the strip covers is blank panel, which is the one
+    // thing in the column that can be dragged without taking a click from
+    // something else.
+    //
+    // The cursor is moved rather than a spacer drawn: a Dummy is an item, and
+    // an item under the pointer is exactly what tells the window the strip is
+    // blocked — the gap would stop being draggable by existing.
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + caption_height());
+
     // Heading and keys on one line, the keys pushed to the far edge: at micro
     // size and faint they are a footnote to the panel rather than a second
     // label competing with its name.
@@ -1292,16 +1358,6 @@ void App::draw_browser() {
 }
 
 void App::draw_status_bar() {
-    // Idle time before the overlay starts to go, and how long it takes to
-    // cross. Long enough that reaching for the volume does not race it.
-    constexpr double kIdleSeconds = 2.5;
-    constexpr float  kFadeSeconds = 0.22f;
-    // mpv takes volume past unity. The ceiling keeps that headroom and the
-    // track marks where 100 is, rather than pretending the loudest sane
-    // setting is the right-hand end.
-    constexpr int kMaxVolume   = 130;
-    constexpr int kUnityVolume = 100;
-
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
 
     // The row of controls, and the margin around it. Everything in the bar is
@@ -1437,9 +1493,9 @@ void App::draw_status_bar() {
     cursor = group_left;
 
     place(cursor, row);
-    const widgets::Icon speaker = volume_ == 0            ? widgets::Icon::VolumeMuted
-                                  : volume_ <= kMaxVolume / 2 ? widgets::Icon::VolumeLow
-                                                              : widgets::Icon::VolumeHigh;
+    const widgets::Icon speaker = volume_ == 0                        ? widgets::Icon::VolumeMuted
+                                  : volume_ <= core::kMaxVolume / 2 ? widgets::Icon::VolumeLow
+                                                                    : widgets::Icon::VolumeHigh;
     if (widgets::icon_button("##mute", speaker, row, fade)) {
         // Mute remembers where the volume was rather than dropping it to zero
         // and making the way back a drag.
@@ -1454,7 +1510,7 @@ void App::draw_status_bar() {
     cursor += row + gap * 0.5f;
 
     place(cursor, row);
-    if (widgets::volume_slider("##volume", volume_, kMaxVolume, kUnityVolume,
+    if (widgets::volume_slider("##volume", volume_, core::kMaxVolume, kUnityVolume,
                                volume_width, row, fade)) {
         player_.set_volume(volume_);
     }
@@ -1474,18 +1530,311 @@ void App::draw_status_bar() {
         theme::ScopedStyle style;
         style.var(ImGuiStyleVar_Alpha, 1.0f).var(ImGuiStyleVar_WindowPadding, panel_padding);
         if (ImGui::BeginPopup("##overlay-settings")) {
-        if (ImGui::Checkbox("Super resolution", &vsr_enabled_)) {
-            apply_vsr();
-        }
-        ImGui::TextDisabled("Upscales sources smaller than the window");
-        ImGui::Separator();
-            ImGui::MenuItem("Diagnostics", "F1", &show_diagnostics_);
+            draw_shared_menu_items();
             ImGui::EndPopup();
         }
     }
-    overlay_menu_open_ = ImGui::IsPopupOpen("##overlay-settings");
+    ImGui::End();
+}
+
+void App::draw_shared_menu_items() {
+    ImGui::MenuItem("Channels", "Tab", &show_browser_);
+    ImGui::MenuItem("Diagnostics", "F1", &show_diagnostics_);
+    ImGui::Separator();
+    if (ImGui::MenuItem("Super resolution", nullptr, &vsr_enabled_)) {
+        apply_vsr();
+    }
+    ImGui::TextDisabled("Upscales sources smaller than the window");
+}
+
+float App::caption_height() const {
+    // Nothing to stand in for while Windows is drawing the caption, and nothing
+    // to drag in fullscreen — which is also the state where a strip along the
+    // top edge would sit over the picture and steal from it.
+    if (!window_.minimal_frame() || window_.fullscreen()) {
+        return 0.0f;
+    }
+    return theme::scaled(kCaptionHeight);
+}
+
+void App::set_minimal_mode(bool minimal) {
+    if (minimal == settings_.minimal_mode) {
+        return;
+    }
+    // The preference is recorded now — it is what the menu draws its tick from,
+    // and it is not the part that can re-enter a frame. Only the window call is
+    // held over.
+    settings_.minimal_mode = minimal;
+    win::SettingsStore::save(settings_);
+    pending_minimal_frame_ = minimal;
+    log::info("Minimal mode {}", minimal ? "enabled" : "disabled");
+}
+
+void App::apply_pending_window_changes() {
+    // Taken before the calls rather than after. Each one draws a frame before
+    // it returns, and a request left in place while that happens is a request
+    // the next turn would carry out a second time.
+    const auto minimal    = std::exchange(pending_minimal_frame_, std::nullopt);
+    const auto fullscreen = std::exchange(pending_fullscreen_, std::nullopt);
+    const bool minimize   = std::exchange(pending_minimize_, false);
+
+    // Fullscreen first: it owns the frame while it is on, and set_minimal_frame
+    // defers to it rather than fighting over the same window styles.
+    if (fullscreen) {
+        window_.set_fullscreen(*fullscreen);
+    }
+    if (minimal) {
+        window_.set_minimal_frame(*minimal);
+    }
+    if (minimize) {
+        window_.minimize();
+    }
+}
+
+void App::sign_out() {
+    // Playback goes first, and directly rather than through stop_playback:
+    // that path is the Stop button and declines in the states where there is
+    // nothing a user would call stopping, which here would leave a channel
+    // running behind the login screen.
+    const auto generation = playback_session_.generation();
+    playback_session_.stop(generation);
+    player_.stop(generation);
+    playback_intent_ = player::PlaybackIntent::StoppedByUser;
+    loading_channel_generation_.reset();
+    playing_channel_id_.clear();
+    playing_channel_name_.clear();
+    update_playback_power();
+
+    // The stored credential, not just the fields: signing out and finding the
+    // portal restored on the next launch would be the opposite of the ask.
+    win::CredentialStore::clear();
+    portal_url_.clear();
+    username_.clear();
+    password_.clear();
+
+    client_.reset();
+    channels_.reset({}, {});
+    search_.clear();
+
+    stage_ = Stage::Login;
+    set_status("Signed out");
+    log::info("Signed out");
+}
+
+void App::draw_title_bar() {
+    const float height = caption_height();
+    if (height <= 0.0f) {
+        // No strip to reveal — Windows is drawing the caption, or the window is
+        // fullscreen and there is nothing to drag. Reset rather than left where
+        // it was, so the strip does not cross back in from half opacity the
+        // next time minimal mode is switched on.
+        title_bar_fade_ = 0.0f;
+        return;
+    }
+
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+
+    // The same column rule the playback bar follows: the channel list owns its
+    // width for its whole height, so the strip begins where that ends. The
+    // *draggable* region still spans the window — what stops at this edge is
+    // only the part that draws.
+    const float left  = viewport->WorkPos.x + (show_browser_ ? browser_width() : 0.0f);
+    const float width = viewport->WorkPos.x + viewport->WorkSize.x - left;
+    const float top   = viewport->WorkPos.y;
+
+    // Held open while the pointer is in the strip, so the controls cannot fade
+    // out from under the hand reaching for them, and while a menu is up. Held
+    // open too when there is no video: over the backdrop it hides nothing, and
+    // the login screen is the first thing anyone sees — the one moment where
+    // the window most needs to say where its title bar is.
+    const ImGuiIO& io   = ImGui::GetIO();
+    const bool     hold = !video_attached_ || overlay_menu_open_ ||
+                          (io.MousePos.y <= top + height && io.MousePos.x >= left);
+    const bool     want = hold || (ImGui::GetTime() - last_pointer_activity_) < kIdleSeconds;
+
+    const float step = io.DeltaTime / kFadeSeconds;
+    title_bar_fade_  = std::clamp(title_bar_fade_ + (want ? step : -step), 0.0f, 1.0f);
+    if (title_bar_fade_ <= 0.0f) {
+        return;
+    }
+    const float fade = title_bar_fade_;
+
+    ImGui::SetNextWindowPos(ImVec2(left, top));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+
+    // Flattened for the same reason the playback bar is: the surface is the
+    // scrim, every item is placed by hand, and a border would inset the clip
+    // rectangle and leave a bright rule of unscrimmed video down the edges.
+    theme::ScopedStyle bar_style;
+    bar_style.var(ImGuiStyleVar_Alpha, fade)
+             .var(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f))
+             .var(ImGuiStyleVar_WindowBorderSize, 0.0f);
+
+    ImGui::Begin("##titlebar", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse);
+
+    ImDrawList*  draw   = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetWindowPos();
+    const ImVec2 corner(origin.x + width, origin.y + height);
+
+    // The band itself, and the whole reason for the reveal. Three icons in a
+    // corner say where the buttons are; this says where the title bar is, which
+    // is the part with no other way of being found.
+    theme::draw_title_scrim(draw, origin, corner, fade);
+
+    // Square on the strip's own height, so the row of them is the strip rather
+    // than something floating in it. Close is outermost, in the order Windows
+    // has put these in for thirty years — this is not the place to be original.
+    const float pad = theme::scaled(theme::kSpace2);
+    const float row = height;
+    float       cursor = corner.x - pad - row * 3.0f;
+
+    const auto place = [&](widgets::Icon icon, const char* id) {
+        ImGui::SetCursorScreenPos(ImVec2(cursor, origin.y));
+        cursor += row;
+        return widgets::icon_button(id, icon, row, fade);
+    };
+
+    if (place(window_.fullscreen() ? widgets::Icon::FullscreenExit : widgets::Icon::Fullscreen,
+              "##title-fullscreen")) {
+        pending_fullscreen_ = !window_.fullscreen();
+    }
+    if (place(widgets::Icon::Minimise, "##title-minimise")) {
+        pending_minimize_ = true;
+    }
+    if (place(widgets::Icon::Close, "##title-close")) {
+        window_.close();
+    }
 
     ImGui::End();
+}
+
+void App::persist_volume() {
+    const int previous = volume_last_frame_;
+    volume_last_frame_ = volume_;
+
+    // Three ways to be too early, and all of them are ordinary. Unchanged from
+    // what is already on disk is the usual case and costs nothing. Different
+    // from the previous frame means the value is still moving under a drag or a
+    // run of wheel notches. An active item means the hand is still on it —
+    // a slider released outside its own track ends the drag without the value
+    // changing, so the reading alone cannot tell.
+    if (volume_ == settings_.volume || volume_ != previous || ImGui::IsAnyItemActive()) {
+        return;
+    }
+
+    settings_.volume = volume_;
+    win::SettingsStore::save(settings_);
+}
+
+void App::draw_window_menu() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+
+    // A surface covering the whole viewport, submitted before anything else and
+    // kept at the back. It draws nothing: it exists to be the window the popup
+    // belongs to, in every stage including the login screen, and to be present
+    // over the video where no other surface reaches.
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(viewport->Size);
+
+    // Kept from before the host flattens it. ImGui checks that a window leaves
+    // the style stacks as deep as it found them, so the guard below cannot be
+    // released until after End — which means the popup, opened inside it, would
+    // otherwise inherit the host's zero padding and sit tight against its own
+    // edges. The menu is an ordinary panel and wants the ordinary inset.
+    const ImVec2 panel_padding = ImGui::GetStyle().WindowPadding;
+
+    theme::ScopedStyle host_style;
+    host_style.var(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f))
+              .var(ImGuiStyleVar_WindowBorderSize, 0.0f);
+
+    ImGui::Begin("##window-menu-host", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoScrollWithMouse);
+
+    // Anywhere in the window, because a gesture that works in some regions and
+    // silently does nothing in others is a gesture nobody trusts. The guard is
+    // against stacking a second menu on an open one — including on the gear's,
+    // which carries the same rows.
+    //
+    // The strip along the top edge is the exception, and not by omission:
+    // Windows sends its clicks as non-client messages that never reach here, so
+    // right-clicking it raises the system menu instead. That is the division a
+    // title bar has always had, and it is the one place the native Restore,
+    // Move and Size are worth more than these rows.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+        ImGui::OpenPopup(kWindowMenu);
+    }
+
+    {
+        theme::ScopedStyle menu_style;
+        menu_style.var(ImGuiStyleVar_WindowPadding, panel_padding);
+        if (ImGui::BeginPopup(kWindowMenu)) {
+            draw_shared_menu_items();
+
+            // Only with a provider to leave. Direct media has no credentials
+            // behind it, and the login screen already carries its own button.
+            if (stage_ == Stage::Browsing && !direct_media_active_ && client_) {
+                ImGui::Separator();
+                if (ImGui::MenuItem("Sign out")) {
+                    ImGui::CloseCurrentPopup();
+                    sign_out();
+                }
+            }
+
+            ImGui::Separator();
+
+            bool minimal = settings_.minimal_mode;
+            if (ImGui::MenuItem("Minimal mode", nullptr, &minimal)) {
+                set_minimal_mode(minimal);
+            }
+
+            bool fullscreen = window_.fullscreen();
+            if (ImGui::MenuItem("Fullscreen", "Alt+Enter", &fullscreen)) {
+                pending_fullscreen_ = fullscreen;
+            }
+            if (ImGui::MenuItem("Minimise")) {
+                pending_minimize_ = true;
+            }
+            if (ImGui::MenuItem("Close", "Alt+F4")) {
+                window_.close();
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    ImGui::End();
+}
+
+void App::publish_caption_region() {
+    // Runs after every surface has been submitted, and cannot be folded into
+    // the menu above: ImGui clears the hovered item at the start of each frame
+    // and fills it in as items are drawn, so asked any earlier this reports
+    // nothing hovered and the strip would swallow clicks meant for the
+    // interface.
+    //
+    // Blocked wherever a click belongs to the interface rather than to the
+    // window: over any widget, while text is being typed, and while a menu is
+    // up — a popup opening under the strip would otherwise have its first row
+    // taken by a drag.
+    const ImGuiIO& io = ImGui::GetIO();
+    window_.set_caption_height(static_cast<int>(caption_height()));
+    window_.set_caption_blocked(ImGui::IsAnyItemHovered() || io.WantTextInput ||
+                                ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId));
+
+    // Either menu holds both overlays open — the gear is drawn on the bar it
+    // would otherwise let fade, and the right-click menu can be opened
+    // anywhere. Recorded here rather than where the bar is drawn because the
+    // bar is not drawn in every stage, and a flag left behind by the last
+    // stage that did draw it would hold the overlays open for good.
+    overlay_menu_open_ =
+        ImGui::IsPopupOpen("##overlay-settings") || ImGui::IsPopupOpen(kWindowMenu);
 }
 
 void App::draw_update_banner() {
@@ -1499,7 +1848,7 @@ void App::draw_update_banner() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(
         ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - theme::scaled(theme::kSpace4),
-               viewport->WorkPos.y + theme::scaled(theme::kSpace4)),
+               viewport->WorkPos.y + theme::scaled(theme::kSpace4) + caption_height()),
         ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.85f);
 
@@ -1541,7 +1890,7 @@ void App::draw_diagnostics() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(
         ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - theme::scaled(theme::kSpace5),
-               viewport->WorkPos.y + theme::scaled(theme::kSpace5)),
+               viewport->WorkPos.y + theme::scaled(theme::kSpace5) + caption_height()),
         ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     // Nearly opaque. It reads over whatever the video happens to be showing,
     // and it is only on screen while somebody is deliberately looking at it.
@@ -1821,6 +2170,10 @@ void App::draw_frame() {
         theme::draw_backdrop();
     }
 
+    // First, so the surface carrying the right-click menu sits behind every
+    // panel drawn below rather than over them.
+    draw_window_menu();
+
     switch (stage_) {
         case Stage::Login:
         case Stage::Connecting:
@@ -1832,8 +2185,14 @@ void App::draw_frame() {
             draw_status_bar();
             break;
     }
+    // After the stages and before the panels that float above everything: the
+    // strip belongs to the window rather than to what is in it, and is drawn in
+    // every stage including the login screen.
+    draw_title_bar();
     draw_update_banner();
     draw_diagnostics();
+    persist_volume();
+    publish_caption_region();
 
     ImGui::Render();
     ui_.end_frame();
@@ -1881,6 +2240,9 @@ int App::run() {
         finish_connect();
         update_playback_power();
         draw_frame();
+        // After the frame, never inside one. This is the only place the window
+        // is resized on the interface's behalf.
+        apply_pending_window_changes();
         wait_ms = next_turn_wait_ms();
     }
 

@@ -244,6 +244,11 @@ void draw_backdrop();
 // behind it — it buys legibility for the row without hiding the picture.
 void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade);
 
+// The same ramp the other way up: solid along the top edge, nothing at the
+// bottom. What the title strip sits on, where the edge being reached for is the
+// one above rather than the one below.
+void draw_title_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade);
+
 // The coax mark: a hexagon cut once, the offcut pushed clear of the body and
 // given the accent. Drawn rather than loaded so it takes the palette's own
 // colours and costs no texture. It has no tile of its own; it sits on whatever
@@ -264,5 +269,15 @@ void draw_stop_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 colo
 // `waves` is how many arcs stand beside the cone; zero draws the muted cross.
 void draw_volume_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color, int waves);
 void draw_settings_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
+
+// The window controls. Plain geometry at the sizes Windows itself uses for
+// these, because they are the one place in the application where being
+// recognised instantly matters more than having a voice of its own.
+void draw_minimise_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
+void draw_close_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color);
+// Four corner brackets, pointing out. `collapse` turns them inward, for the
+// same control while the window is already fullscreen.
+void draw_fullscreen_icon(ImDrawList* draw_list, ImVec2 centre, float size, ImU32 color,
+                          bool collapse);
 
 }  // namespace coax::app::theme
