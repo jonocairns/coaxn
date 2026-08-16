@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0](https://github.com/jonocairns/coaxn/compare/v1.1.0...v1.2.0) (2026-08-16)
+
+
+### Features
+
+* draw the window frame and carry its controls in a menu ([#30](https://github.com/jonocairns/coaxn/issues/30)) ([1b75451](https://github.com/jonocairns/coaxn/commit/1b754518984636428764978ea9e5e58d39da99c2))
+* show loading state for selected channel ([#24](https://github.com/jonocairns/coaxn/issues/24)) ([83ac953](https://github.com/jonocairns/coaxn/commit/83ac953a12fa9c6efcf4dfccad9cb967ecd77cf7))
+* use stop and start controls for live TS ([#26](https://github.com/jonocairns/coaxn/issues/26)) ([47f94ac](https://github.com/jonocairns/coaxn/commit/47f94ac580b998b96d1978da0bc723a775598bfe))
+
+
+### Bug Fixes
+
+* preserve recovered playback before recreation ([#29](https://github.com/jonocairns/coaxn/issues/29)) ([16c7184](https://github.com/jonocairns/coaxn/commit/16c7184d20bc199228b6df01dea490b6d2e6adf1))
+* recover confirmed live TS timeline regressions ([#28](https://github.com/jonocairns/coaxn/issues/28)) ([0d2b9bb](https://github.com/jonocairns/coaxn/commit/0d2b9bb774b317a429702a72156c6823ddacbe3b))
+
 ## [1.1.0](https://github.com/jonocairns/coaxn/compare/v1.0.0...v1.1.0) (2026-08-12)
 
 
