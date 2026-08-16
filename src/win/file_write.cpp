@@ -28,18 +28,31 @@ bool write_file_atomically(const std::wstring& path, std::string_view bytes,
     // the honest answer: nothing failed, it just did not all arrive.
     const DWORD write_error = ok ? ERROR_SUCCESS : GetLastError();
 
-    if (ok) {
-        // Before the rename, not after. The rename orders the directory entry;
-        // it says nothing about whether the bytes it now points at have reached
-        // the disk. Without this the atomic replace is still atomic and can
-        // still leave an empty file after a power cut.
-        FlushFileBuffers(file);
-    }
+    // Before the rename, not after. The rename orders the directory entry; it
+    // says nothing about whether the bytes it now points at have reached the
+    // disk. Without this the atomic replace is still atomic and can still leave
+    // an empty file after a power cut.
+    //
+    // And it has to be answered for. A flush that fails has not committed
+    // anything, so renaming over the destination anyway would trade a file that
+    // is definitely good for one that might be — which is the outcome this
+    // function exists to make impossible, arrived at from the other direction.
+    // Same reason as the write error above for reading it here: CloseHandle is
+    // free to overwrite the thread's last-error on its way out.
+    const bool  flushed     = ok && FlushFileBuffers(file);
+    const DWORD flush_error = (ok && !flushed) ? GetLastError() : ERROR_SUCCESS;
+
     CloseHandle(file);
 
     if (!ok) {
         DeleteFileW(temporary.c_str());
         log::warn("{} was written incompletely ({})", what, write_error);
+        return false;
+    }
+
+    if (!flushed) {
+        DeleteFileW(temporary.c_str());
+        log::warn("{} could not be committed to disk ({})", what, flush_error);
         return false;
     }
 
