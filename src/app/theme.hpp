@@ -114,18 +114,18 @@ inline constexpr ImU32 kLogoBody = IM_COL32(0xA9, 0xB3, 0xC9, 0xFF);  // 9.3:1
 inline constexpr ImU32 kOverlayScrimTop    = IM_COL32(0x00, 0x00, 0x00, 0x00);
 inline constexpr ImU32 kOverlayScrimBottom = IM_COL32(0x00, 0x00, 0x00, 0xD9);
 
-// The title strip does not ramp to nothing at its inner edge the way the
-// playback bar does. The two are answering different questions: the bar is a
-// wash that keeps text legible over a picture, and reaching nothing is what
-// stops it reading as a box drawn across the frame. The strip has to say where
-// it *ends*, because it is a region to be dragged, and an edge needs something
-// to be the edge of. So the ramp stops here instead.
-inline constexpr ImU32 kTitleScrimEdge = IM_COL32(0x00, 0x00, 0x00, 0x59);
-// And the rule along it. Light rather than dark, which is the whole point: the
-// picture behind may be black, and darkening black shows nothing at any alpha.
-// This is the only part of either overlay that is guaranteed to be visible
-// whatever is playing underneath it.
-inline constexpr ImU32 kTitleScrimRule = IM_COL32(0xFF, 0xFF, 0xFF, 0x2B);
+// The title strip's ramp bends rather than running straight. A linear fade over
+// 32px spends most of its length nearly clear, which leaves the controls
+// sitting on almost nothing; holding density to the knee and releasing it over
+// what remains puts the weight where the icons are and still reaches nothing at
+// the bottom edge.
+//
+// Reaching nothing is not negotiable. This band has to end somewhere its own
+// width does not — it starts at the channel list's edge, and anything with a
+// visible boundary terminates in mid-window when that list is open, which reads
+// as a drawing fault rather than as a frame.
+inline constexpr ImU32 kTitleScrimMid  = IM_COL32(0x00, 0x00, 0x00, 0x8C);
+inline constexpr float kTitleScrimKnee = 0.62f;
 
 // Frameless controls. An icon carries its own state — brighter under the
 // pointer, over a wash while it is held — because a filled button behind every
