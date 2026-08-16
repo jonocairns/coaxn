@@ -1626,23 +1626,32 @@ void App::draw_title_bar() {
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
 
-    // The same column rule the playback bar follows: the channel list owns its
-    // width for its whole height, so the strip begins where that ends. The
-    // *draggable* region still spans the window — what stops at this edge is
-    // only the part that draws.
-    const float left  = viewport->WorkPos.x + (show_browser_ ? browser_width() : 0.0f);
-    const float width = viewport->WorkPos.x + viewport->WorkSize.x - left;
+    // The full width of the window, unlike the playback bar, which stops where
+    // the channel list ends. This band is not only chrome: it is the region the
+    // window is dragged by, and that region spans the window. Drawn short of it
+    // the shape ended somewhere the window did not, which is what every attempt
+    // to give it an edge kept running into — and it also lied about where the
+    // drag target was. Above the list rather than beside it is what an
+    // application with a sidebar looks like.
+    const float left  = viewport->WorkPos.x;
+    const float width = viewport->WorkSize.x;
     const float top   = viewport->WorkPos.y;
 
-    // Held open while the pointer is in the strip, so the controls cannot fade
-    // out from under the hand reaching for them, and while a menu is up. Held
-    // open too when there is no video: over the backdrop it hides nothing, and
-    // the login screen is the first thing anyone sees — the one moment where
-    // the window most needs to say where its title bar is.
-    const ImGuiIO& io   = ImGui::GetIO();
-    const bool     hold = !video_attached_ || overlay_menu_open_ ||
-                          (io.MousePos.y <= top + height && io.MousePos.x >= left);
-    const bool     want = hold || (ImGui::GetTime() - last_pointer_activity_) < kIdleSeconds;
+    // Revealed by approaching the top edge, not by moving the pointer at all.
+    // The playback bar answers any movement because any movement means someone
+    // is working the player; this one marks a target that is only ever wanted
+    // deliberately, and shown on the same terms it would sit over the picture
+    // almost permanently. The approach band is deeper than the strip so it
+    // arrives before the pointer does.
+    //
+    // Held open while a menu is up, and while there is no video — over the
+    // backdrop it hides nothing, and the login screen is the first thing anyone
+    // sees, which is the moment the window most needs to say where its title
+    // bar is.
+    const ImGuiIO& io       = ImGui::GetIO();
+    const float    approach = height * 2.5f;
+    const bool     want     = !video_attached_ || overlay_menu_open_ ||
+                          (io.MousePos.y <= top + approach && io.MousePos.y >= top - height);
 
     const float step = io.DeltaTime / kFadeSeconds;
     title_bar_fade_  = std::clamp(title_bar_fade_ + (want ? step : -step), 0.0f, 1.0f);
@@ -1667,14 +1676,18 @@ void App::draw_title_bar() {
                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse);
 
+    ImDrawList*  draw   = ImGui::GetWindowDrawList();
     const ImVec2 origin = ImGui::GetWindowPos();
     const ImVec2 corner(origin.x + width, origin.y + height);
 
-    // Nothing is drawn behind the controls. A band over the picture was tried
-    // twice — flat with a rule along its edge, then a bend with none — and both
-    // read as chrome asserting itself over the video rather than as a frame.
-    // The icons are the whole of the reveal: the region beside a set of window
-    // buttons is somewhere every desktop reader has already been taught to look.
+    // Solid, in the palette's own title bar colour, rather than a ramp. The
+    // gradient was there to disguise an edge that stopped in mid-window; now
+    // that the band runs the full width there is no edge to hide, and a bar
+    // that only appears when reached for can afford to be definite. It is also
+    // what makes the controls legible — kIcon is around 9:1 on this, against
+    // roughly 1.7:1 over a scrimmed bright picture — and what shows where the
+    // window can be dragged, which no amount of glyph contrast would.
+    draw->AddRectFilled(origin, corner, theme::with_alpha(theme::kTitleBar, fade), 0.0f);
 
     // Square on the strip's own height, so the row of them is the strip rather
     // than something floating in it. Close is outermost, in the order Windows
