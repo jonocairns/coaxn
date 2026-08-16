@@ -70,58 +70,18 @@ bool CompositionTree::set_video_content(IUnknown* swapchain) {
     return true;
 }
 
-void CompositionTree::set_corner_radius(int width, int height, float top, float bottom) {
-    if (!device_ || !root_) {
-        return;
-    }
-
-    if (top <= 0.0f && bottom <= 0.0f) {
-        // The cast is not decoration: SetClip is overloaded on IDCompositionClip*
-        // and on a rectangle, and a bare nullptr picks neither.
-        root_->SetClip(static_cast<IDCompositionClip*>(nullptr));
-        commit();
-        return;
-    }
-
-    if (!clip_ && FAILED(device_->CreateRectangleClip(clip_.put()))) {
-        log::warn("Rounded corners are unavailable; drawing square ones");
-        return;
-    }
-
-    clip_->SetLeft(0.0f);
-    clip_->SetTop(0.0f);
-    clip_->SetRight(static_cast<float>(width));
-    clip_->SetBottom(static_cast<float>(height));
-
-    clip_->SetTopLeftRadiusX(top);
-    clip_->SetTopLeftRadiusY(top);
-    clip_->SetTopRightRadiusX(top);
-    clip_->SetTopRightRadiusY(top);
-    clip_->SetBottomLeftRadiusX(bottom);
-    clip_->SetBottomLeftRadiusY(bottom);
-    clip_->SetBottomRightRadiusX(bottom);
-    clip_->SetBottomRightRadiusY(bottom);
-
-    root_->SetClip(clip_.get());
-    commit();
-}
-
 void CompositionTree::destroy() {
     // Content first, then the tree, then the device. The visuals hold
     // references on both swap chains, and those have to go before the device
     // they were created from.
     if (video_) video_->SetContent(nullptr);
     if (ui_) ui_->SetContent(nullptr);
-    if (root_) {
-        root_->SetClip(static_cast<IDCompositionClip*>(nullptr));
-        root_->RemoveAllVisuals();
-    }
+    if (root_) root_->RemoveAllVisuals();
     if (target_) target_->SetRoot(nullptr);
     // A device whose D3D11 device has been removed fails this; the teardown is
     // unconditional either way, so the result is not worth reporting.
     commit();
 
-    clip_.reset();
     ui_.reset();
     video_.reset();
     root_.reset();

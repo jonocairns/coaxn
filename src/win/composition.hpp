@@ -38,21 +38,6 @@ public:
     [[nodiscard]] bool set_video_content(IUnknown* swapchain);
     void set_ui_content(IUnknown* swapchain);
 
-    // Rounds the corners of everything the tree draws, in physical pixels.
-    //
-    // DWM rounds the *window*, but this content is composited above the frame
-    // and is not clipped by that: the video and the interface paint square into
-    // corners the window has already cut, which shows as a squared-off block
-    // sitting inside a rounded outline. Clipping the root visual is what makes
-    // the two agree.
-    //
-    // Top and bottom are given separately because they are not always the same
-    // question. With the system caption the client area starts below it, so its
-    // top corners are nowhere near the window's; without one they coincide.
-    // Zero on both clears the clip, which is what a maximised or fullscreen
-    // window wants — Windows does not round those either.
-    void set_corner_radius(int width, int height, float top, float bottom);
-
     void commit();
 
     [[nodiscard]] bool valid() const { return static_cast<bool>(device_); }
@@ -63,9 +48,6 @@ private:
     ComPtr<IDCompositionVisual> root_;
     ComPtr<IDCompositionVisual> video_;
     ComPtr<IDCompositionVisual> ui_;
-    // Created on first use and kept, because the radii and bounds are set on it
-    // again on every resize.
-    ComPtr<IDCompositionRectangleClip> clip_;
 };
 
 }  // namespace coax::win

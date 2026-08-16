@@ -378,6 +378,19 @@ void AppWindow::apply_frame_appearance() {
     const BOOL dark_caption = TRUE;
     DwmSetWindowAttribute(window_, 20, &dark_caption, sizeof(dark_caption));
 
+    // 33 is DWMWA_WINDOW_CORNER_PREFERENCE and 2 is DWMWCP_ROUND. Windows 11
+    // rounds most top-level windows on its own, but not one whose non-client
+    // area has been emptied — which is exactly what the WM_NCCALCSIZE above
+    // does, and which Microsoft names as a thing that breaks the heuristic.
+    // This is the documented way back in: an opt-in for apps that customise
+    // their frame and still want the system's corners, shadow and border.
+    //
+    // Asking the desktop to round rather than rounding anything here. Cutting
+    // the corners out of what this application draws would be a second, harder
+    // edged shape just inside DWM's antialiased one.
+    const DWORD corner_preference = 2;
+    DwmSetWindowAttribute(window_, 33, &corner_preference, sizeof(corner_preference));
+
     // 34 is DWMWA_BORDER_COLOR, Windows 11 and ignored before it. Without it a
     // light-themed desktop draws a pale hairline around a black window, which
     // with no caption above it is the only part of the frame anyone can see.
@@ -385,16 +398,6 @@ void AppWindow::apply_frame_appearance() {
     // application rather than as a line drawn on top of it.
     const COLORREF border = RGB(0x04, 0x06, 0x0A);
     DwmSetWindowAttribute(window_, 34, &border, sizeof(border));
-
-    // 33 is DWMWA_WINDOW_CORNER_PREFERENCE and 2 is DWMWCP_ROUND. Stating the
-    // default rather than changing it — but the call itself is the useful part,
-    // because it is only understood by the Windows versions that round windows
-    // at all. Whether it succeeded is how the composition tree knows whether to
-    // round what it draws: matching a corner the desktop does not cut would be
-    // as wrong as leaving one it does.
-    const DWORD corner_preference = 2;
-    rounds_windows_ = SUCCEEDED(DwmSetWindowAttribute(window_, 33, &corner_preference,
-                                                      sizeof(corner_preference)));
 }
 
 bool AppWindow::refuse_during_frame(const char* what) const {

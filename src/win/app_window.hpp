@@ -67,10 +67,6 @@ public:
     void close();
     [[nodiscard]] bool maximized() const;
     void toggle_maximize();
-    // Whether the desktop rounds window corners — Windows 11 and later. False
-    // on the versions that square them, where rounding what is drawn inside
-    // would be the mismatch rather than the fix.
-    [[nodiscard]] bool rounds_windows() const { return rounds_windows_; }
 
     // Held for as long as a frame is being drawn. The reason every call above
     // has to be made from the loop rather than from anything drawing, and the
@@ -160,7 +156,6 @@ private:
     int           caption_height_ = 0;
     bool          caption_blocked_ = false;
     bool          frame_in_progress_ = false;
-    bool          rounds_windows_ = false;
     WINDOWPLACEMENT saved_placement_{};
     ResizeHandler  resize_handler_;
     CloseHandler   close_handler_;

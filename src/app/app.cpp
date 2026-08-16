@@ -52,11 +52,6 @@ constexpr const char* kWindowMenu = "##window-menu";
 // one home. This one is only ever a tick on a slider, so it stays here.
 constexpr int kUnityVolume = 100;
 
-// The corner Windows 11 cuts out of a window, which is what the composition
-// tree has to match. Not on the spacing scale: it is a measurement of the
-// desktop rather than a decision of this application's.
-constexpr float kWindowCornerRadius = 8.0f;
-
 // Idle time before the overlays start to go, and how long they take to cross.
 // Long enough that reaching for the volume does not race it. Shared by the
 // playback bar and the title strip: they are two edges of one frame, and an
@@ -285,10 +280,6 @@ bool App::initialize(std::string& error) {
         return false;
     }
     composition_.set_ui_content(ui_.swapchain());
-    // The window's first size never arrives as a resize — the handler for that
-    // is registered below, after the window already exists — so the corners are
-    // cut here rather than waiting for something to move.
-    update_window_corners(window_.width(), window_.height());
     presentation_ready_ = true;
 
     player::PlayerConfig config;
@@ -362,31 +353,6 @@ void App::handle_resize(int width, int height) {
     composition_.set_ui_content(ui_.swapchain());
     player_.set_composition_size(width, height);
     apply_vsr();
-    update_window_corners(width, height);
-}
-
-void App::update_window_corners(int width, int height) {
-    // Everything that changes the answer also changes the client size, so this
-    // rides on the resize rather than being watched for: maximising, restoring,
-    // entering and leaving fullscreen, and switching the frame all arrive here.
-    //
-    // A maximised or fullscreen window is not rounded by the desktop and must
-    // not be rounded here. Neither is anything on a Windows that squares its
-    // windows, which is what rounds_windows() reports.
-    const bool round = window_.rounds_windows() && !window_.maximized() &&
-                       !window_.fullscreen();
-    if (!round) {
-        composition_.set_corner_radius(width, height, 0.0f, 0.0f);
-        return;
-    }
-
-    const float radius = theme::scaled(kWindowCornerRadius);
-    // With the system caption in place the client area begins below it, so its
-    // top corners are square by construction and rounding them would cut a
-    // notch out of the middle of the window's edge. Only a minimal frame owns
-    // the corners it is drawing into.
-    const float top = window_.minimal_frame() ? radius : 0.0f;
-    composition_.set_corner_radius(width, height, top, radius);
 }
 
 void App::handle_display_change() {
@@ -496,9 +462,6 @@ bool App::rebuild_presentation() {
         return false;
     }
     composition_.set_ui_content(ui_.swapchain());
-    // The clip belonged to the tree that was just destroyed, and the rebuilt
-    // one is square until told otherwise.
-    update_window_corners(window_.width(), window_.height());
 
     presentation_ready_ = true;
     ++presentation_rebuilds_;
