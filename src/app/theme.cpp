@@ -342,18 +342,9 @@ void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_ri
 }
 
 void draw_title_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade) {
-    // The playback bar's scrim standing on its head — the same material, so the
-    // two edges of the window read as one frame — but in two stops rather than
-    // one, so the density is under the controls instead of spread evenly down a
-    // band most of which has nothing in it.
-    //
-    // What it does not have is an edge. Against a dark picture this shows
-    // nothing at all, and no amount of black fixes that; the icons are what say
-    // the strip is there, which is the same thing every window on the desktop
-    // relies on. A line would read on any content, and was tried — but this band
-    // stops at the channel list rather than at the window, so it terminated in
-    // mid-air whenever the list was open. Chrome that draws attention to its own
-    // geometry over a picture is the thing this interface keeps not doing.
+    // The playback bar's scrim on its head, so the two edges of the window read
+    // as one material, but in two stops — see kTitleScrimMid for the bend and
+    // for why this band deliberately has no edge.
     const ImU32 solid = with_alpha(kOverlayScrimBottom, fade);
     const ImU32 mid   = with_alpha(kTitleScrimMid, fade);
     const ImU32 clear = with_alpha(kOverlayScrimTop, fade);

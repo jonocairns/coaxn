@@ -392,11 +392,9 @@ bool AppWindow::refuse_during_frame(const char* what) const {
         return false;
     }
 
-    // Dropped rather than carried out. Going ahead is the crash this exists to
-    // name, and the two outcomes are not comparable: a window command that
-    // quietly does nothing is a bug report with a log line pointing straight at
-    // the cause, and one that goes ahead is an afternoon spent on a stack that
-    // does not mention the menu item that started it.
+    // Dropped rather than carried out: a command that does nothing is a bug
+    // report with a log line pointing at the cause, and one that goes ahead is
+    // a crash whose stack does not mention the menu item that started it.
     log::error("{} was requested while a frame was being drawn, and has been ignored. "
                "Window changes belong to the loop — leave the request for "
                "App::apply_pending_window_changes rather than calling from a draw path.",
@@ -429,25 +427,15 @@ LRESULT AppWindow::hit_test(HWND window, POINT screen) const {
     const bool in_caption =
         caption_height_ > 0 && screen.y < bounds.top + caption_height_;
 
-    // The window controls sit hard against the top-right corner, which is also
-    // where the corner grab is. Tested at full width the border wins and the
-    // outer pixels of close resize the window instead of closing it; given away
-    // entirely, a restored window cannot be resized from the length of edge the
-    // controls occupy. So over a control the band narrows rather than going:
-    // enough to still be reached deliberately at the very edge, not enough to
-    // intercept a click aimed at the button. It is the compromise Windows makes
-    // with its own caption buttons, which keep a few pixels of resize along
-    // their top edge and no more.
-    //
-    // Nothing to reconcile when maximised: there are no resize edges then, so
-    // the buttons already own the corner outright — which is the case the
-    // corner matters in, because that is when it is the *screen's* corner and
-    // the pointer stops dead in it.
+    // The controls sit hard against the top-right corner, which is also the
+    // corner grab. At full width the border wins and the outer pixels of close
+    // resize instead of closing; given away entirely, the edge those controls
+    // occupy stops resizing at all. So over a control the band narrows — the
+    // compromise Windows makes with its own caption buttons.
     //
     // Confined to the strip rather than granted wherever the interface wants
-    // the pointer. The channel list reaches the window's left edge, and a rule
-    // that let any hovered item narrow the border would leave that whole edge
-    // hard to grab whenever the pointer was over a row.
+    // the pointer: the channel list reaches the window's left edge, and a rule
+    // keyed on any hovered item would make that whole edge hard to grab.
     const bool over_control = in_caption && caption_blocked_;
 
     // A maximised window has no resize edges — restoring it is what a drag on

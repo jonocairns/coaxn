@@ -1678,13 +1678,12 @@ void App::draw_title_bar() {
 
     // Square on the strip's own height, so the row of them is the strip rather
     // than something floating in it. Close is outermost, in the order Windows
-    // has put these in for thirty years — this is not the place to be original.
+    // has put these in for thirty years — not the place to be original.
     //
-    // Hard against the corner, with no inset of any kind. The pointer stops at
-    // the edge of the screen, so a maximised window's corner catches a throw
-    // from anywhere on the desktop and costs no aim at all; a few pixels of
-    // margin turn the easiest target on the display into one that has to be
-    // hit. Every window manager puts close in the corner for this reason.
+    // Hard against the corner, no inset. The pointer stops at the edge of the
+    // screen, so a maximised window's corner catches a throw from anywhere on
+    // the desktop; a few pixels of margin turn the easiest target on the
+    // display into one that has to be aimed at.
     const float row    = height;
     float       cursor = corner.x - row * 3.0f;
 
@@ -1769,20 +1768,13 @@ void App::draw_window_surface() {
         ImGui::OpenPopup(kWindowMenu);
     }
 
-    // Double click on the picture toggles fullscreen, which is what a video
-    // player does and the only way out that does not need a key or a menu.
+    // Double click on the picture toggles fullscreen. Scoped by asking whether
+    // *this* surface is under the pointer rather than by testing regions: it is
+    // submitted behind everything, so it is hovered exactly where no panel, bar
+    // or popup reaches, and stays so as those come and go.
     //
-    // Scoped by asking whether *this* surface is the one under the pointer
-    // rather than by testing regions. It is submitted behind everything, so it
-    // is hovered only where no panel, bar or popup reaches — which is exactly
-    // the picture, and it stays exactly the picture as those surfaces come and
-    // go. A double click on the channel list or the playback controls belongs
-    // to them.
-    //
-    // The strip along the top is not reached here at all: outside fullscreen it
-    // is HTCAPTION, so Windows takes the double click and maximises, which is
-    // what a title bar has always done with one. In fullscreen there is no
-    // strip, and the gesture means the one thing left to want.
+    // The strip is never reached here — outside fullscreen it is HTCAPTION, so
+    // Windows takes the double click and maximises, as a title bar should.
     if (ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         pending_fullscreen_ = !window_.fullscreen();
     }
@@ -2159,10 +2151,7 @@ void App::draw_frame() {
         return;
     }
 
-    // Everything below this point is drawing, and nothing drawing may change
-    // the window: doing so delivers WM_SIZE synchronously and re-enters this
-    // function. The guard makes that refusable rather than fatal — see the
-    // pending_ fields, which are how a surface asks for it instead.
+    // Everything below is drawing, and nothing drawing may change the window.
     const win::AppWindow::FrameScope frame_scope(window_);
 
     ui_.begin_frame();

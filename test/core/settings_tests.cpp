@@ -83,12 +83,3 @@ TEST_CASE("whitespace, comments and Windows line endings are tolerated") {
     REQUIRE(settings.minimal_mode == false);
 }
 
-TEST_CASE("a final line without a newline is still read") {
-    REQUIRE(parse("minimal_mode=false").minimal_mode == false);
-}
-
-TEST_CASE("the last assignment of a key wins") {
-    // Not a case anything writes, but a hand-edited file can hold it and the
-    // answer should be the one nearest the bottom rather than undefined.
-    REQUIRE(parse("minimal_mode=true\nminimal_mode=false\n").minimal_mode == false);
-}

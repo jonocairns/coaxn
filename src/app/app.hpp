@@ -164,17 +164,8 @@ private:
     core::Settings settings_;
 
     // Window changes the interface has asked for, held until the turn ends.
-    //
-    // Every one of these resizes the client area, and the SetWindowPos that
-    // does it delivers WM_SIZE *synchronously* — from which the window
-    // procedure draws a frame, because a resize drag owns the thread and would
-    // otherwise show a stretched copy of the last one. Applied from a menu item
-    // that is itself being drawn, that is a frame begun inside a frame and a
-    // render target rebuilt under a live draw list.
-    //
-    // So the rule is that nothing drawing a frame touches the window: it leaves
-    // the request here and the loop makes the call, where the WM_SIZE that
-    // follows draws an ordinary frame like any other.
+    // Nothing drawing a frame may touch the window; see win::AppWindow's
+    // FrameScope for why. Drained by apply_pending_window_changes.
     std::optional<bool> pending_minimal_frame_;
     std::optional<bool> pending_fullscreen_;
     bool                pending_minimize_ = false;

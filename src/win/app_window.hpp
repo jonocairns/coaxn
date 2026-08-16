@@ -68,25 +68,22 @@ public:
     [[nodiscard]] bool maximized() const;
     void toggle_maximize();
 
-    // Held for as long as a frame is being drawn.
+    // Held for as long as a frame is being drawn. The reason every call above
+    // has to be made from the loop rather than from anything drawing, and the
+    // only place that reason is written down.
     //
-    // Every call above resizes the client area, and Windows delivers WM_SIZE
-    // for that synchronously — from which this class draws, because a resize
-    // drag owns the thread and the picture would otherwise stretch for the
-    // length of the gesture. Called while a frame is already in progress, that
-    // is a frame begun inside a frame and a render target rebuilt under a live
-    // draw list. The UI toolkit checks for exactly this and the check is
-    // compiled out of release builds, so the result is a crash with nothing to
-    // read.
+    // They all resize the client area, and the SetWindowPos that does it
+    // delivers WM_SIZE synchronously — from which this class draws, because a
+    // resize drag owns the thread and the picture would otherwise stretch for
+    // the length of the gesture. Called mid-frame that is a frame begun inside
+    // a frame and a render target rebuilt under a live draw list. ImGui checks
+    // for exactly this and the check is compiled out of release builds, so the
+    // result is a crash with nothing to read.
     //
-    // Window changes therefore belong to the loop, not to anything drawing:
-    // see App::apply_pending_window_changes. This makes the rule enforceable
-    // rather than advisory — a call made from the wrong place is refused and
-    // says so, instead of taking the process with it.
-    //
-    // Scoped rather than a pair of calls, for the same reason ScopedStyle is:
-    // a return added to the draw path later would leave the flag raised and
-    // turn every window command after it into a refusal.
+    // Hence the refusal: a call from the wrong place is dropped and logged
+    // instead of taking the process with it. Scoped rather than paired calls
+    // for the same reason ScopedStyle is — a return added to the draw path
+    // later would leave the flag raised and refuse everything after it.
     class FrameScope {
     public:
         explicit FrameScope(AppWindow& window) : window_(window) {

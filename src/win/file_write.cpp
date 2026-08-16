@@ -21,24 +21,15 @@ bool write_file_atomically(const std::wstring& path, std::string_view bytes,
     const bool ok = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()),
                               &written, nullptr) &&
                     written == bytes.size();
-    // Read before CloseHandle. The last-error value belongs to the thread rather
-    // than to the call, and a *successful* close is free to overwrite it — so
-    // asking afterwards reports whatever happened last instead of what went
-    // wrong. Zero when the write itself succeeded but came up short, which is
-    // the honest answer: nothing failed, it just did not all arrive.
+    // Read before CloseHandle: the last-error value belongs to the thread, and
+    // a *successful* close is free to overwrite it. Zero for a short write,
+    // which is honest — nothing failed, it just did not all arrive.
     const DWORD write_error = ok ? ERROR_SUCCESS : GetLastError();
 
-    // Before the rename, not after. The rename orders the directory entry; it
-    // says nothing about whether the bytes it now points at have reached the
-    // disk. Without this the atomic replace is still atomic and can still leave
-    // an empty file after a power cut.
-    //
-    // And it has to be answered for. A flush that fails has not committed
-    // anything, so renaming over the destination anyway would trade a file that
-    // is definitely good for one that might be — which is the outcome this
-    // function exists to make impossible, arrived at from the other direction.
-    // Same reason as the write error above for reading it here: CloseHandle is
-    // free to overwrite the thread's last-error on its way out.
+    // Before the rename, which orders the directory entry and says nothing
+    // about whether the bytes it points at have reached the disk. And answered
+    // for: a flush that failed has committed nothing, so renaming anyway trades
+    // a file that is definitely good for one that might be.
     const bool  flushed     = ok && FlushFileBuffers(file);
     const DWORD flush_error = (ok && !flushed) ? GetLastError() : ERROR_SUCCESS;
 
