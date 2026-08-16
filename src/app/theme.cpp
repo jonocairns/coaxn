@@ -342,13 +342,22 @@ void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_ri
 }
 
 void draw_title_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade) {
-    // The same two colours, swapped. Not a second palette entry: this is the
-    // playback bar's scrim standing on its head, and the two reading as one
-    // material is the point — a window whose top and bottom edges darkened
-    // differently would look like two overlays rather than one frame.
+    // The playback bar's scrim standing on its head — the same material, so the
+    // two edges of the window read as one frame — but landing on kTitleScrimEdge
+    // rather than on nothing, so the band has a bottom.
     const ImU32 solid = with_alpha(kOverlayScrimBottom, fade);
-    const ImU32 clear = with_alpha(kOverlayScrimTop, fade);
-    draw_list->AddRectFilledMultiColor(top_left, bottom_right, solid, solid, clear, clear);
+    const ImU32 edge  = with_alpha(kTitleScrimEdge, fade);
+    draw_list->AddRectFilledMultiColor(top_left, bottom_right, solid, solid, edge, edge);
+
+    // The rule that does the work. Everything above it is black over whatever
+    // is playing, which against a dark picture is indistinguishable from the
+    // picture — the strip could be drawn at full opacity and still show
+    // nothing. One light line is what makes the region findable on any content,
+    // and it is drawn inside the band so the strip owns every pixel it claims.
+    const float thickness = scaled(kStrokeHairline);
+    const float y         = bottom_right.y - thickness * 0.5f;
+    draw_list->AddLine(ImVec2(top_left.x, y), ImVec2(bottom_right.x, y),
+                       with_alpha(kTitleScrimRule, fade), thickness);
 }
 
 namespace {

@@ -114,6 +114,19 @@ inline constexpr ImU32 kLogoBody = IM_COL32(0xA9, 0xB3, 0xC9, 0xFF);  // 9.3:1
 inline constexpr ImU32 kOverlayScrimTop    = IM_COL32(0x00, 0x00, 0x00, 0x00);
 inline constexpr ImU32 kOverlayScrimBottom = IM_COL32(0x00, 0x00, 0x00, 0xD9);
 
+// The title strip does not ramp to nothing at its inner edge the way the
+// playback bar does. The two are answering different questions: the bar is a
+// wash that keeps text legible over a picture, and reaching nothing is what
+// stops it reading as a box drawn across the frame. The strip has to say where
+// it *ends*, because it is a region to be dragged, and an edge needs something
+// to be the edge of. So the ramp stops here instead.
+inline constexpr ImU32 kTitleScrimEdge = IM_COL32(0x00, 0x00, 0x00, 0x59);
+// And the rule along it. Light rather than dark, which is the whole point: the
+// picture behind may be black, and darkening black shows nothing at any alpha.
+// This is the only part of either overlay that is guaranteed to be visible
+// whatever is playing underneath it.
+inline constexpr ImU32 kTitleScrimRule = IM_COL32(0xFF, 0xFF, 0xFF, 0x2B);
+
 // Frameless controls. An icon carries its own state — brighter under the
 // pointer, over a wash while it is held — because a filled button behind every
 // glyph is more chrome than the row it controls.
