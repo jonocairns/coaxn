@@ -1733,13 +1733,13 @@ void App::persist_volume() {
     win::SettingsStore::save(settings_);
 }
 
-void App::draw_window_menu() {
+void App::draw_window_surface() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
 
     // A surface covering the whole viewport, submitted before anything else and
     // kept at the back. It draws nothing: it exists to be the window the popup
-    // belongs to, in every stage including the login screen, and to be present
-    // over the video where no other surface reaches.
+    // belongs to, in every stage including the login screen, and to be the thing
+    // under the pointer wherever no other surface reaches.
     ImGui::SetNextWindowPos(viewport->Pos);
     ImGui::SetNextWindowSize(viewport->Size);
 
@@ -1774,6 +1774,24 @@ void App::draw_window_menu() {
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
         !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
         ImGui::OpenPopup(kWindowMenu);
+    }
+
+    // Double click on the picture toggles fullscreen, which is what a video
+    // player does and the only way out that does not need a key or a menu.
+    //
+    // Scoped by asking whether *this* surface is the one under the pointer
+    // rather than by testing regions. It is submitted behind everything, so it
+    // is hovered only where no panel, bar or popup reaches — which is exactly
+    // the picture, and it stays exactly the picture as those surfaces come and
+    // go. A double click on the channel list or the playback controls belongs
+    // to them.
+    //
+    // The strip along the top is not reached here at all: outside fullscreen it
+    // is HTCAPTION, so Windows takes the double click and maximises, which is
+    // what a title bar has always done with one. In fullscreen there is no
+    // strip, and the gesture means the one thing left to want.
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        pending_fullscreen_ = !window_.fullscreen();
     }
 
     {
@@ -2181,9 +2199,9 @@ void App::draw_frame() {
         theme::draw_backdrop();
     }
 
-    // First, so the surface carrying the right-click menu sits behind every
-    // panel drawn below rather than over them.
-    draw_window_menu();
+    // First, so the surface carrying the window's own gestures sits behind
+    // every panel drawn below rather than over them.
+    draw_window_surface();
 
     switch (stage_) {
         case Stage::Login:

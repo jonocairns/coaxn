@@ -59,9 +59,11 @@ private:
     void draw_title_bar();
     void draw_update_banner();
     void draw_diagnostics();
-    // The right-click menu, and the surface that catches the click for it.
-    // Submitted before every other surface so it stays behind them.
-    void draw_window_menu();
+    // The surface that owns the gestures belonging to the window rather than to
+    // anything in it: right click for the menu, double click for fullscreen.
+    // Submitted before every other surface, so it stays behind them and is
+    // hovered only where none of them reaches.
+    void draw_window_surface();
     // Tells the window how much of its top edge is a drag strip and whether the
     // interface currently wants the clicks in it. Last thing in the frame, once
     // every surface has been submitted and hover is known.
