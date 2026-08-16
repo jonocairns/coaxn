@@ -109,6 +109,9 @@ private:
     void toggle_playback();
     void apply_vsr();
     void handle_resize(int width, int height);
+    // Matches what the composition tree draws to the corners the desktop cuts
+    // out of the window around it.
+    void update_window_corners(int width, int height);
     void handle_display_change();
     void update_playback_power();
     void update_playback_power(const core::SupervisorState& state);

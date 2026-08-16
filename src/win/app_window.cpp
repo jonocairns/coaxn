@@ -385,6 +385,16 @@ void AppWindow::apply_frame_appearance() {
     // application rather than as a line drawn on top of it.
     const COLORREF border = RGB(0x04, 0x06, 0x0A);
     DwmSetWindowAttribute(window_, 34, &border, sizeof(border));
+
+    // 33 is DWMWA_WINDOW_CORNER_PREFERENCE and 2 is DWMWCP_ROUND. Stating the
+    // default rather than changing it — but the call itself is the useful part,
+    // because it is only understood by the Windows versions that round windows
+    // at all. Whether it succeeded is how the composition tree knows whether to
+    // round what it draws: matching a corner the desktop does not cut would be
+    // as wrong as leaving one it does.
+    const DWORD corner_preference = 2;
+    rounds_windows_ = SUCCEEDED(DwmSetWindowAttribute(window_, 33, &corner_preference,
+                                                      sizeof(corner_preference)));
 }
 
 bool AppWindow::refuse_during_frame(const char* what) const {
