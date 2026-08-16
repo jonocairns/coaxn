@@ -1667,14 +1667,14 @@ void App::draw_title_bar() {
                      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse);
 
-    ImDrawList*  draw   = ImGui::GetWindowDrawList();
     const ImVec2 origin = ImGui::GetWindowPos();
     const ImVec2 corner(origin.x + width, origin.y + height);
 
-    // The band itself, and the whole reason for the reveal. Three icons in a
-    // corner say where the buttons are; this says where the title bar is, which
-    // is the part with no other way of being found.
-    theme::draw_title_scrim(draw, origin, corner, fade);
+    // Nothing is drawn behind the controls. A band over the picture was tried
+    // twice — flat with a rule along its edge, then a bend with none — and both
+    // read as chrome asserting itself over the video rather than as a frame.
+    // The icons are the whole of the reveal: the region beside a set of window
+    // buttons is somewhere every desktop reader has already been taught to look.
 
     // Square on the strip's own height, so the row of them is the strip rather
     // than something floating in it. Close is outermost, in the order Windows

@@ -341,21 +341,6 @@ void draw_overlay_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_ri
     draw_list->AddRectFilledMultiColor(top_left, bottom_right, top, top, bottom, bottom);
 }
 
-void draw_title_scrim(ImDrawList* draw_list, ImVec2 top_left, ImVec2 bottom_right, float fade) {
-    // The playback bar's scrim on its head, so the two edges of the window read
-    // as one material, but in two stops — see kTitleScrimMid for the bend and
-    // for why this band deliberately has no edge.
-    const ImU32 solid = with_alpha(kOverlayScrimBottom, fade);
-    const ImU32 mid   = with_alpha(kTitleScrimMid, fade);
-    const ImU32 clear = with_alpha(kOverlayScrimTop, fade);
-
-    const float knee = top_left.y + (bottom_right.y - top_left.y) * kTitleScrimKnee;
-    draw_list->AddRectFilledMultiColor(top_left, ImVec2(bottom_right.x, knee),
-                                       solid, solid, mid, mid);
-    draw_list->AddRectFilledMultiColor(ImVec2(top_left.x, knee), bottom_right,
-                                       mid, mid, clear, clear);
-}
-
 namespace {
 
 // Proportions of the mark, as fractions of its radius. scripts/make-icon.py
