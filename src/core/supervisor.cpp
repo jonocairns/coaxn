@@ -32,6 +32,7 @@ SupervisorReduction settle(const SupervisorState& previous, SupervisorState next
         .load_intent = next.load_intent,
         .escalation = RecoveryEscalation::None,
         .outcome = RecoveryOutcome::None,
+        .recovery_plan = next.recovery_plan,
         .last_progress_to_decision = std::nullopt,
         .decision_to_command = std::nullopt,
         .command_to_first_frame = std::nullopt,
@@ -69,11 +70,12 @@ SupervisorReduction terminal(const SupervisorState& state,
     next.name = SupervisorStateName::Failed;
     next.pending_load_attempt.reset();
     next.pending_load_intent.reset();
-    next.recovery.reset();
+    next.recovery_plan.reset();
     next.recovery_started_at = recovery_started_at;
     next.late_completion_available = late_completion_available;
     next.late_completion_probation = false;
     auto result = settle(state, next, to_string(failure), now, policy);
+    result.transition->recovery_plan = state.recovery_plan;
     result.transition->outcome = RecoveryOutcome::TerminalFailure;
     result.transition->first_frame_to_outcome =
         elapsed_between(state.first_frame_at, now);
@@ -81,7 +83,9 @@ SupervisorReduction terminal(const SupervisorState& state,
         result.transition->recovered_load_lifetime =
             elapsed_between(state.load_command_at, now);
     }
-    if (state.short_load_recreation_used ||
+    if ((state.recovery_plan &&
+         state.recovery_plan->mechanism == RecoveryAction::RecreatePlayer) ||
+        state.short_load_recreation_used ||
         state.load_intent == LoadIntent::PlayerRecreation) {
         result.transition->escalation = RecoveryEscalation::PlayerRecreation;
     } else if (recovery_started_at ||
@@ -157,6 +161,28 @@ RecoveryEscalation escalation_for(RecoveryAction action) {
         ? RecoveryEscalation::PlayerRecreation : RecoveryEscalation::SourceReopen;
 }
 
+bool has_recreation_authority(const RecoveryPlan& plan,
+                              RecreationAuthority authority) {
+    return plan.recreation && plan.recreation->authority == authority;
+}
+
+bool has_recreation_provenance(const RecoveryPlan& plan,
+                               RecreationProvenance provenance) {
+    return plan.recreation && plan.recreation->provenance == provenance;
+}
+
+RecoveryPlan scheduled_source_plan(RecoveryAction mechanism) {
+    assert(mechanism != RecoveryAction::RecreatePlayer);
+    return {mechanism, std::nullopt, RecoveryEffectStatus::Scheduled};
+}
+
+RecoveryPlan scheduled_recreation_plan(RecreationAuthority authority,
+                                       RecreationProvenance provenance) {
+    return {RecoveryAction::RecreatePlayer,
+            RecreationDetails{authority, provenance},
+            RecoveryEffectStatus::Scheduled};
+}
+
 std::optional<Duration> elapsed_between(std::optional<TimePoint> earlier, TimePoint later) {
     return earlier
         ? std::optional<Duration>{std::max(Duration::zero(), later - *earlier)}
@@ -164,16 +190,35 @@ std::optional<Duration> elapsed_between(std::optional<TimePoint> earlier, TimePo
 }
 
 SupervisorReduction recover(const SupervisorState& state, DetectionReason detection,
-                            RecoveryAction action, TimePoint now,
+                            RecoveryPlan plan, TimePoint now,
                             const RecoveryPolicy& policy) {
-    // Repeated load faults cannot spend another attempt while their retry is
-    // already waiting. A backend/presentation fault is different: reopening a
-    // source cannot repair a dead mpv instance or presentation device, so it
-    // may upgrade a weaker pending action to recreation. Once recreation is
-    // pending, later duplicates collapse as usual.
+    assert(plan.status == RecoveryEffectStatus::Scheduled);
+    assert((plan.mechanism == RecoveryAction::RecreatePlayer) ==
+           plan.recreation.has_value());
+    // Mandatory evidence over a heuristic recreation upgrades only authority:
+    // it retains the plan's short-load provenance, attempt, identity and due
+    // time because the same recreation effect will satisfy both reasons.
+    const bool upgrades_recreation_authority =
+        state.name == SupervisorStateName::Recovering &&
+        state.recovery_plan &&
+        state.recovery_plan->mechanism == RecoveryAction::RecreatePlayer &&
+        has_recreation_authority(*state.recovery_plan,
+                                 RecreationAuthority::HeuristicShortLoad) &&
+        has_recreation_authority(plan, RecreationAuthority::Mandatory);
+    if (upgrades_recreation_authority) {
+        auto next = state;
+        next.detection = detection;
+        next.recovery_plan->recreation->authority = RecreationAuthority::Mandatory;
+        auto result = settle(state, next, to_string(detection), now, policy);
+        result.transition->escalation = RecoveryEscalation::PlayerRecreation;
+        result.transition->outcome = state.recovery_started_at
+            ? RecoveryOutcome::RenewedStall : RecoveryOutcome::FaultDecided;
+        return result;
+    }
     const bool upgrades_pending_recovery = state.name == SupervisorStateName::Recovering &&
-        action == RecoveryAction::RecreatePlayer &&
-        state.recovery != RecoveryAction::RecreatePlayer;
+        plan.mechanism == RecoveryAction::RecreatePlayer &&
+        state.recovery_plan &&
+        state.recovery_plan->mechanism != RecoveryAction::RecreatePlayer;
     if (state.name == SupervisorStateName::Idle || state.name == SupervisorStateName::Failed ||
         (state.name == SupervisorStateName::Recovering && !upgrades_pending_recovery)) {
         return ignore(state);
@@ -183,10 +228,14 @@ SupervisorReduction recover(const SupervisorState& state, DetectionReason detect
         return terminal(state, detection, FailureReason::AttemptsExhausted, started, now, policy);
     }
     const TimePoint retry_at = now + policy.attempt_delays[state.attempt];
-    if (retry_at > started + policy.wall_clock_budget) {
+    if (retry_at > started + policy.command_admission_budget) {
         return terminal(state, detection, FailureReason::BudgetExpired, started, now, policy);
     }
     auto next = state;
+    // Mandatory evidence over a weaker mechanism needs a new recreation
+    // command. If that weaker command was already emitted, fence its settlement
+    // with a newer identity; this path intentionally spends an attempt and
+    // derives a new deadline, unlike the authority-only upgrade above.
     if (upgrades_pending_recovery && state.pending_load_attempt) {
         // The weaker effect has already been emitted and may have reached mpv.
         // Stop accepting its settlement, but do not reuse its load identity:
@@ -208,8 +257,9 @@ SupervisorReduction recover(const SupervisorState& state, DetectionReason detect
     }
     if (short_reopen && !state.short_load_recreation_used &&
         next.short_recovery_load_failures >= policy.short_reopens_before_recreation) {
-        action = RecoveryAction::RecreatePlayer;
-        next.short_load_recreation_used = true;
+        plan = scheduled_recreation_plan(
+            RecreationAuthority::HeuristicShortLoad,
+            RecreationProvenance::HeuristicShortLoad);
     }
     ++next.attempt;
     next.deadlines = {.retry_at = retry_at, .steady_at = std::nullopt};
@@ -218,12 +268,12 @@ SupervisorReduction recover(const SupervisorState& state, DetectionReason detect
     next.first_frame_at.reset();
     next.fault_decided_at = now;
     next.name = SupervisorStateName::Recovering;
-    next.recovery = action;
+    next.recovery_plan = plan;
     next.recovery_started_at = started;
     next.late_completion_available = false;
     next.late_completion_probation = false;
     auto result = settle(state, next, to_string(detection), now, policy);
-    result.transition->escalation = escalation_for(action);
+    result.transition->escalation = escalation_for(plan.mechanism);
     result.transition->last_progress_to_decision =
         elapsed_between(state.last_forward_progress_at, now);
     result.transition->first_frame_to_outcome = elapsed_between(state.first_frame_at, now);
@@ -262,7 +312,7 @@ SupervisorReduction reduce_deadline(const SupervisorState& state, TimePoint now,
         next.deadlines = {};
         next.detection.reset();
         next.name = SupervisorStateName::Steady;
-        next.recovery.reset();
+        next.recovery_plan.reset();
         next.recovery_started_at.reset();
         next.fault_decided_at.reset();
         next.first_frame_at.reset();
@@ -285,24 +335,33 @@ SupervisorReduction reduce_deadline(const SupervisorState& state, TimePoint now,
         return result;
     }
     if (state.name == SupervisorStateName::Recovering && state.deadlines.retry_at &&
-        now >= *state.deadlines.retry_at && state.recovery) {
+        now >= *state.deadlines.retry_at && state.recovery_plan) {
         if (state.recovery_started_at &&
-            now > *state.recovery_started_at + policy.wall_clock_budget) {
+            now > *state.recovery_started_at + policy.command_admission_budget) {
             return terminal(state, state.detection, FailureReason::BudgetExpired,
                             state.recovery_started_at, now, policy);
         }
         auto next = state;
         next.deadlines = {};
+        next.recovery_plan->status = RecoveryEffectStatus::Issued;
         next.pending_load_attempt = state.pending_load_attempt.value_or(
             LoadAttempt{state.load_attempt.value() + 1});
-        next.pending_load_intent = *state.recovery == RecoveryAction::RecreatePlayer
+        next.pending_load_intent = state.recovery_plan->mechanism ==
+                RecoveryAction::RecreatePlayer
             ? LoadIntent::PlayerRecreation : LoadIntent::RecoveryReopen;
+        if (state.recovery_plan->mechanism == RecoveryAction::RecreatePlayer &&
+            has_recreation_provenance(
+                *state.recovery_plan,
+                RecreationProvenance::HeuristicShortLoad)) {
+            next.short_load_recreation_used = true;
+        }
         auto result = settle(state, next, "recovery-attempt-started", now, policy,
                              {{state.generation, *next.pending_load_attempt,
-                               effect_payload(*state.recovery)}});
+                               effect_payload(state.recovery_plan->mechanism)}});
         result.transition->load_attempt = *next.pending_load_attempt;
         result.transition->load_intent = *next.pending_load_intent;
-        result.transition->escalation = escalation_for(*state.recovery);
+        result.transition->escalation = escalation_for(
+            state.recovery_plan->mechanism);
         return result;
     }
     return ignore(state);
@@ -321,6 +380,16 @@ bool supervisor_deadlines_valid(const SupervisorState& state) {
     if (state.deadlines.retry_at && state.deadlines.steady_at) return false;
     if (state.deadlines.retry_at && state.name != SupervisorStateName::Recovering) return false;
     if (state.deadlines.steady_at && state.name != SupervisorStateName::Zap) return false;
+    if (!state.recovery_plan) return true;
+    if ((state.recovery_plan->mechanism == RecoveryAction::RecreatePlayer) !=
+        state.recovery_plan->recreation.has_value()) return false;
+    if (state.recovery_plan->recreation &&
+        state.recovery_plan->recreation->authority ==
+            RecreationAuthority::HeuristicShortLoad &&
+        state.recovery_plan->recreation->provenance !=
+            RecreationProvenance::HeuristicShortLoad) {
+        return false;
+    }
     return true;
 }
 
@@ -428,15 +497,27 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
             if (value.load_attempt != state.load_attempt) return ignore(state);
             const bool normal_first_frame = state.name == SupervisorStateName::Zap &&
                 !state.first_frame_at;
+            const bool scheduled_unissued =
+                state.recovery_plan &&
+                state.recovery_plan->status == RecoveryEffectStatus::Scheduled &&
+                state.deadlines.retry_at && !state.pending_load_attempt;
             const bool cancels_opening_retry =
                 state.name == SupervisorStateName::Recovering &&
-                state.detection == DetectionReason::OpenStall && state.recovery &&
-                source_reopen_action(*state.recovery) && state.deadlines.retry_at &&
-                !state.pending_load_attempt;
+                state.detection == DetectionReason::OpenStall && state.recovery_plan &&
+                source_reopen_action(state.recovery_plan->mechanism) && scheduled_unissued;
+            const bool cancels_heuristic_recreation =
+                state.name == SupervisorStateName::Recovering &&
+                state.recovery_plan &&
+                state.recovery_plan->mechanism == RecoveryAction::RecreatePlayer &&
+                has_recreation_authority(
+                    *state.recovery_plan,
+                    RecreationAuthority::HeuristicShortLoad) &&
+                scheduled_unissued;
             const bool revives_failed_current_load =
                 state.name == SupervisorStateName::Failed &&
                 state.late_completion_available;
             if (!normal_first_frame && !cancels_opening_retry &&
+                !cancels_heuristic_recreation &&
                 !revives_failed_current_load) return ignore(state);
             auto next = state;
             next.deadlines = {.retry_at = std::nullopt,
@@ -452,18 +533,24 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
             next.failure.reset();
             next.pending_load_attempt.reset();
             next.pending_load_intent.reset();
-            next.recovery.reset();
+            next.recovery_plan.reset();
             next.late_completion_available = false;
             next.late_completion_probation = revives_failed_current_load;
-            const bool late = cancels_opening_retry || revives_failed_current_load;
+            const bool late = cancels_opening_retry || cancels_heuristic_recreation ||
+                revives_failed_current_load;
             auto result = settle(
                 state, next,
                 revives_failed_current_load
                     ? "late-first-frame-after-command-exhaustion"
-                    : (cancels_opening_retry
-                           ? "first-frame-cancelled-opening-retry"
-                           : "first-frame"),
+                    : (cancels_heuristic_recreation
+                           ? "first-frame-cancelled-heuristic-recreation"
+                           : (cancels_opening_retry
+                                  ? "first-frame-cancelled-opening-retry"
+                                  : "first-frame")),
                 now, policy);
+            if (state.recovery_plan) {
+                result.transition->recovery_plan = state.recovery_plan;
+            }
             result.transition->outcome = late ? RecoveryOutcome::LateFirstFrame
                                               : RecoveryOutcome::FirstFrame;
             result.transition->command_to_first_frame =
@@ -475,20 +562,23 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
             return result;
         } else if constexpr (std::is_same_v<T, DecodeStalled>) {
             if (value.load_attempt != state.load_attempt) return ignore(state);
-            return recover(state, DetectionReason::DecodeStall, reopen_action(state), now, policy);
+            return recover(state, DetectionReason::DecodeStall,
+                           scheduled_source_plan(reopen_action(state)), now, policy);
         } else if constexpr (std::is_same_v<T, PlaybackStalled>) {
             if (value.load_attempt != state.load_attempt) return ignore(state);
             const DetectionReason detection = value.stall == StallKind::Cache
                 ? DetectionReason::CacheStall
                 : (value.stall == StallKind::Open ? DetectionReason::OpenStall
                                                   : DetectionReason::ProgressStall);
-            return recover(state, detection, reopen_action(state), now, policy);
+            return recover(state, detection,
+                           scheduled_source_plan(reopen_action(state)), now, policy);
         } else if constexpr (std::is_same_v<T, TimelineRegressed>) {
             if (value.load_attempt != state.load_attempt ||
                 state.name != SupervisorStateName::Steady ||
                 state.transport != RecoveryTransport::MpegTs) return ignore(state);
             return recover(state, DetectionReason::TimelineRegression,
-                           RecoveryAction::ReopenStream, now, policy);
+                           scheduled_source_plan(RecoveryAction::ReopenStream),
+                           now, policy);
         } else if constexpr (std::is_same_v<T, IpcUnresponsive>) {
             if (value.load_attempt != state.load_attempt) return ignore(state);
             if (state.name == SupervisorStateName::Failed) {
@@ -496,7 +586,10 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
                     state, "failed-load-ipc-unresponsive", now, policy);
             }
             return recover(state, DetectionReason::IpcUnresponsive,
-                           RecoveryAction::RecreatePlayer, now, policy);
+                           scheduled_recreation_plan(
+                               RecreationAuthority::Mandatory,
+                               RecreationProvenance::MandatoryEvidence),
+                           now, policy);
         } else if constexpr (std::is_same_v<T, PresentationLost>) {
             // The surface is rebuilt by the platform adapter before this
             // arrives; what remains is a libmpv instance holding a dead D3D11
@@ -506,7 +599,10 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
                     state, "failed-load-presentation-lost", now, policy);
             }
             return recover(state, DetectionReason::PresentationDeviceLost,
-                           RecoveryAction::RecreatePlayer, now, policy);
+                           scheduled_recreation_plan(
+                               RecreationAuthority::Mandatory,
+                               RecreationProvenance::MandatoryEvidence),
+                           now, policy);
         } else if constexpr (std::is_same_v<T, ProcessExited>) {
             if (value.load_attempt != state.load_attempt) return ignore(state);
             if (state.name == SupervisorStateName::Failed) {
@@ -514,7 +610,10 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
                     state, "failed-load-process-exited", now, policy);
             }
             return recover(state, DetectionReason::ProcessExited,
-                           RecoveryAction::RecreatePlayer, now, policy);
+                           scheduled_recreation_plan(
+                               RecreationAuthority::Mandatory,
+                               RecreationProvenance::MandatoryEvidence),
+                           now, policy);
         } else if constexpr (std::is_same_v<T, StreamEnded>) {
             // An intentional stop owns Idle synchronously. Keep this guard in
             // the branch even though recover() also ignores Idle: stream-end is
@@ -530,7 +629,7 @@ SupervisorReduction reduce_supervisor_state(const SupervisorState& state,
             const RecoveryAction action =
                 value.failure_reason == TransportFailureReason::FormatProbeRequired
                     ? RecoveryAction::ReopenProbed : reopen_action(state);
-            return recover(state, detection, action, now, policy);
+            return recover(state, detection, scheduled_source_plan(action), now, policy);
         } else if constexpr (std::is_same_v<T, SourceFailed>) {
             const bool current = value.load_attempt == state.load_attempt;
             const bool pending = state.pending_load_attempt &&
@@ -634,6 +733,27 @@ const char* to_string(RecoveryAction value) {
         case RecoveryAction::RecreatePlayer: return "recreate-player";
     }
     return "reopen-stream";
+}
+const char* to_string(RecreationAuthority value) {
+    switch (value) {
+        case RecreationAuthority::HeuristicShortLoad: return "heuristic-short-load";
+        case RecreationAuthority::Mandatory: return "mandatory";
+    }
+    return "mandatory";
+}
+const char* to_string(RecreationProvenance value) {
+    switch (value) {
+        case RecreationProvenance::HeuristicShortLoad: return "heuristic-short-load";
+        case RecreationProvenance::MandatoryEvidence: return "mandatory-evidence";
+    }
+    return "mandatory-evidence";
+}
+const char* to_string(RecoveryEffectStatus value) {
+    switch (value) {
+        case RecoveryEffectStatus::Scheduled: return "scheduled";
+        case RecoveryEffectStatus::Issued: return "issued";
+    }
+    return "scheduled";
 }
 const char* to_string(RecoveryEscalation value) {
     switch (value) {

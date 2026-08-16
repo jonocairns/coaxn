@@ -272,6 +272,18 @@ std::string format_recovery_telemetry(
         ? to_string(evidence.engine_warning->component) : "none";
     const auto warning_category = evidence.engine_warning
         ? to_string(evidence.engine_warning->category) : "none";
+    const auto* recovery_plan = transition.recovery_plan
+        ? &*transition.recovery_plan : nullptr;
+    const auto* recreation = recovery_plan && recovery_plan->recreation
+        ? &*recovery_plan->recreation : nullptr;
+    const auto recovery_mechanism = recovery_plan
+        ? core::to_string(recovery_plan->mechanism) : "none";
+    const auto recreation_authority = recreation
+        ? core::to_string(recreation->authority) : "none";
+    const auto recreation_provenance = recreation
+        ? core::to_string(recreation->provenance) : "none";
+    const auto recovery_effect_status = recovery_plan
+        ? core::to_string(recovery_plan->status) : "none";
 
     std::ostringstream out;
     out << "Recovery telemetry provider-session=" << correlation.provider_session
@@ -280,6 +292,10 @@ std::string format_recovery_telemetry(
         << " load-attempt=" << transition.load_attempt.value()
         << " intent=" << core::to_string(transition.load_intent)
         << " supervisor-attempt=" << transition.attempt
+        << " mechanism=" << recovery_mechanism
+        << " authority=" << recreation_authority
+        << " provenance=" << recreation_provenance
+        << " effect-status=" << recovery_effect_status
         << " escalation=" << core::to_string(transition.escalation)
         << " outcome=" << core::to_string(transition.outcome)
         << " last-progress-to-decision="

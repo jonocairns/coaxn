@@ -149,6 +149,30 @@ TEST_CASE("timeline recovery confirms cache-relative lost ground on a later samp
     CHECK(*confirmed.live_gap_increase_seconds > 5.0);
 }
 
+TEST_CASE("captured split reset retains its arm persistence and recovery decision") {
+    player::TimelineRecovery recovery;
+    recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
+    (void)recovery.observe(timeline_observation(
+        0.0, 3000.0, 3004.0, 0.5, 0.5), true);
+
+    const auto armed = recovery.observe(timeline_observation(
+        0.5, 35.87, 48.13, -2964.130, -2955.870, false), true);
+    CHECK_FALSE(armed.recover);
+    CHECK(armed.outcome == player::TimelineRecoveryOutcome::CandidateArmed);
+
+    const auto recovered = recovery.observe(timeline_observation(
+        1.0, 2991.76, 3004.02, 2955.890, 2955.890), true);
+    CHECK(recovered.recover);
+    CHECK(recovered.outcome == player::TimelineRecoveryOutcome::Recover);
+    REQUIRE(recovered.live_gap_increase_seconds);
+    CHECK(*recovered.live_gap_increase_seconds > 8.0);
+
+    const auto normal = recovery.observe(timeline_observation(
+        1.5, 2992.26, 3004.52, 0.5, 0.5), true);
+    CHECK_FALSE(normal.recover);
+    CHECK(normal.outcome == player::TimelineRecoveryOutcome::None);
+}
+
 TEST_CASE("timeline recovery confirms a rewind with missing cache on one later sample") {
     player::TimelineRecovery recovery;
     recovery.begin_load(core::Generation{1}, core::LoadAttempt{1});
@@ -951,6 +975,9 @@ TEST_CASE("recovery telemetry is load scoped and cannot retain credentials") {
     transition.load_intent = core::LoadIntent::RecoveryReopen;
     transition.escalation = core::RecoveryEscalation::SourceReopen;
     transition.outcome = core::RecoveryOutcome::RenewedEof;
+    transition.recovery_plan = core::RecoveryPlan{
+        core::RecoveryAction::ReopenStream, std::nullopt,
+        core::RecoveryEffectStatus::Issued};
     transition.last_progress_to_decision = core::Duration{1.25};
     transition.decision_to_command = core::Duration{0.5};
     transition.command_to_first_frame = core::Duration{0.8};
@@ -973,6 +1000,10 @@ TEST_CASE("recovery telemetry is load scoped and cannot retain credentials") {
     CHECK(retained.find("generation=9") != std::string::npos);
     CHECK(retained.find("load-attempt=2") != std::string::npos);
     CHECK(retained.find("intent=recovery-reopen") != std::string::npos);
+    CHECK(retained.find("mechanism=reopen-stream") != std::string::npos);
+    CHECK(retained.find("authority=none") != std::string::npos);
+    CHECK(retained.find("provenance=none") != std::string::npos);
+    CHECK(retained.find("effect-status=issued") != std::string::npos);
     CHECK(retained.find("escalation=source-reopen") != std::string::npos);
     CHECK(retained.find("outcome=renewed-eof") != std::string::npos);
     CHECK(retained.find("last-progress-to-decision=1250ms") != std::string::npos);
@@ -981,10 +1012,27 @@ TEST_CASE("recovery telemetry is load scoped and cannot retain credentials") {
     CHECK(retained.find("first-frame-to-outcome=1100ms") != std::string::npos);
     CHECK(retained.find("recovered-load-lifetime=1900ms") != std::string::npos);
     CHECK(retained.find("warning-category=continuity-error") != std::string::npos);
+
+    auto heuristic = transition;
+    heuristic.recovery_plan = core::RecoveryPlan{
+        core::RecoveryAction::RecreatePlayer,
+        core::RecreationDetails{
+            core::RecreationAuthority::HeuristicShortLoad,
+            core::RecreationProvenance::HeuristicShortLoad},
+        core::RecoveryEffectStatus::Scheduled};
+    const std::string heuristic_retained =
+        player::format_recovery_telemetry(heuristic, shape, evidence);
+    CHECK(heuristic_retained.find("mechanism=recreate-player") != std::string::npos);
+    CHECK(heuristic_retained.find("authority=heuristic-short-load") !=
+          std::string::npos);
+    CHECK(heuristic_retained.find("provenance=heuristic-short-load") !=
+          std::string::npos);
+    CHECK(heuristic_retained.find("effect-status=scheduled") != std::string::npos);
     for (const std::string_view forbidden : {
              "provider.invalid", "alice", "password", "token", "secret",
              "Authorization", "Bearer", "hidden", "https://"}) {
         CHECK(retained.find(forbidden) == std::string::npos);
+        CHECK(heuristic_retained.find(forbidden) == std::string::npos);
     }
 }
 

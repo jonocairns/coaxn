@@ -13,7 +13,21 @@ namespace coax::core {
 
 enum class SupervisorStateName { Idle, Loading, Zap, Steady, Recovering, Failed };
 enum class RecoveryAction { ReopenStream, ReloadHlsLive, ReopenProbed, RecreatePlayer };
+enum class RecreationAuthority { HeuristicShortLoad, Mandatory };
+enum class RecreationProvenance { HeuristicShortLoad, MandatoryEvidence };
+enum class RecoveryEffectStatus { Scheduled, Issued };
 enum class RecoveryEscalation { None, SourceReopen, PlayerRecreation };
+
+struct RecreationDetails {
+    RecreationAuthority authority;
+    RecreationProvenance provenance;
+};
+
+struct RecoveryPlan {
+    RecoveryAction mechanism;
+    std::optional<RecreationDetails> recreation;
+    RecoveryEffectStatus status;
+};
 enum class RecoveryOutcome {
     None,
     FaultDecided,
@@ -75,7 +89,11 @@ struct SupervisorState {
     SupervisorStateName name = SupervisorStateName::Idle;
     std::optional<LoadAttempt> pending_load_attempt;
     std::optional<LoadIntent> pending_load_intent;
-    std::optional<RecoveryAction> recovery;
+    // Mechanism, recreation justification and plan-local lifecycle move as one
+    // value. Recreation metadata is present only for recreation; authority may
+    // upgrade while provenance remains immutable. Status changes from
+    // Scheduled to Issued at the effect-emission boundary.
+    std::optional<RecoveryPlan> recovery_plan;
     std::optional<TimePoint> recovery_started_at;
     std::optional<TimePoint> fault_decided_at;
     std::size_t short_recovery_load_failures = 0;
@@ -150,6 +168,7 @@ struct SupervisorTransition {
     LoadIntent load_intent = LoadIntent::FreshSelection;
     RecoveryEscalation escalation = RecoveryEscalation::None;
     RecoveryOutcome outcome = RecoveryOutcome::None;
+    std::optional<RecoveryPlan> recovery_plan;
     std::optional<Duration> last_progress_to_decision;
     std::optional<Duration> decision_to_command;
     std::optional<Duration> command_to_first_frame;
@@ -196,6 +215,9 @@ struct SupervisorStatsSnapshot {
 const char* to_string(SupervisorStateName value);
 const char* to_string(RecoveryTransport value);
 const char* to_string(RecoveryAction value);
+const char* to_string(RecreationAuthority value);
+const char* to_string(RecreationProvenance value);
+const char* to_string(RecoveryEffectStatus value);
 const char* to_string(RecoveryEscalation value);
 const char* to_string(RecoveryOutcome value);
 const char* to_string(LoadIntent value);

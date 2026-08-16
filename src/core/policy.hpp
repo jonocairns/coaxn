@@ -9,7 +9,7 @@
 namespace coax::core {
 
 inline constexpr std::string_view kTransportPolicyVersion = "coax-transport-recovery-v7";
-inline constexpr std::string_view kRecoveryPolicyVersion = "coax-recovery-v4";
+inline constexpr std::string_view kRecoveryPolicyVersion = "coax-recovery-v5";
 inline constexpr int kHlsLiveStartIndex = -1;
 inline constexpr std::string_view kHlsRuntimeRetryOptions =
     "http_persistent=0,http_multiple=0,seg_max_retry=0";
@@ -20,7 +20,9 @@ struct RecoveryPolicy {
         milliseconds(500), milliseconds(1'000), milliseconds(2'000),
         milliseconds(4'000), milliseconds(5'000)};
     Duration steady_healthy_window = milliseconds(5'000);
-    Duration wall_clock_budget = milliseconds(30'000);
+    // Commands must be admitted within this episode window. A command issued
+    // inside it may still reach first frame and complete probation afterward.
+    Duration command_admission_budget = milliseconds(30'000);
     std::size_t short_reopens_before_recreation = 2;
     std::string_view version = kRecoveryPolicyVersion;
 };

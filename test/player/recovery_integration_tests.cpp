@@ -367,6 +367,56 @@ TEST_CASE("application ordering cancels an opening retry when its frame wins bac
     CHECK(app.state().name == core::SupervisorStateName::Steady);
 }
 
+TEST_CASE("application ordering lets a late recovered start cancel heuristic recreation") {
+    RecoveryAppLoop app;
+    app.play();
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    app.tick(5.1, playing(5.0));
+    REQUIRE(app.state().name == core::SupervisorStateName::Steady);
+
+    app.source_ended(6.0, core::EndReason::Eof);
+    app.poll(6.55);
+    REQUIRE(app.effects.size() == 1);
+    REQUIRE(app.state().load_attempt == core::LoadAttempt{2});
+    for (int sample = 1; sample <= 16; ++sample) {
+        app.tick(6.55 + sample * 0.5, no_telemetry());
+    }
+    REQUIRE(app.state().name == core::SupervisorStateName::Recovering);
+    app.poll(15.55);
+    REQUIRE(app.effects.size() == 2);
+    REQUIRE(app.state().load_attempt == core::LoadAttempt{3});
+
+    for (int sample = 1; sample <= 16; ++sample) {
+        app.tick(15.55 + sample * 0.5, no_telemetry());
+    }
+    REQUIRE(app.state().name == core::SupervisorStateName::Recovering);
+    REQUIRE(app.state().recovery_plan);
+    REQUIRE(app.state().recovery_plan->mechanism ==
+            core::RecoveryAction::RecreatePlayer);
+    REQUIRE(app.state().recovery_plan->recreation);
+    REQUIRE(app.state().recovery_plan->recreation->authority ==
+            core::RecreationAuthority::HeuristicShortLoad);
+    REQUIRE(app.state().recovery_plan->status ==
+            core::RecoveryEffectStatus::Scheduled);
+    CHECK_FALSE(app.state().short_load_recreation_used);
+
+    app.tick(23.75, playing(1.0), /*frame_started=*/true);
+    CHECK(app.state().name == core::SupervisorStateName::Zap);
+    CHECK(app.state().load_attempt == core::LoadAttempt{3});
+    CHECK(app.state().load_intent == core::LoadIntent::RecoveryReopen);
+    CHECK(app.state().attempt == 3);
+    CHECK_FALSE(app.state().short_load_recreation_used);
+    CHECK(app.effects.size() == 2);
+    REQUIRE_FALSE(app.transitions.empty());
+    CHECK(app.transitions.back().reason ==
+          "first-frame-cancelled-heuristic-recreation");
+
+    app.poll(25.55);
+    CHECK(app.effects.size() == 2);
+    app.tick(28.75, playing(6.0));
+    CHECK(app.state().name == core::SupervisorStateName::Steady);
+}
+
 TEST_CASE("a recovered load cannot hide behind advancing input without a frame") {
     RecoveryAppLoop app;
     app.play();
