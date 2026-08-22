@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "util/log_ring.hpp"
+#include "win/app_paths.hpp"
 
 namespace coax::log {
 namespace {
@@ -21,25 +22,76 @@ Ring g_recent{kMaxRetained};
 // diagnostics panel, and so write() no longer locks the same mutex twice.
 std::mutex g_file_mutex;
 
+// Retained for the process lifetime. Windows closes it on process teardown,
+// which also removes the delete-on-close claim file after a crash.
+HANDLE g_primary_log_claim = INVALID_HANDLE_VALUE;
+
+std::wstring executable_directory() {
+    std::wstring path(MAX_PATH, L'\0');
+    const DWORD  length = GetModuleFileNameW(nullptr, path.data(),
+                                             static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) {
+        return {};
+    }
+    path.resize(length);
+
+    const auto slash = path.find_last_of(L'\\');
+    return (slash == std::wstring::npos) ? std::wstring{} : path.substr(0, slash);
+}
+
+std::wstring path_in(std::wstring_view directory, std::wstring_view filename) {
+    std::wstring path{directory};
+    if (!path.empty() && path.back() != L'\\' && path.back() != L'/') {
+        path += L'\\';
+    }
+    path += filename;
+    return path;
+}
+
+std::FILE* open_session_log_in(std::wstring_view directory) {
+    // The claim is a file rather than a process-local mutex so installed and
+    // portable copies, and separate Windows sessions, all coordinate on the
+    // actual destination. Delete-on-close also makes a killed process release
+    // it without relying on graceful shutdown.
+    const std::wstring claim_path = path_in(directory, L"coax.log.lock");
+    const HANDLE claim = CreateFileW(
+        claim_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+
+    if (claim != INVALID_HANDLE_VALUE) {
+        const std::wstring primary_path = path_in(directory, L"coax.log");
+        if (std::FILE* primary = _wfopen(primary_path.c_str(), L"w")) {
+            g_primary_log_claim = claim;
+            return primary;
+        }
+        CloseHandle(claim);
+    }
+
+    // A concurrent process owns coax.log. Give this session a process-specific
+    // file so neither process can truncate or interleave the other's evidence.
+    const std::wstring collision_name =
+        L"coax-" + std::to_wstring(GetCurrentProcessId()) + L".log";
+    const std::wstring collision_path = path_in(directory, collision_name);
+    return _wfopen(collision_path.c_str(), L"w");
+}
+
 // A GUI-subsystem process has no console, so the session log is the only way
-// to see what happened after the fact. It sits beside the executable rather
-// than in a known folder so it is findable without resolving shell paths --
-// which is itself something that can fail before any logging exists to say so.
+// to see what happened after the fact. Installed builds cannot write beside
+// their executable under Program Files, so keep it with the other per-user
+// application data. Concurrent instances use separate process-specific files,
+// and a portable build can still log beside itself when the known folder cannot
+// be resolved or opened.
 std::FILE* session_log() {
     static std::FILE* file = [] () -> std::FILE* {
-        std::wstring path(MAX_PATH, L'\0');
-        const DWORD  length = GetModuleFileNameW(nullptr, path.data(),
-                                                 static_cast<DWORD>(path.size()));
-        if (length == 0 || length >= path.size()) {
-            return nullptr;
+        const std::wstring directory = win::app_data_dir();
+        if (!directory.empty()) {
+            if (std::FILE* preferred = open_session_log_in(directory)) {
+                return preferred;
+            }
         }
-        path.resize(length);
 
-        const auto slash = path.find_last_of(L'\\');
-        path = (slash == std::wstring::npos) ? std::wstring{} : path.substr(0, slash + 1);
-        path += L"coax.log";
-
-        return _wfopen(path.c_str(), L"w");
+        const std::wstring fallback = executable_directory();
+        return fallback.empty() ? nullptr : open_session_log_in(fallback);
     }();
     return file;
 }
