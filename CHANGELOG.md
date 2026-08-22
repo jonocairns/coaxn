@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/jonocairns/coaxn/compare/v1.2.0...v1.2.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* preserve logs for installed builds ([#31](https://github.com/jonocairns/coaxn/issues/31)) ([2e46b6a](https://github.com/jonocairns/coaxn/commit/2e46b6ad7b0576819243204ad5ecebacc6aa01fb))
+
 ## [1.2.0](https://github.com/jonocairns/coaxn/compare/v1.1.0...v1.2.0) (2026-08-16)
 
 
