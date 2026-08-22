@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "util/log_ring.hpp"
+#include "win/app_paths.hpp"
 
 namespace coax::log {
 namespace {
@@ -21,25 +22,38 @@ Ring g_recent{kMaxRetained};
 // diagnostics panel, and so write() no longer locks the same mutex twice.
 std::mutex g_file_mutex;
 
+std::wstring executable_log_path() {
+    std::wstring path(MAX_PATH, L'\0');
+    const DWORD  length = GetModuleFileNameW(nullptr, path.data(),
+                                             static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) {
+        return {};
+    }
+    path.resize(length);
+
+    const auto slash = path.find_last_of(L'\\');
+    path = (slash == std::wstring::npos) ? std::wstring{} : path.substr(0, slash + 1);
+    path += L"coax.log";
+    return path;
+}
+
 // A GUI-subsystem process has no console, so the session log is the only way
-// to see what happened after the fact. It sits beside the executable rather
-// than in a known folder so it is findable without resolving shell paths --
-// which is itself something that can fail before any logging exists to say so.
+// to see what happened after the fact. Installed builds cannot write beside
+// their executable under Program Files, so keep it with the other per-user
+// application data. A portable build can still log beside itself when the
+// known folder cannot be resolved or opened.
 std::FILE* session_log() {
     static std::FILE* file = [] () -> std::FILE* {
-        std::wstring path(MAX_PATH, L'\0');
-        const DWORD  length = GetModuleFileNameW(nullptr, path.data(),
-                                                 static_cast<DWORD>(path.size()));
-        if (length == 0 || length >= path.size()) {
-            return nullptr;
+        const std::wstring directory = win::app_data_dir();
+        if (!directory.empty()) {
+            const std::wstring path = directory + L"\\coax.log";
+            if (std::FILE* preferred = _wfopen(path.c_str(), L"w")) {
+                return preferred;
+            }
         }
-        path.resize(length);
 
-        const auto slash = path.find_last_of(L'\\');
-        path = (slash == std::wstring::npos) ? std::wstring{} : path.substr(0, slash + 1);
-        path += L"coax.log";
-
-        return _wfopen(path.c_str(), L"w");
+        const std::wstring fallback = executable_log_path();
+        return fallback.empty() ? nullptr : _wfopen(fallback.c_str(), L"w");
     }();
     return file;
 }
