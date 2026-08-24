@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
@@ -485,8 +486,8 @@ TEST_CASE("source reopen captures neutral cross-attempt edge telemetry") {
     CHECK(first.data_status == player::RecoveryEdgeDataStatus::Complete);
     REQUIRE(first.playback_wall_residual_seconds);
     REQUIRE(first.cache_end_wall_residual_seconds);
-    CHECK(*first.playback_wall_residual_seconds == 0.0);
-    CHECK(*first.cache_end_wall_residual_seconds == 0.0);
+    CHECK(*first.playback_wall_residual_seconds == Catch::Approx(0.0));
+    CHECK(*first.cache_end_wall_residual_seconds == Catch::Approx(0.0));
 
     // Edge telemetry is observational: the recovered load still has to survive
     // the existing five-second supervisor probation.
