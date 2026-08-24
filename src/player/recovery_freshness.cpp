@@ -64,6 +64,15 @@ std::optional<RecoveryFreshnessReport> RecoveryFreshnessObserver::observe(
     }
 
     report.elapsed_since_anchor = observation.observed_at - anchor_->observed_at;
+    if (anchor_->cache_paused) {
+        // A paused outgoing load gives no evidence for how much its media
+        // clocks would have advanced before the recovered load became
+        // readable. Keep the entire cross-attempt comparison unverifiable
+        // instead of projecting across that uncertain interval.
+        report.unverifiable_reason =
+            RecoveryFreshnessUnverifiableReason::AnchorCachePaused;
+        return report;
+    }
     if (observation.cache_paused) {
         // A paused sample does not identify how much of the wall interval the
         // media clocks were expected to advance. Break the uninterrupted
@@ -193,6 +202,8 @@ const char* to_string(RecoveryFreshnessUnverifiableReason value) {
             return "missing-telemetry";
         case RecoveryFreshnessUnverifiableReason::StaleIdentity:
             return "stale-identity";
+        case RecoveryFreshnessUnverifiableReason::AnchorCachePaused:
+            return "anchor-cache-paused";
         case RecoveryFreshnessUnverifiableReason::CachePaused:
             return "cache-paused";
         case RecoveryFreshnessUnverifiableReason::InsufficientHistory:

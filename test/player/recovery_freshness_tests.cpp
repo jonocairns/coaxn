@@ -219,6 +219,33 @@ TEST_CASE("cache-paused samples do not advance freshness persistence") {
     }
 }
 
+TEST_CASE("cache-paused recovery anchors are never projected") {
+    player::RecoveryFreshnessObserver freshness;
+    auto paused_anchor = anchor();
+    paused_anchor.cache_paused = true;
+    freshness.begin_recovery(paused_anchor);
+
+    const auto first = freshness.observe(observation(13.0, 93.0, 97.0));
+    REQUIRE(first);
+    CHECK(first->classification ==
+          player::RecoveryFreshnessClassification::Unverifiable);
+    CHECK(first->unverifiable_reason ==
+          player::RecoveryFreshnessUnverifiableReason::AnchorCachePaused);
+    CHECK(first->anchor_cache_paused);
+    CHECK_FALSE(first->cache_paused);
+    CHECK_FALSE(first->playback_deficit_seconds);
+    CHECK_FALSE(first->cache_end_deficit_seconds);
+    CHECK_FALSE(first->first_readable);
+    CHECK(first->comparable_samples == 0);
+
+    const auto later = freshness.observe(observation(18.0, 98.0, 102.0));
+    REQUIRE(later);
+    CHECK(later->unverifiable_reason ==
+          player::RecoveryFreshnessUnverifiableReason::AnchorCachePaused);
+    CHECK_FALSE(later->cache_end_deficit_seconds);
+    CHECK(later->comparable_samples == 0);
+}
+
 TEST_CASE("recovery freshness telemetry retains only closed identity and numeric deltas") {
     player::RecoveryFreshnessObserver freshness;
     freshness.begin_recovery(anchor());

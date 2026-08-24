@@ -24,6 +24,7 @@ enum class RecoveryFreshnessUnverifiableReason {
     None,
     MissingTelemetry,
     StaleIdentity,
+    AnchorCachePaused,
     CachePaused,
     InsufficientHistory,
     ClockDomainUnclear,
