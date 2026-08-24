@@ -105,11 +105,12 @@ public:
     }
 
     void tick(double at, core::PlaybackHealthObservation observation,
-              bool frame_started = false) {
+              bool frame_started = false,
+              std::optional<core::LoadAttempt> observed_attempt = std::nullopt) {
         clock_.current = core::TimePoint{core::seconds(at)};
         observation_ = std::move(observation);
         observation_.generation = generation_;
-        observation_.load_attempt = active_attempt_;
+        observation_.load_attempt = observed_attempt.value_or(active_attempt_);
         diagnostics_.paused_for_cache = observation_.cache_paused;
         diagnostics_.cache_duration_seconds = observation_.buffer_seconds;
         diagnostics_.cache_end_seconds = observation_.cache_end_seconds;
@@ -488,6 +489,31 @@ TEST_CASE("source reopen captures cross-attempt freshness without changing recov
     // to survive the existing five-second supervisor probation.
     CHECK(app.state().name == core::SupervisorStateName::Zap);
     CHECK(app.state().attempt == 1);
+}
+
+TEST_CASE("first-frame freshness preserves stale callback identity") {
+    RecoveryAppLoop app;
+    app.play();
+
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    app.tick(5.1, playing(5.0));
+    REQUIRE(app.state().name == core::SupervisorStateName::Steady);
+
+    app.source_ended(6.0, core::EndReason::Eof);
+    app.poll(6.55);
+    REQUIRE(app.state().load_attempt == core::LoadAttempt{2});
+
+    app.tick(7.05, playing(5.5), /*frame_started=*/true,
+             std::optional<core::LoadAttempt>{core::LoadAttempt{1}});
+    REQUIRE(app.freshness_reports.size() == 1);
+    const auto& report = app.freshness_reports.front();
+    CHECK(report.point == player::RecoveryFreshnessObservationPoint::FirstFrame);
+    CHECK(report.classification ==
+          player::RecoveryFreshnessClassification::Unverifiable);
+    CHECK(report.unverifiable_reason ==
+          player::RecoveryFreshnessUnverifiableReason::StaleIdentity);
+    CHECK_FALSE(report.first_readable);
+    CHECK(report.comparable_samples == 0);
 }
 
 TEST_CASE("the production session coalesces generic and exact stream failures") {

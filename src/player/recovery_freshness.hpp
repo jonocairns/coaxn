@@ -24,6 +24,7 @@ enum class RecoveryFreshnessUnverifiableReason {
     None,
     MissingTelemetry,
     StaleIdentity,
+    CachePaused,
     InsufficientHistory,
     ClockDomainUnclear,
 };
@@ -109,6 +110,8 @@ public:
         const RecoveryFreshnessObservation& observation);
 
 private:
+    void reset_comparison_history();
+
     RecoveryFreshnessPolicy policy_;
     std::optional<RecoveryFreshnessAnchor> anchor_;
     std::optional<core::TimePoint> first_comparable_at_;
@@ -116,6 +119,7 @@ private:
     std::optional<double> first_cache_deficit_seconds_;
     std::optional<double> previous_cache_deficit_seconds_;
     std::optional<RecoveryFreshnessClassification> last_classification_;
+    bool first_readable_seen_ = false;
     std::size_t comparable_samples_ = 0;
 };
 

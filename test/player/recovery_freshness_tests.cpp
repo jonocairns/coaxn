@@ -161,6 +161,64 @@ TEST_CASE("recovery freshness reports missing telemetry and rejects stale identi
     CHECK_FALSE(freshness.observe(observation(13.5, 103.5, 107.5)));
 }
 
+TEST_CASE("cache-paused samples do not advance freshness persistence") {
+    SECTION("the first readable sample starts after playback resumes") {
+        player::RecoveryFreshnessObserver freshness;
+        freshness.begin_recovery(anchor());
+
+        auto paused = observation(13.0, 93.0, 97.0);
+        paused.cache_paused = true;
+        const auto paused_report = freshness.observe(paused);
+        REQUIRE(paused_report);
+        CHECK(paused_report->classification ==
+              player::RecoveryFreshnessClassification::Unverifiable);
+        CHECK(paused_report->unverifiable_reason ==
+              player::RecoveryFreshnessUnverifiableReason::CachePaused);
+        CHECK_FALSE(paused_report->cache_end_deficit_seconds);
+        CHECK_FALSE(paused_report->first_readable);
+        CHECK(paused_report->comparable_samples == 0);
+
+        const auto resumed = freshness.observe(observation(18.0, 98.0, 102.0));
+        REQUIRE(resumed);
+        CHECK(resumed->classification ==
+              player::RecoveryFreshnessClassification::Unverifiable);
+        CHECK(resumed->unverifiable_reason ==
+              player::RecoveryFreshnessUnverifiableReason::InsufficientHistory);
+        CHECK(resumed->first_readable);
+        CHECK(resumed->comparable_samples == 1);
+
+        const auto stale = freshness.observe(observation(23.0, 103.0, 107.0));
+        REQUIRE(stale);
+        CHECK(stale->classification ==
+              player::RecoveryFreshnessClassification::Stale);
+        REQUIRE(stale->comparable_for);
+        CHECK(stale->comparable_for->count() == Approx(5.0));
+    }
+
+    SECTION("a pause breaks an existing uninterrupted comparison window") {
+        player::RecoveryFreshnessObserver freshness;
+        freshness.begin_recovery(anchor());
+        const auto initial = freshness.observe(observation(13.0, 93.0, 97.0));
+        REQUIRE(initial);
+        REQUIRE(initial->first_readable);
+
+        auto paused = observation(14.0, 94.0, 98.0);
+        paused.cache_paused = true;
+        REQUIRE(freshness.observe(paused));
+
+        const auto resumed = freshness.observe(observation(19.0, 99.0, 103.0));
+        REQUIRE(resumed);
+        CHECK(resumed->classification ==
+              player::RecoveryFreshnessClassification::Unverifiable);
+        CHECK(resumed->unverifiable_reason ==
+              player::RecoveryFreshnessUnverifiableReason::InsufficientHistory);
+        CHECK_FALSE(resumed->first_readable);
+        CHECK(resumed->comparable_samples == 1);
+        REQUIRE(resumed->comparable_for);
+        CHECK(resumed->comparable_for->count() == Approx(0.0));
+    }
+}
+
 TEST_CASE("recovery freshness telemetry retains only closed identity and numeric deltas") {
     player::RecoveryFreshnessObserver freshness;
     freshness.begin_recovery(anchor());

@@ -12,24 +12,26 @@ bool same_direction(double left, double right) {
 
 }  // namespace
 
-void RecoveryFreshnessObserver::begin_recovery(RecoveryFreshnessAnchor anchor) {
-    anchor_ = std::move(anchor);
+void RecoveryFreshnessObserver::reset_comparison_history() {
     first_comparable_at_.reset();
     last_convergence_at_.reset();
     first_cache_deficit_seconds_.reset();
     previous_cache_deficit_seconds_.reset();
-    last_classification_.reset();
     comparable_samples_ = 0;
+}
+
+void RecoveryFreshnessObserver::begin_recovery(RecoveryFreshnessAnchor anchor) {
+    anchor_ = std::move(anchor);
+    reset_comparison_history();
+    last_classification_.reset();
+    first_readable_seen_ = false;
 }
 
 void RecoveryFreshnessObserver::reset() {
     anchor_.reset();
-    first_comparable_at_.reset();
-    last_convergence_at_.reset();
-    first_cache_deficit_seconds_.reset();
-    previous_cache_deficit_seconds_.reset();
+    reset_comparison_history();
     last_classification_.reset();
-    comparable_samples_ = 0;
+    first_readable_seen_ = false;
 }
 
 std::optional<RecoveryFreshnessReport> RecoveryFreshnessObserver::observe(
@@ -62,6 +64,16 @@ std::optional<RecoveryFreshnessReport> RecoveryFreshnessObserver::observe(
     }
 
     report.elapsed_since_anchor = observation.observed_at - anchor_->observed_at;
+    if (observation.cache_paused) {
+        // A paused sample does not identify how much of the wall interval the
+        // media clocks were expected to advance. Break the uninterrupted
+        // comparison window so that paused time cannot satisfy stale
+        // persistence or distort convergence after playback resumes.
+        reset_comparison_history();
+        report.unverifiable_reason =
+            RecoveryFreshnessUnverifiableReason::CachePaused;
+        return report;
+    }
     if (!anchor_->playback_time_seconds || !anchor_->cache_end_seconds ||
         !observation.playback_time_seconds || !observation.cache_end_seconds) {
         report.unverifiable_reason =
@@ -88,7 +100,8 @@ std::optional<RecoveryFreshnessReport> RecoveryFreshnessObserver::observe(
     if (!first_comparable_at_) {
         first_comparable_at_ = observation.observed_at;
         first_cache_deficit_seconds_ = cache_deficit;
-        report.first_readable = true;
+        report.first_readable = !first_readable_seen_;
+        first_readable_seen_ = true;
     }
     ++comparable_samples_;
     report.comparable_samples = comparable_samples_;
@@ -180,6 +193,8 @@ const char* to_string(RecoveryFreshnessUnverifiableReason value) {
             return "missing-telemetry";
         case RecoveryFreshnessUnverifiableReason::StaleIdentity:
             return "stale-identity";
+        case RecoveryFreshnessUnverifiableReason::CachePaused:
+            return "cache-paused";
         case RecoveryFreshnessUnverifiableReason::InsufficientHistory:
             return "insufficient-history";
         case RecoveryFreshnessUnverifiableReason::ClockDomainUnclear:

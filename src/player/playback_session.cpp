@@ -268,8 +268,6 @@ void PlaybackSession::process_events(std::span<const PlayerEvent> events) {
                 if (!is_current(event, generation_, active)) return;
                 if (callbacks_.health_observation) {
                     auto observation = callbacks_.health_observation();
-                    observation.generation = event.generation;
-                    observation.load_attempt = event.load_attempt;
                     observe_recovery_freshness(
                         observation, RecoveryFreshnessObservationPoint::FirstFrame,
                         RecoveryFreshnessPhase::Probation);
