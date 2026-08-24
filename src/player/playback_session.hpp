@@ -14,6 +14,7 @@
 #include "player/load_diagnostics.hpp"
 #include "player/playback_observability.hpp"
 #include "player/player_event_adapter.hpp"
+#include "player/recovery_freshness.hpp"
 #include "player/timeline_recovery.hpp"
 
 namespace coax::player {
@@ -65,6 +66,7 @@ struct PlaybackSessionCallbacks {
     std::function<void(const core::SupervisorState&, core::SupervisorStateName)> on_state_changed;
     std::function<void(const core::SupervisorTransition&)> on_transition;
     std::function<void(const HealthSampleReport&)> on_health_sample;
+    std::function<void(const RecoveryFreshnessReport&)> on_recovery_freshness;
     std::function<void(int, double)> on_rebuffer;
     std::function<void(double)> on_unity_speed;
 };
@@ -124,6 +126,11 @@ private:
     void update_live_sync();
     void on_supervisor_state_changed(const core::SupervisorState& state);
     void execute_recovery(const core::SupervisorEffect& effect);
+    void begin_recovery_freshness(const core::SupervisorEffect& effect);
+    void observe_recovery_freshness(
+        const core::PlaybackHealthObservation& observation,
+        RecoveryFreshnessObservationPoint point,
+        RecoveryFreshnessPhase phase);
     // Called only after a successful player recreation. Ordinary recovery
     // reopens deliberately retain the live target and speed-control history.
     void backend_recreated();
@@ -154,6 +161,7 @@ private:
     TimelineRecoveryCapability timeline_recovery_capability_ =
         TimelineRecoveryCapability::Disabled;
     std::optional<core::TimePoint> last_rebuffer_at_;
+    RecoveryFreshnessObserver recovery_freshness_;
 
     LiveSync live_sync_;
     LiveSyncTurn live_sync_turn_;

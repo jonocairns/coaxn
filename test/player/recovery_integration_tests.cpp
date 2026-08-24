@@ -180,6 +180,7 @@ public:
     std::vector<core::SupervisorEffect> effects;
     std::vector<core::SupervisorTransition> transitions;
     std::vector<player::HealthSampleReport> health_reports;
+    std::vector<player::RecoveryFreshnessReport> freshness_reports;
     std::vector<std::exception_ptr> recovery_exceptions;
     std::vector<double> speed_writes;
     int health_observations = 0;
@@ -231,6 +232,10 @@ private:
         };
         callbacks.on_health_sample = [this](const player::HealthSampleReport& report) {
             health_reports.push_back(report);
+        };
+        callbacks.on_recovery_freshness = [this](
+            const player::RecoveryFreshnessReport& report) {
+            freshness_reports.push_back(report);
         };
         return callbacks;
     }
@@ -453,6 +458,36 @@ TEST_CASE("a recovered load cannot hide behind advancing input without a frame")
     CHECK(app.effects[1].load_attempt == core::LoadAttempt{3});
     CHECK(std::holds_alternative<core::ReopenStream>(app.effects[1].payload));
     CHECK(app.state().load_attempt == core::LoadAttempt{3});
+}
+
+TEST_CASE("source reopen captures cross-attempt freshness without changing recovery") {
+    RecoveryAppLoop app;
+    app.play();
+
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    app.tick(5.1, playing(5.0));
+    REQUIRE(app.state().name == core::SupervisorStateName::Steady);
+
+    app.source_ended(6.0, core::EndReason::Eof);
+    app.poll(6.55);
+    REQUIRE(app.effects.size() == 1);
+    REQUIRE(app.state().load_attempt == core::LoadAttempt{2});
+
+    app.tick(7.05, playing(5.5), /*frame_started=*/true);
+    REQUIRE_FALSE(app.freshness_reports.empty());
+    const auto& first = app.freshness_reports.front();
+    CHECK(first.generation == app.generation());
+    CHECK(first.outgoing_load_attempt == core::LoadAttempt{1});
+    CHECK(first.recovered_load_attempt == core::LoadAttempt{2});
+    CHECK(first.point == player::RecoveryFreshnessObservationPoint::FirstFrame);
+    CHECK(first.phase == player::RecoveryFreshnessPhase::Probation);
+    CHECK(first.first_readable);
+    CHECK(first.classification == player::RecoveryFreshnessClassification::Fresh);
+
+    // Freshness is observational in this slice: the recovered load still has
+    // to survive the existing five-second supervisor probation.
+    CHECK(app.state().name == core::SupervisorStateName::Zap);
+    CHECK(app.state().attempt == 1);
 }
 
 TEST_CASE("the production session coalesces generic and exact stream failures") {

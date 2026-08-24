@@ -52,6 +52,7 @@ PlaybackSession::PlaybackSession(const core::SupervisorClock& clock,
 
 core::Generation PlaybackSession::begin_channel() {
     reset_live_state();
+    recovery_freshness_.reset();
     timeline_recovery_.reset();
     timeline_recovery_pending_ = false;
     timeline_recovery_capability_ = TimelineRecoveryCapability::Disabled;
@@ -92,6 +93,7 @@ bool PlaybackSession::stop(core::Generation generation) {
     exact_failure_reported_ = false;
     last_cache_state_dispatched_.reset();
     pending_stream_ends_.clear();
+    recovery_freshness_.reset();
     timeline_recovery_.reset();
     timeline_recovery_pending_ = false;
     timeline_recovery_capability_ = TimelineRecoveryCapability::Disabled;
@@ -100,6 +102,7 @@ bool PlaybackSession::stop(core::Generation generation) {
 }
 
 void PlaybackSession::backend_recreated() {
+    recovery_freshness_.reset();
     reset_live_state();
 }
 
@@ -139,6 +142,8 @@ void PlaybackSession::execute_recovery(const core::SupervisorEffect& effect) {
         }
     };
 
+    begin_recovery_freshness(effect);
+
     std::optional<core::RecoveryTransport> transport;
     if (callbacks_.execute_recovery) {
         try {
@@ -158,6 +163,59 @@ void PlaybackSession::execute_recovery(const core::SupervisorEffect& effect) {
         }
     }
     complete_recovery(effect, transport);
+}
+
+void PlaybackSession::begin_recovery_freshness(
+    const core::SupervisorEffect& effect) {
+    const auto& state = supervisor_.current();
+    const bool source_reopen =
+        !std::holds_alternative<core::RecreatePlayer>(effect.payload) &&
+        state.transport == core::RecoveryTransport::MpegTs &&
+        timeline_recovery_capability_ ==
+            TimelineRecoveryCapability::ContinuousRawMpegTs;
+    if (!source_reopen) return;
+
+    core::PlaybackHealthObservation observation;
+    const auto active = callbacks_.active_load ? callbacks_.active_load() : std::nullopt;
+    if (active && active->generation == state.generation &&
+        active->load_attempt == state.load_attempt && callbacks_.health_observation) {
+        observation = callbacks_.health_observation();
+        if (observation.generation != active->generation ||
+            observation.load_attempt != active->load_attempt) {
+            observation.playback_time_seconds.reset();
+            observation.cache_end_seconds.reset();
+        }
+    }
+
+    recovery_freshness_.begin_recovery({
+        .generation = effect.generation,
+        .outgoing_load_attempt = state.load_attempt,
+        .recovered_load_attempt = effect.load_attempt,
+        .observed_at = clock_.now(),
+        .playback_time_seconds = observation.playback_time_seconds,
+        .cache_end_seconds = observation.cache_end_seconds,
+        .cache_paused = observation.cache_paused,
+        .recovery_reason = state.detection,
+    });
+}
+
+void PlaybackSession::observe_recovery_freshness(
+    const core::PlaybackHealthObservation& observation,
+    RecoveryFreshnessObservationPoint point,
+    RecoveryFreshnessPhase phase) {
+    const auto report = recovery_freshness_.observe({
+        .generation = observation.generation,
+        .load_attempt = observation.load_attempt,
+        .observed_at = clock_.now(),
+        .playback_time_seconds = observation.playback_time_seconds,
+        .cache_end_seconds = observation.cache_end_seconds,
+        .cache_paused = observation.cache_paused,
+        .point = point,
+        .phase = phase,
+    });
+    if (report && callbacks_.on_recovery_freshness) {
+        callbacks_.on_recovery_freshness(*report);
+    }
 }
 
 void PlaybackSession::restart_health_supervision(core::LoadAttempt load_attempt) {
@@ -208,6 +266,14 @@ void PlaybackSession::process_events(std::span<const PlayerEvent> events) {
             [&](const FirstPlaybackStart&) {
                 active = callbacks_.active_load ? callbacks_.active_load() : std::nullopt;
                 if (!is_current(event, generation_, active)) return;
+                if (callbacks_.health_observation) {
+                    auto observation = callbacks_.health_observation();
+                    observation.generation = event.generation;
+                    observation.load_attempt = event.load_attempt;
+                    observe_recovery_freshness(
+                        observation, RecoveryFreshnessObservationPoint::FirstFrame,
+                        RecoveryFreshnessPhase::Probation);
+                }
                 supervisor_.dispatch(core::FirstFrame{
                     event.generation, event.load_attempt});
             },
@@ -330,6 +396,13 @@ void PlaybackSession::sample_health() {
             : unattributed_count;
     last_health_unattributed_engine_message_count_ = unattributed_count;
     timeline_classification_ = classify_timeline(health_snapshot_.timeline, options.policy);
+    observe_recovery_freshness(
+        observation, RecoveryFreshnessObservationPoint::HealthSample,
+        !live_sync_turn_.first_frame_seen()
+            ? RecoveryFreshnessPhase::Opening
+            : (supervisor_.current().name == core::SupervisorStateName::Steady
+                   ? RecoveryFreshnessPhase::PostProbation
+                   : RecoveryFreshnessPhase::Probation));
     const bool timeline_recovery_eligible =
         supervisor_.current().name == core::SupervisorStateName::Steady &&
         supervisor_.current().transport == core::RecoveryTransport::MpegTs &&

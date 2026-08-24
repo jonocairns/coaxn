@@ -9,6 +9,7 @@
 #include "core/playback_health.hpp"
 #include "core/playback_types.hpp"
 #include "core/supervisor.hpp"
+#include "player/recovery_freshness.hpp"
 
 namespace coax::player {
 
@@ -148,5 +149,9 @@ std::string format_recovery_telemetry(
     const core::SupervisorTransition& transition,
     const std::optional<SanitizedRequestShape>& request,
     const RecoveryDecisionEvidence& evidence = {});
+
+std::string format_recovery_freshness_telemetry(
+    const RecoveryFreshnessReport& report,
+    const std::optional<SanitizedRequestShape>& request);
 
 }  // namespace coax::player

@@ -232,6 +232,16 @@ App::App()
            .on_health_sample = [this](const player::HealthSampleReport& report) {
                log_health_sample(report);
            },
+           .on_recovery_freshness = [this](const player::RecoveryFreshnessReport& report) {
+               const auto line = player::format_recovery_freshness_telemetry(
+                   report, player_.diagnostics().request_shape);
+               if (report.point == player::RecoveryFreshnessObservationPoint::FirstFrame ||
+                   report.first_readable || report.classification_changed) {
+                   log::info("{}", line);
+               } else {
+                   log::debug("{}", line);
+               }
+           },
            .on_rebuffer = [](int count, double target) {
                log::info("Rebuffer #{}; live target now {:.1f}s", count, target);
            },

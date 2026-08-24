@@ -43,6 +43,7 @@ add_library(coax_player_core
     src/player/playback_observability.cpp
     src/player/playback_session.cpp
     src/player/player_event_adapter.cpp
+    src/player/recovery_freshness.cpp
     src/player/session_target_registry.cpp
     src/player/timeline_recovery.cpp
     src/player/transport_log_classifier.cpp)
@@ -83,6 +84,7 @@ if(BUILD_TESTING)
     add_executable(coax_player_core_tests
         test/player/live_sync_tests.cpp
         test/player/player_core_tests.cpp
+        test/player/recovery_freshness_tests.cpp
         test/player/recovery_integration_tests.cpp)
     target_link_libraries(coax_player_core_tests PRIVATE
         Catch2::Catch2WithMain coax_player_core)

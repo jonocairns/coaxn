@@ -313,6 +313,51 @@ std::string format_recovery_telemetry(
     return out.str();
 }
 
+std::string format_recovery_freshness_telemetry(
+    const RecoveryFreshnessReport& report,
+    const std::optional<SanitizedRequestShape>& request) {
+    const auto duration = [](std::optional<core::Duration> value) {
+        if (!value) return std::string("unavailable");
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(0) << value->count() * 1000.0 << "ms";
+        return out.str();
+    };
+    const auto delta = [](std::optional<double> value) {
+        if (!value) return std::string("unavailable");
+        std::ostringstream out;
+        out << std::showpos << std::fixed << std::setprecision(3) << *value << "s";
+        return out.str();
+    };
+    const auto correlation = request ? request->correlation : SourceCorrelation{};
+    const auto recovery_reason = report.recovery_reason
+        ? core::to_string(*report.recovery_reason) : "none";
+
+    std::ostringstream out;
+    out << "Recovery freshness telemetry provider-session="
+        << correlation.provider_session
+        << " channel-session=" << correlation.channel_session
+        << " generation=" << report.generation.value()
+        << " outgoing-load-attempt=" << report.outgoing_load_attempt.value()
+        << " recovered-load-attempt=" << report.recovered_load_attempt.value()
+        << " recovery-reason=" << recovery_reason
+        << " point=" << to_string(report.point)
+        << " phase=" << to_string(report.phase)
+        << " first-readable=" << (report.first_readable ? "yes" : "no")
+        << " comparable-samples=" << report.comparable_samples
+        << " classification=" << to_string(report.classification)
+        << " unverifiable-reason=" << to_string(report.unverifiable_reason)
+        << " anchor-age=" << duration(report.elapsed_since_anchor)
+        << " comparable-for=" << duration(report.comparable_for)
+        << " playback-deficit=" << delta(report.playback_deficit_seconds)
+        << " cache-end-deficit=" << delta(report.cache_end_deficit_seconds)
+        << " local-live-gap-change=" << delta(report.local_live_gap_change_seconds)
+        << " deficit-improvement=" << delta(report.deficit_improvement_seconds)
+        << " anchor-cache-paused=" << (report.anchor_cache_paused ? "yes" : "no")
+        << " cache-paused=" << (report.cache_paused ? "yes" : "no")
+        << " policy=" << report.policy_version;
+    return out.str();
+}
+
 const char* to_string(RequestTargetShape value) {
     switch (value) {
         case RequestTargetShape::XtreamLive: return "xtream-live";
