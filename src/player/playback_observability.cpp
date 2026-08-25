@@ -313,6 +313,55 @@ std::string format_recovery_telemetry(
     return out.str();
 }
 
+std::string format_recovery_edge_telemetry(
+    const RecoveryEdgeReport& report,
+    const std::optional<SanitizedRequestShape>& request) {
+    const auto duration = [](std::optional<core::Duration> value) {
+        if (!value) return std::string("unavailable");
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(0) << value->count() * 1000.0 << "ms";
+        return out.str();
+    };
+    const auto delta = [](std::optional<double> value) {
+        if (!value) return std::string("unavailable");
+        std::ostringstream out;
+        out << std::showpos << std::fixed << std::setprecision(3) << *value << "s";
+        return out.str();
+    };
+    const auto correlation = request ? request->correlation : SourceCorrelation{};
+    const auto recovery_reason = report.recovery_reason
+        ? core::to_string(*report.recovery_reason) : "none";
+
+    std::ostringstream out;
+    out << "Recovery edge telemetry provider-session="
+        << correlation.provider_session
+        << " channel-session=" << correlation.channel_session
+        << " generation=" << report.generation.value()
+        << " outgoing-load-attempt=" << report.outgoing_load_attempt.value()
+        << " recovered-load-attempt=" << report.recovered_load_attempt.value()
+        << " recovery-reason=" << recovery_reason
+        << " point=" << to_string(report.point)
+        << " phase=" << to_string(report.phase)
+        << " data-status=" << to_string(report.data_status)
+        << " projection-basis=" << to_string(report.projection_basis)
+        << " first-readable=" << (report.first_readable ? "yes" : "no")
+        << " readable-sample-index=" << report.readable_sample_index
+        << " anchor-age=" << duration(report.elapsed_since_anchor)
+        << " capture-window="
+        << duration(std::optional<core::Duration>{report.capture_window})
+        << " playback-wall-residual="
+        << delta(report.playback_wall_residual_seconds)
+        << " cache-end-wall-residual="
+        << delta(report.cache_end_wall_residual_seconds)
+        << " local-live-gap-change=" << delta(report.local_live_gap_change_seconds)
+        << " anchor-cache-paused=" << (report.anchor_cache_paused ? "yes" : "no")
+        << " cache-paused=" << (report.cache_paused ? "yes" : "no")
+        << " pause-seen-since-anchor="
+        << (report.pause_seen_since_anchor ? "yes" : "no")
+        << " schema=" << report.schema_version;
+    return out.str();
+}
+
 const char* to_string(RequestTargetShape value) {
     switch (value) {
         case RequestTargetShape::XtreamLive: return "xtream-live";

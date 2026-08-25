@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
@@ -105,11 +106,12 @@ public:
     }
 
     void tick(double at, core::PlaybackHealthObservation observation,
-              bool frame_started = false) {
+              bool frame_started = false,
+              std::optional<core::LoadAttempt> observed_attempt = std::nullopt) {
         clock_.current = core::TimePoint{core::seconds(at)};
         observation_ = std::move(observation);
         observation_.generation = generation_;
-        observation_.load_attempt = active_attempt_;
+        observation_.load_attempt = observed_attempt.value_or(active_attempt_);
         diagnostics_.paused_for_cache = observation_.cache_paused;
         diagnostics_.cache_duration_seconds = observation_.buffer_seconds;
         diagnostics_.cache_end_seconds = observation_.cache_end_seconds;
@@ -180,6 +182,7 @@ public:
     std::vector<core::SupervisorEffect> effects;
     std::vector<core::SupervisorTransition> transitions;
     std::vector<player::HealthSampleReport> health_reports;
+    std::vector<player::RecoveryEdgeReport> edge_reports;
     std::vector<std::exception_ptr> recovery_exceptions;
     std::vector<double> speed_writes;
     int health_observations = 0;
@@ -231,6 +234,9 @@ private:
         };
         callbacks.on_health_sample = [this](const player::HealthSampleReport& report) {
             health_reports.push_back(report);
+        };
+        callbacks.on_recovery_edge = [this](const player::RecoveryEdgeReport& report) {
+            edge_reports.push_back(report);
         };
         return callbacks;
     }
@@ -453,6 +459,62 @@ TEST_CASE("a recovered load cannot hide behind advancing input without a frame")
     CHECK(app.effects[1].load_attempt == core::LoadAttempt{3});
     CHECK(std::holds_alternative<core::ReopenStream>(app.effects[1].payload));
     CHECK(app.state().load_attempt == core::LoadAttempt{3});
+}
+
+TEST_CASE("source reopen captures neutral cross-attempt edge telemetry") {
+    RecoveryAppLoop app;
+    app.play();
+
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    app.tick(5.1, playing(5.0));
+    REQUIRE(app.state().name == core::SupervisorStateName::Steady);
+
+    app.source_ended(6.0, core::EndReason::Eof);
+    app.poll(6.55);
+    REQUIRE(app.effects.size() == 1);
+    REQUIRE(app.state().load_attempt == core::LoadAttempt{2});
+
+    app.tick(7.05, playing(5.5), /*frame_started=*/true);
+    REQUIRE_FALSE(app.edge_reports.empty());
+    const auto& first = app.edge_reports.front();
+    CHECK(first.generation == app.generation());
+    CHECK(first.outgoing_load_attempt == core::LoadAttempt{1});
+    CHECK(first.recovered_load_attempt == core::LoadAttempt{2});
+    CHECK(first.point == player::RecoveryEdgeObservationPoint::FirstFrame);
+    CHECK(first.phase == player::RecoveryEdgePhase::Probation);
+    CHECK(first.first_readable);
+    CHECK(first.data_status == player::RecoveryEdgeDataStatus::Complete);
+    REQUIRE(first.playback_wall_residual_seconds);
+    REQUIRE(first.cache_end_wall_residual_seconds);
+    CHECK(*first.playback_wall_residual_seconds == Catch::Approx(0.0));
+    CHECK(*first.cache_end_wall_residual_seconds == Catch::Approx(0.0));
+
+    // Edge telemetry is observational: the recovered load still has to survive
+    // the existing five-second supervisor probation.
+    CHECK(app.state().name == core::SupervisorStateName::Zap);
+    CHECK(app.state().attempt == 1);
+}
+
+TEST_CASE("first-frame edge telemetry preserves stale callback identity") {
+    RecoveryAppLoop app;
+    app.play();
+
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    app.tick(5.1, playing(5.0));
+    REQUIRE(app.state().name == core::SupervisorStateName::Steady);
+
+    app.source_ended(6.0, core::EndReason::Eof);
+    app.poll(6.55);
+    REQUIRE(app.state().load_attempt == core::LoadAttempt{2});
+
+    app.tick(7.05, playing(5.5), /*frame_started=*/true,
+             std::optional<core::LoadAttempt>{core::LoadAttempt{1}});
+    REQUIRE(app.edge_reports.size() == 1);
+    const auto& report = app.edge_reports.front();
+    CHECK(report.point == player::RecoveryEdgeObservationPoint::FirstFrame);
+    CHECK(report.data_status == player::RecoveryEdgeDataStatus::StaleIdentity);
+    CHECK_FALSE(report.first_readable);
+    CHECK(report.readable_sample_index == 0);
 }
 
 TEST_CASE("the production session coalesces generic and exact stream failures") {
