@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/jonocairns/coaxn/compare/v1.2.1...v1.3.0) (2026-08-25)
+
+
+### Features
+
+* capture post-recovery edge telemetry ([#34](https://github.com/jonocairns/coaxn/issues/34)) ([c54c1a1](https://github.com/jonocairns/coaxn/commit/c54c1a1054ffbee460c54339c3df952e03ea497f))
+
 ## [1.2.1](https://github.com/jonocairns/coaxn/compare/v1.2.0...v1.2.1) (2026-08-22)
 
 
