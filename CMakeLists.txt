@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.24)
 # The trailing annotation has to stay on the same line as the version -- the
 # generic updater matches per line and rewrites only what it finds there, so
 # a marker on its own line silently updates nothing.
-project(coax_native VERSION 1.2.1 LANGUAGES CXX) # x-release-please-version
+project(coax_native VERSION 1.3.0 LANGUAGES CXX) # x-release-please-version
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
