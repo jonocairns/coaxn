@@ -31,6 +31,7 @@ void reset_load_observations(Diagnostics& diagnostics) {
     diagnostics.cache_duration_seconds.reset();
     diagnostics.cache_end_seconds.reset();
     diagnostics.input_rate_bytes_per_second.reset();
+    diagnostics.media_start_seconds.reset();
     diagnostics.playback_time_seconds.reset();
     diagnostics.video_fps_estimate.reset();
     diagnostics.container_fps.reset();

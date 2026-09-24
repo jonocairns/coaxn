@@ -26,6 +26,7 @@ enum ObserveId : std::uint64_t {
     kCacheDuration,
     kCacheEnd,
     kPlaybackTime,
+    kMediaStart,
     kAvSync,
     kCacheSpeed,
     kEstimatedVfFps,
@@ -164,6 +165,8 @@ bool MpvPlayer::initialize_backend(std::string& error) {
     observe(mpv_, kCacheDuration, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
     observe(mpv_, kCacheEnd, "demuxer-cache-time", MPV_FORMAT_DOUBLE);
     observe(mpv_, kPlaybackTime, "playback-time", MPV_FORMAT_DOUBLE);
+    // rebase-start-time (on by default) subtracts this from both times above.
+    observe(mpv_, kMediaStart, "demuxer-start-time", MPV_FORMAT_DOUBLE);
     observe(mpv_, kAvSync, "avsync", MPV_FORMAT_DOUBLE);
     observe(mpv_, kCacheSpeed, "cache-speed", MPV_FORMAT_DOUBLE);
     observe(mpv_, kEstimatedVfFps, "estimated-vf-fps", MPV_FORMAT_DOUBLE);
@@ -570,6 +573,7 @@ void MpvPlayer::handle_property(std::uint64_t id, const mpv_event_property& prop
         case kCacheDuration: diagnostics_.cache_duration_seconds = optional_double(); break;
         case kCacheEnd: diagnostics_.cache_end_seconds = optional_double(); break;
         case kPlaybackTime: diagnostics_.playback_time_seconds = optional_double(); break;
+        case kMediaStart: diagnostics_.media_start_seconds = optional_double(); break;
         case kAvSync: diagnostics_.av_sync_seconds = optional_double(); break;
         case kCacheSpeed: diagnostics_.input_rate_bytes_per_second = optional_double(); break;
         case kEstimatedVfFps: diagnostics_.video_fps_estimate = optional_double(); break;
@@ -587,6 +591,7 @@ core::PlaybackHealthObservation MpvPlayer::health_observation() const {
             .cache_paused = diagnostics_.paused_for_cache,
             .input_rate_bytes_per_second = diagnostics_.input_rate_bytes_per_second,
             .ipc_round_trip_ms = std::nullopt,
+            .media_start_seconds = diagnostics_.media_start_seconds,
             .playback_time_seconds = diagnostics_.playback_time_seconds,
             .video_fps_estimate = diagnostics_.video_fps_estimate};
 }

@@ -34,12 +34,14 @@ core::PlaybackHealthObservation opening_delivery(double cache_end_seconds) {
 
 core::PlaybackHealthObservation no_telemetry() { return {}; }
 
-core::PlaybackHealthObservation playing(double playback_time_seconds) {
+core::PlaybackHealthObservation playing(double playback_time_seconds,
+                                        double media_start_seconds = 0.0) {
     core::PlaybackHealthObservation observation;
     observation.buffer_seconds = 4.0;
     observation.cache_end_seconds = playback_time_seconds + 4.0;
     observation.input_rate_bytes_per_second = 400'000.0;
     observation.ipc_round_trip_ms = 0.9;
+    observation.media_start_seconds = media_start_seconds;
     observation.playback_time_seconds = playback_time_seconds;
     return observation;
 }
@@ -474,7 +476,9 @@ TEST_CASE("source reopen captures neutral cross-attempt edge telemetry") {
     REQUIRE(app.effects.size() == 1);
     REQUIRE(app.state().load_attempt == core::LoadAttempt{2});
 
-    app.tick(7.05, playing(5.5), /*frame_started=*/true);
+    // Like mpv, the reopened load restarts its clock near zero; the source
+    // position it joined at is carried by its media start instead.
+    app.tick(7.05, playing(0.0, 5.5), /*frame_started=*/true);
     REQUIRE_FALSE(app.edge_reports.empty());
     const auto& first = app.edge_reports.front();
     CHECK(first.generation == app.generation());

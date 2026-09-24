@@ -83,6 +83,7 @@ struct Diagnostics {
     std::optional<double> cache_duration_seconds;
     std::optional<double> cache_end_seconds;
     std::optional<double> input_rate_bytes_per_second;
+    std::optional<double> media_start_seconds;
     std::optional<double> playback_time_seconds;
     std::optional<double> video_fps_estimate;
     std::optional<double> container_fps;

@@ -32,6 +32,10 @@ struct PlaybackHealthObservation {
     bool cache_paused = false;
     std::optional<double> input_rate_bytes_per_second;
     std::optional<double> ipc_round_trip_ms;
+    // The source timestamp the engine subtracted so that playback and cache
+    // times start near zero on every load. Adding it back recovers source
+    // coordinates, which are the only ones comparable across two loads.
+    std::optional<double> media_start_seconds;
     std::optional<double> playback_time_seconds;
     std::optional<double> video_fps_estimate;
 };
