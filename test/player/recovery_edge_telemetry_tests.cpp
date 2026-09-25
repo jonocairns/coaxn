@@ -177,6 +177,9 @@ TEST_CASE("recovery edge telemetry reports only factual data-quality failures") 
     CHECK(unrebased_report->data_status ==
           player::RecoveryEdgeDataStatus::MissingTelemetry);
     CHECK_FALSE(unrebased_report->playback_wall_residual_seconds);
+    CHECK_FALSE(unrebased_report->cache_end_wall_residual_seconds);
+    REQUIRE(unrebased_report->local_live_gap_change_seconds);
+    CHECK(*unrebased_report->local_live_gap_change_seconds == Approx(0.0));
     CHECK(unrebased_report->readable_sample_index == 0);
 
     const auto stale = edge.observe(
@@ -243,4 +246,19 @@ TEST_CASE("recovery edge telemetry retains only identity flags and numeric delta
              "https://", "100.000", "104.000", "classification="}) {
         CHECK(retained.find(forbidden) == std::string::npos);
     }
+}
+
+TEST_CASE("an anchor without a media start still reports the local gap change") {
+    player::RecoveryEdgeObserver edge;
+    auto unrebased_anchor = anchor();
+    unrebased_anchor.media_start_seconds.reset();
+    edge.begin_recovery(unrebased_anchor);
+
+    const auto report = edge.observe(observation(13.0, 0.5, 6.5));
+    REQUIRE(report);
+    CHECK(report->data_status == player::RecoveryEdgeDataStatus::MissingTelemetry);
+    CHECK_FALSE(report->playback_wall_residual_seconds);
+    CHECK_FALSE(report->cache_end_wall_residual_seconds);
+    REQUIRE(report->local_live_gap_change_seconds);
+    CHECK(*report->local_live_gap_change_seconds == Approx(2.0));
 }
