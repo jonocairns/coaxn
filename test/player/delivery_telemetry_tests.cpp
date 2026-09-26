@@ -12,6 +12,7 @@ namespace {
 
 constexpr core::Generation kGeneration{3};
 constexpr core::LoadAttempt kAttempt{1};
+constexpr double kBin = player::DeliveryTelemetry::kGapBinSeconds;
 
 core::TimePoint at(double seconds) { return core::TimePoint{core::seconds(seconds)}; }
 
@@ -21,6 +22,7 @@ double seconds(core::Duration value) {
 
 player::DeliverySample sample(double observed, std::optional<double> cache_end,
                               std::optional<double> buffer = 4.0,
+                              std::optional<double> target = 20.0,
                               core::LoadAttempt attempt = kAttempt) {
     return {
         .generation = kGeneration,
@@ -28,7 +30,25 @@ player::DeliverySample sample(double observed, std::optional<double> cache_end,
         .observed_at = at(observed),
         .cache_end_seconds = cache_end,
         .buffer_seconds = buffer,
+        .buffer_target_seconds = target,
     };
+}
+
+// Chunks arrive at the given times, each moving the cache end by six seconds,
+// with the cache end held still at every half-second sample in between.
+void chunked(player::DeliveryTelemetry& delivery, std::initializer_list<double> gaps,
+             double start = 0.5, double buffer = 4.0) {
+    double cache_end = 6.0;
+    double now = start;
+    delivery.observe(sample(now, cache_end, buffer));
+    for (const double gap : gaps) {
+        for (double step = 0.5; step < gap; step += 0.5) {
+            delivery.observe(sample(now + step, cache_end, buffer));
+        }
+        now += gap;
+        cache_end += 6.0;
+        delivery.observe(sample(now, cache_end, buffer));
+    }
 }
 
 }  // namespace
@@ -37,7 +57,7 @@ TEST_CASE("first data is reported once, measured from load issue") {
     player::DeliveryTelemetry delivery;
     CHECK_FALSE(delivery.begin_load(kGeneration, kAttempt, at(10.0)));
 
-    // Opening: nothing readable yet, then a cache end with no buffered media.
+    // Opening: nothing readable, then a cache end with no buffered media.
     CHECK_FALSE(delivery.observe(sample(10.5, std::nullopt, std::nullopt)));
     CHECK_FALSE(delivery.observe(sample(11.0, 0.0, 0.0)));
 
@@ -47,35 +67,51 @@ TEST_CASE("first data is reported once, measured from load issue") {
     CHECK_FALSE(delivery.observe(sample(13.0, 1.8, 1.4)));
 }
 
-TEST_CASE("chunked delivery is summarised as the gaps between arrivals") {
+TEST_CASE("chunked delivery is summarised as the silences between movements") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
-    delivery.observe(sample(0.5, 6.0));
-
-    // A 6s chunk every 5s, then one late chunk after 11s of silence. Samples in
-    // between see the cache end hold still.
-    double cache_end = 6.0;
-    double now = 0.5;
-    for (const double gap : {5.0, 5.0, 5.0, 11.0}) {
-        for (double step = 0.5; step < gap; step += 0.5) {
-            delivery.observe(sample(now + step, cache_end));
-        }
-        now += gap;
-        cache_end += 6.0;
-        delivery.observe(sample(now, cache_end));
-    }
+    chunked(delivery, {5.0, 5.0, 5.0, 11.0});
 
     const auto summary = delivery.end_load();
     REQUIRE(summary);
-    REQUIRE(summary->arrival_gaps);
-    CHECK(summary->arrival_gaps->count == 4);
-    CHECK(summary->arrival_gaps->p50_seconds == Approx(5.0));
-    CHECK(summary->arrival_gaps->max_seconds == Approx(11.0));
-    CHECK(summary->arrival_gaps->p99_seconds == Approx(11.0));
+    CHECK(summary->kind == player::DeliveryReportKind::Final);
+    REQUIRE(summary->source_gaps);
+    CHECK(summary->source_gaps->count == 4);
+    CHECK(summary->source_gaps->p50_seconds == Approx(5.0).margin(kBin));
+    CHECK(summary->source_gaps->p99_seconds == Approx(11.0).margin(kBin));
+    CHECK(summary->source_gaps->max_seconds == Approx(11.0));
     CHECK(seconds(summary->observed_for) == Approx(26.5));
+    CHECK(summary->throttled_gaps == 0);
 }
 
-TEST_CASE("input silence runs from the last arrival and is absent before any data") {
+TEST_CASE("silences that start with the buffer at its target are counted apart") {
+    player::DeliveryTelemetry delivery;
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    // A full 20s buffer: mpv has stopped reading, so the quiet is its own.
+    chunked(delivery, {5.0, 7.0}, 0.5, 19.5);
+
+    const auto summary = delivery.end_load();
+    REQUIRE(summary);
+    CHECK_FALSE(summary->source_gaps);
+    CHECK(summary->throttled_gaps == 2);
+}
+
+TEST_CASE("a silence still running when the load ends is reported as censored") {
+    player::DeliveryTelemetry delivery;
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    chunked(delivery, {5.0});
+    for (double now = 6.0; now <= 30.0; now += 0.5) delivery.observe(sample(now, 12.0));
+
+    const auto summary = delivery.end_load();
+    REQUIRE(summary);
+    REQUIRE(summary->silent_at_end);
+    CHECK(seconds(*summary->silent_at_end) == Approx(24.5));
+    // Only the completed gap enters the percentiles.
+    CHECK(summary->source_gaps->count == 1);
+    CHECK(summary->source_gaps->max_seconds == Approx(5.0));
+}
+
+TEST_CASE("input silence runs from the last movement and is absent before any data") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
     CHECK_FALSE(delivery.input_silence(at(1.0)));
@@ -90,17 +126,33 @@ TEST_CASE("input silence runs from the last arrival and is absent before any dat
     CHECK(seconds(*delivery.input_silence(at(4.5))) == Approx(0.0));
 }
 
-TEST_CASE("a timestamp reset still counts as an arrival") {
+TEST_CASE("a timestamp reset is counted without closing or opening a silence") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
     delivery.observe(sample(0.5, 90.0));
     delivery.observe(sample(3.0, 2.0));
+    CHECK(seconds(*delivery.input_silence(at(3.0))) == Approx(2.5));
+    delivery.observe(sample(5.0, 8.0));
 
     const auto summary = delivery.end_load();
     REQUIRE(summary);
-    REQUIRE(summary->arrival_gaps);
-    CHECK(summary->arrival_gaps->count == 1);
-    CHECK(summary->arrival_gaps->max_seconds == Approx(2.5));
+    CHECK(summary->timestamp_resets == 1);
+    REQUIRE(summary->source_gaps);
+    CHECK(summary->source_gaps->count == 1);
+    CHECK(summary->source_gaps->max_seconds == Approx(4.5));
+}
+
+TEST_CASE("unreadable samples are counted rather than read as silence ending") {
+    player::DeliveryTelemetry delivery;
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    delivery.observe(sample(0.5, 2.0));
+    delivery.observe(sample(1.0, std::nullopt));
+    delivery.observe(sample(1.5, std::nullopt));
+
+    const auto summary = delivery.end_load();
+    REQUIRE(summary);
+    CHECK(summary->missing_samples == 2);
+    CHECK_FALSE(summary->source_gaps);
 }
 
 TEST_CASE("samples from another load or out of order are ignored") {
@@ -108,12 +160,24 @@ TEST_CASE("samples from another load or out of order are ignored") {
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
     delivery.observe(sample(1.0, 2.0));
 
-    CHECK_FALSE(delivery.observe(sample(2.0, 50.0, 4.0, core::LoadAttempt{2})));
+    CHECK_FALSE(delivery.observe(sample(2.0, 50.0, 4.0, 20.0, core::LoadAttempt{2})));
     delivery.observe(sample(0.5, 9.0));
 
     const auto summary = delivery.end_load();
     REQUIRE(summary);
-    CHECK_FALSE(summary->arrival_gaps);
+    CHECK_FALSE(summary->source_gaps);
+}
+
+TEST_CASE("gaps beyond the binned range keep an exact maximum") {
+    player::DeliveryTelemetry delivery;
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    delivery.observe(sample(0.5, 1.0));
+    delivery.observe(sample(200.5, 7.0));
+
+    const auto summary = delivery.end_load();
+    REQUIRE(summary->source_gaps);
+    CHECK(summary->source_gaps->max_seconds == Approx(200.0));
+    CHECK(summary->source_gaps->p50_seconds == Approx(200.0));
 }
 
 TEST_CASE("buffer depth range covers only samples after first data") {
@@ -130,21 +194,47 @@ TEST_CASE("buffer depth range covers only samples after first data") {
     CHECK(*summary->buffer_max_seconds == Approx(9.5));
 }
 
-TEST_CASE("beginning a load hands back the previous load's summary") {
+TEST_CASE("a snapshot reports the load so far without ending it") {
+    player::DeliveryTelemetry delivery;
+    CHECK_FALSE(delivery.snapshot(at(0.0)));
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    CHECK_FALSE(delivery.snapshot(at(0.2)));
+    chunked(delivery, {5.0});
+
+    const auto snapshot = delivery.snapshot(at(8.0));
+    REQUIRE(snapshot);
+    CHECK(snapshot->kind == player::DeliveryReportKind::Snapshot);
+    CHECK(seconds(snapshot->observed_for) == Approx(8.0));
+    CHECK(seconds(*snapshot->silent_at_end) == Approx(2.5));
+
+    // The load carries on and its final summary includes later gaps.
+    delivery.observe(sample(10.5, 18.0));
+    const auto summary = delivery.end_load();
+    REQUIRE(summary);
+    CHECK(summary->source_gaps->count == 2);
+}
+
+TEST_CASE("beginning the same load again continues its record") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
     delivery.observe(sample(1.0, 2.0));
 
-    const auto previous = delivery.begin_load(kGeneration, core::LoadAttempt{2}, at(5.0));
-    REQUIRE(previous);
-    CHECK(previous->load_attempt == kAttempt);
+    // A late revival restarts supervision for the same physical load.
+    CHECK_FALSE(delivery.begin_load(kGeneration, kAttempt, at(40.0)));
+    delivery.observe(sample(45.0, 8.0));
+
+    const auto replaced = delivery.begin_load(kGeneration, core::LoadAttempt{2}, at(50.0));
+    REQUIRE(replaced);
+    CHECK(replaced->load_attempt == kAttempt);
+    CHECK(seconds(*replaced->load_to_first_data) == Approx(1.0));
+    CHECK(replaced->source_gaps->max_seconds == Approx(44.0));
 
     // A load with no readable sample says nothing about delivery.
     CHECK_FALSE(delivery.end_load());
     CHECK_FALSE(delivery.end_load());
 }
 
-TEST_CASE("the summary line carries every decision field") {
+TEST_CASE("the report line carries every decision field") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
     delivery.observe(sample(3.0, 6.0));
@@ -153,7 +243,14 @@ TEST_CASE("the summary line carries every decision field") {
     const auto line = player::format_delivery_summary(*delivery.end_load());
     CHECK(line.find("Delivery summary generation=3 load-attempt=1") == 0);
     CHECK(line.find(" load-to-first-data=3000ms") != std::string::npos);
-    CHECK(line.find(" arrivals=1 gap-p50=5.00s") != std::string::npos);
-    CHECK(line.find(" gap-max=5.00s buffer-min=4.00s buffer-max=4.00s") != std::string::npos);
-    CHECK(line.find(" schema=delivery-observability-v1") != std::string::npos);
+    CHECK(line.find(" source-gaps=1 gap-p50=5.00s") != std::string::npos);
+    CHECK(line.find(" gap-max=5.00s throttled-gaps=0 silent-at-end=0ms") != std::string::npos);
+    CHECK(line.find(" timestamp-resets=0 missing-samples=0") != std::string::npos);
+    CHECK(line.find(" buffer-min=4.00s buffer-max=4.00s") != std::string::npos);
+    CHECK(line.find(" schema=delivery-observability-v2") != std::string::npos);
+
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    delivery.observe(sample(1.0, 2.0));
+    CHECK(player::format_delivery_summary(*delivery.snapshot(at(2.0)))
+              .find("Delivery snapshot generation=3") == 0);
 }

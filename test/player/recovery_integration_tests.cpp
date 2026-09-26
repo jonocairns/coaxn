@@ -587,9 +587,42 @@ TEST_CASE("the production session reports delivery per load and silence at each 
 
     REQUIRE(app.stop());
     REQUIRE(app.delivery_summaries.size() == 1);
+    const auto& summary = app.delivery_summaries.front();
+    CHECK(summary.kind == player::DeliveryReportKind::Final);
+    CHECK(summary.load_attempt == core::LoadAttempt{1});
+    // The zap phase caches one second, so a 4s buffer is at target: the quiet
+    // is mpv declining to read, not the source.
+    CHECK(summary.throttled_gaps == 1);
+    CHECK_FALSE(summary.source_gaps);
+}
+
+TEST_CASE("the production session snapshots a long load") {
+    RecoveryAppLoop app;
+    app.play();
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    for (double at = 0.6; at < 61.0; at += 0.5) app.tick(at, playing(at - 0.1));
+    REQUIRE(app.delivery_summaries.size() == 1);
+    CHECK(app.delivery_summaries.front().kind == player::DeliveryReportKind::Snapshot);
     CHECK(app.delivery_summaries.front().load_attempt == core::LoadAttempt{1});
-    REQUIRE(app.delivery_summaries.front().arrival_gaps);
-    CHECK(app.delivery_summaries.front().arrival_gaps->max_seconds == Catch::Approx(2.5));
+}
+
+TEST_CASE("the production session snapshots a load when recovery gives up on it") {
+    auto policy = core::kDefaultRecoveryPolicy;
+    policy.attempt_delays.fill(core::Duration{});
+    RecoveryAppLoop app(RecoveryAppLoop::ExecutionMode::Reject, policy);
+    const auto load = app.play();
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    app.tick(0.6, playing(0.5));
+
+    app.deliver_end(load, player::PlayerEndReason::Error);
+    for (int attempt = 0; attempt < 8; ++attempt) app.poll(1.0);
+    REQUIRE(app.state().name == core::SupervisorStateName::Failed);
+
+    REQUIRE_FALSE(app.delivery_summaries.empty());
+    const auto& last = app.delivery_summaries.back();
+    CHECK(last.kind == player::DeliveryReportKind::Snapshot);
+    CHECK(last.load_attempt == core::LoadAttempt{1});
+    CHECK(last.load_to_first_data);
 }
 
 TEST_CASE("confirmed cache-relative timeline regression reopens through the supervisor") {

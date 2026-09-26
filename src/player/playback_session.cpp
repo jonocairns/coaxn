@@ -229,6 +229,7 @@ void PlaybackSession::emit_delivery_summary(std::optional<DeliveryLoadSummary> s
 void PlaybackSession::restart_health_supervision(core::LoadAttempt load_attempt) {
     const auto now = clock_.now();
     emit_delivery_summary(delivery_.begin_load(generation_, load_attempt, now));
+    next_delivery_snapshot_ = now + kDeliverySnapshotInterval;
     const auto target = core::buffer_phase_targets(core::BufferPhase::Zap);
     playback_health_ = core::initial_playback_health(
         generation_, load_attempt, core::BufferPhase::Zap, now, target.cache_seconds);
@@ -394,7 +395,14 @@ void PlaybackSession::sample_health() {
         .observed_at = now,
         .cache_end_seconds = observation.cache_end_seconds,
         .buffer_seconds = observation.buffer_seconds,
+        .buffer_target_seconds = target.cache_seconds,
     });
+    // A load can play for hours without ending, and a saved log is only as
+    // useful as the last delivery line in it.
+    if (now >= next_delivery_snapshot_) {
+        next_delivery_snapshot_ = now + kDeliverySnapshotInterval;
+        emit_delivery_summary(delivery_.snapshot(now));
+    }
     if (callbacks_.set_health_discontinuities) {
         callbacks_.set_health_discontinuities(fold.state.discontinuities);
     }
@@ -529,6 +537,12 @@ void PlaybackSession::on_supervisor_state_changed(const core::SupervisorState& s
         timeline_recovery_pending_ = false;
     }
 
+    if (state.name == core::SupervisorStateName::Failed &&
+        previous != core::SupervisorStateName::Failed) {
+        // Supervision stops here, so this is the failed load's last word
+        // unless it is revived -- which continues the same delivery record.
+        emit_delivery_summary(delivery_.snapshot(clock_.now()));
+    }
     if (previous == core::SupervisorStateName::Failed &&
         state.name == core::SupervisorStateName::Zap &&
         state.generation == generation_) {

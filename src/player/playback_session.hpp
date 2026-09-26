@@ -81,6 +81,8 @@ struct PlaybackSessionCallbacks {
 // exactly the same with a fake telemetry/action boundary.
 class PlaybackSession {
 public:
+    static constexpr core::Duration kDeliverySnapshotInterval = core::seconds(60.0);
+
     PlaybackSession(const core::SupervisorClock& clock,
                     PlaybackSessionCallbacks callbacks,
                     core::RecoveryPolicy policy = core::kDefaultRecoveryPolicy);
@@ -172,6 +174,7 @@ private:
     std::optional<core::TimePoint> last_rebuffer_at_;
     RecoveryEdgeObserver recovery_edge_;
     DeliveryTelemetry delivery_;
+    core::TimePoint next_delivery_snapshot_{};
 
     LiveSync live_sync_;
     LiveSyncTurn live_sync_turn_;
