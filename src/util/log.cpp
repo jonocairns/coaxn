@@ -139,6 +139,30 @@ void write(Level level, std::string_view message) {
     }
 }
 
+// Removes ".partial" files left by saves the app closed on. Only ones
+// untouched for an hour, so a save still running in another instance is safe.
+static void remove_stale_partials(const std::wstring& directory) {
+    constexpr ULONGLONG kStaleAfter = 60ULL * 60ULL * 10'000'000ULL;  // 100ns units
+    FILETIME now_time{};
+    GetSystemTimeAsFileTime(&now_time);
+    const ULONGLONG now =
+        (static_cast<ULONGLONG>(now_time.dwHighDateTime) << 32) | now_time.dwLowDateTime;
+
+    WIN32_FIND_DATAW found{};
+    const HANDLE search =
+        FindFirstFileW(path_in(directory, L"coax-*.log.partial").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return;
+    do {
+        const ULONGLONG written =
+            (static_cast<ULONGLONG>(found.ftLastWriteTime.dwHighDateTime) << 32) |
+            found.ftLastWriteTime.dwLowDateTime;
+        if (now > written && now - written > kStaleAfter) {
+            DeleteFileW(path_in(directory, found.cFileName).c_str());
+        }
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+}
+
 std::optional<SavedLog> save_copy(std::string& error) {
     std::FILE* file = session_log();
     // Read once: a detached save can still be running as the process exits.
@@ -167,6 +191,7 @@ std::optional<SavedLog> save_copy(std::string& error) {
         L"logs");
     // Already existing is the normal case; a real failure surfaces below.
     CreateDirectoryW(directory.c_str(), nullptr);
+    remove_stale_partials(directory);
 
     const HANDLE source = CreateFileW(
         source_path.c_str(), GENERIC_READ,
