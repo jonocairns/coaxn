@@ -1,6 +1,7 @@
 #include "win/app_paths.hpp"
 
 #include <windows.h>
+#include <shellapi.h>
 #include <shlobj.h>
 
 namespace coax::win {
@@ -20,6 +21,11 @@ std::wstring app_data_dir() {
     // case rather than a problem.
     CreateDirectoryW(directory.c_str(), nullptr);
     return directory;
+}
+
+void reveal_in_explorer(const std::wstring& path) {
+    const std::wstring arguments = L"/select,\"" + path + L"\"";
+    ShellExecuteW(nullptr, L"open", L"explorer.exe", arguments.c_str(), nullptr, SW_SHOWNORMAL);
 }
 
 }  // namespace coax::win

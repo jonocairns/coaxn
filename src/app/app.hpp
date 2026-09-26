@@ -215,6 +215,9 @@ private:
     // the ring in place -- worker threads are writing it -- and holding the
     // buffer keeps the per-frame copy from also being a per-frame allocation.
     std::vector<std::string> log_snapshot_;
+    // The last "Save log" result: the saved file to reveal, or why it failed.
+    std::wstring saved_log_path_;
+    std::string  saved_log_status_;
     // Whether mpv's swap chain is in the composition tree. Nothing else paints
     // the area behind the UI, so this decides whether the backdrop has to.
     bool        video_attached_   = false;

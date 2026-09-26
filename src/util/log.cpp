@@ -5,6 +5,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cwchar>
+#include <iterator>
 #include <mutex>
 
 #include "util/log_ring.hpp"
@@ -25,6 +27,9 @@ std::mutex g_file_mutex;
 // Retained for the process lifetime. Windows closes it on process teardown,
 // which also removes the delete-on-close claim file after a crash.
 HANDLE g_primary_log_claim = INVALID_HANDLE_VALUE;
+
+// Whichever file session_log() settled on, so it can be copied out later.
+std::wstring g_session_log_path;
 
 std::wstring executable_directory() {
     std::wstring path(MAX_PATH, L'\0');
@@ -62,6 +67,7 @@ std::FILE* open_session_log_in(std::wstring_view directory) {
         const std::wstring primary_path = path_in(directory, L"coax.log");
         if (std::FILE* primary = _wfopen(primary_path.c_str(), L"w")) {
             g_primary_log_claim = claim;
+            g_session_log_path = primary_path;
             return primary;
         }
         CloseHandle(claim);
@@ -72,7 +78,9 @@ std::FILE* open_session_log_in(std::wstring_view directory) {
     const std::wstring collision_name =
         L"coax-" + std::to_wstring(GetCurrentProcessId()) + L".log";
     const std::wstring collision_path = path_in(directory, collision_name);
-    return _wfopen(collision_path.c_str(), L"w");
+    std::FILE* collision = _wfopen(collision_path.c_str(), L"w");
+    if (collision) g_session_log_path = collision_path;
+    return collision;
 }
 
 // A GUI-subsystem process has no console, so the session log is the only way
@@ -128,6 +136,46 @@ void write(Level level, std::string_view message) {
         // be about to die; a buffered tail is exactly what would be lost.
         std::fflush(file);
     }
+}
+
+std::optional<SavedLog> save_copy(std::string& error) {
+    std::FILE* file = session_log();
+    if (!file || g_session_log_path.empty()) {
+        error = "There is no session log to save";
+        return std::nullopt;
+    }
+
+    const auto slash = g_session_log_path.find_last_of(L'\\');
+    const std::wstring directory = path_in(
+        slash == std::wstring::npos ? std::wstring{} : g_session_log_path.substr(0, slash),
+        L"logs");
+    // Already existing is the normal case; a real failure surfaces at the copy.
+    CreateDirectoryW(directory.c_str(), nullptr);
+
+    SYSTEMTIME local{};
+    GetLocalTime(&local);
+    wchar_t name[64];
+    swprintf(name, std::size(name), L"coax-%04u%02u%02u-%02u%02u%02u.log",
+             local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond);
+    const std::wstring destination = path_in(directory, name);
+
+    {
+        // Held across the copy so it ends on a whole line rather than halfway
+        // through one another thread is writing.
+        std::scoped_lock lock(g_file_mutex);
+        std::fflush(file);
+        if (!CopyFileW(g_session_log_path.c_str(), destination.c_str(), TRUE)) {
+            error = std::format("Could not save the log (error {})", GetLastError());
+            return std::nullopt;
+        }
+    }
+
+    std::string display(static_cast<std::size_t>(WideCharToMultiByte(
+        CP_UTF8, 0, destination.c_str(), static_cast<int>(destination.size()),
+        nullptr, 0, nullptr, nullptr)), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, destination.c_str(), static_cast<int>(destination.size()),
+                        display.data(), static_cast<int>(display.size()), nullptr, nullptr);
+    return SavedLog{destination, std::move(display)};
 }
 
 std::vector<std::string> recent() {

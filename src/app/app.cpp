@@ -16,6 +16,7 @@
 #include "app/theme.hpp"
 #include "app/widgets.hpp"
 #include "util/log.hpp"
+#include "win/app_paths.hpp"
 #include "win/credential_store.hpp"
 #include "win/settings_store.hpp"
 
@@ -2143,6 +2144,31 @@ void App::draw_diagnostics() {
     }
 
     ImGui::EndTable();
+
+    // A live run's evidence is otherwise lost at the next launch, which
+    // truncates coax.log. Saving copies it out without stopping playback.
+    if (ImGui::SmallButton("Save log")) {
+        std::string error;
+        if (const auto saved = log::save_copy(error)) {
+            saved_log_path_   = saved->path;
+            saved_log_status_ = std::format("Saved to {}", saved->display_path);
+            log::info("Session log saved to {}", saved->display_path);
+        } else {
+            saved_log_path_.clear();
+            saved_log_status_ = error;
+            log::warn("{}", error);
+        }
+    }
+    if (!saved_log_path_.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Show in folder")) {
+            win::reveal_in_explorer(saved_log_path_);
+        }
+    }
+    if (!saved_log_status_.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", saved_log_status_.c_str());
+    }
 
     // Full width, under both columns: log lines are long and splitting them
     // into a column would wrap every one of them.
