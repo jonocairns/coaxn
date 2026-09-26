@@ -12,9 +12,10 @@ double seconds(core::Duration value) {
     return std::chrono::duration<double>(value).count();
 }
 
-// Nearest-rank percentile over the binned gaps. A bin reports its midpoint,
-// never more than the exact maximum.
-double percentile(const std::vector<std::uint32_t>& bins, std::size_t count,
+// Nearest-rank percentile over the binned gaps, then the exact long ones
+// (sorted). A bin reports its midpoint, never more than the exact maximum.
+double percentile(const std::vector<std::uint32_t>& bins,
+                  const std::vector<double>& long_gaps, std::size_t count,
                   double max_seconds, double fraction) {
     const auto rank = std::clamp<std::size_t>(
         static_cast<std::size_t>(std::ceil(fraction * static_cast<double>(count))), 1, count);
@@ -22,13 +23,13 @@ double percentile(const std::vector<std::uint32_t>& bins, std::size_t count,
     for (std::size_t bin = 0; bin < bins.size(); ++bin) {
         seen += bins[bin];
         if (seen >= rank) {
-            if (bin + 1 == bins.size()) return max_seconds;
             return std::min((static_cast<double>(bin) + 0.5) *
                                 DeliveryTelemetry::kGapBinSeconds,
                             max_seconds);
         }
     }
-    return max_seconds;
+    const auto index = rank - seen - 1;
+    return index < long_gaps.size() ? long_gaps[index] : max_seconds;
 }
 
 }  // namespace
@@ -38,19 +39,19 @@ std::optional<DeliveryLoadSummary> DeliveryTelemetry::begin_load(
     if (load_ && load_->generation == generation && load_->load_attempt == load_attempt) {
         return std::nullopt;
     }
-    auto previous = end_load();
+    auto previous = end_load(issued_at);
     load_ = Load{.generation = generation, .load_attempt = load_attempt, .issued_at = issued_at};
     load_->gap_bins.assign(kGapBins, 0);
     return previous;
 }
 
-std::optional<DeliveryLoadSummary> DeliveryTelemetry::end_load() {
+std::optional<DeliveryLoadSummary> DeliveryTelemetry::end_load(core::TimePoint now) {
     if (!load_) return std::nullopt;
     const auto load = std::move(*load_);
     load_.reset();
     // A load that never produced a sample says nothing about delivery.
     if (!load.last_observed_at) return std::nullopt;
-    return summarize(load, DeliveryReportKind::Final, *load.last_observed_at);
+    return summarize(load, DeliveryReportKind::Final, std::max(now, *load.last_observed_at));
 }
 
 std::optional<DeliveryLoadSummary> DeliveryTelemetry::snapshot(core::TimePoint now) const {
@@ -77,7 +78,9 @@ std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& s
                                            *sample.buffer_seconds);
     }
     const bool at_target = sample.buffer_seconds && sample.buffer_target_seconds &&
-        *sample.buffer_seconds >= *sample.buffer_target_seconds - kAtTargetMarginSeconds;
+        *sample.buffer_seconds >=
+            *sample.buffer_target_seconds -
+                std::min(kAtTargetMarginSeconds, *sample.buffer_target_seconds / 2.0);
 
     const auto previous = load.last_cache_end_seconds;
     load.last_cache_end_seconds = sample.cache_end_seconds;
@@ -114,9 +117,13 @@ std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& s
         const double gap = seconds(sample.observed_at - *load.quiet_since);
         // The nudge keeps an exact multiple of the bin width, which a double
         // division can land just under, in its own bin.
-        const auto bin = std::min(static_cast<std::size_t>(gap / kGapBinSeconds + 1e-9),
-                                  kGapBins - 1);
-        ++load.gap_bins[bin];
+        const auto bin = static_cast<std::size_t>(gap / kGapBinSeconds + 1e-9);
+        if (bin < kGapBins) {
+            ++load.gap_bins[bin];
+        } else if (load.long_gaps.size() < kMaxLongGaps) {
+            load.long_gaps.insert(
+                std::upper_bound(load.long_gaps.begin(), load.long_gaps.end(), gap), gap);
+        }
         ++load.gap_count;
         load.gap_max_seconds = std::max(load.gap_max_seconds, gap);
     } else {
@@ -150,11 +157,15 @@ DeliveryLoadSummary DeliveryTelemetry::summarize(
         summary.silent_at_end = reported_at - *load.quiet_since;
     }
     if (load.gap_count > 0) {
+        const auto at = [&](double fraction) {
+            return percentile(load.gap_bins, load.long_gaps, load.gap_count,
+                              load.gap_max_seconds, fraction);
+        };
         summary.source_gaps = DeliveryGapStats{
             .count = load.gap_count,
-            .p50_seconds = percentile(load.gap_bins, load.gap_count, load.gap_max_seconds, 0.50),
-            .p90_seconds = percentile(load.gap_bins, load.gap_count, load.gap_max_seconds, 0.90),
-            .p99_seconds = percentile(load.gap_bins, load.gap_count, load.gap_max_seconds, 0.99),
+            .p50_seconds = at(0.50),
+            .p90_seconds = at(0.90),
+            .p99_seconds = at(0.99),
             .max_seconds = load.gap_max_seconds,
         };
     }

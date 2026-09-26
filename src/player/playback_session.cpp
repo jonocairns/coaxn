@@ -84,7 +84,7 @@ bool PlaybackSession::stop(core::Generation generation) {
          supervisor_.current().generation == generation)) return false;
 
     supervisor_.dispatch(core::PlaybackStopped{generation});
-    emit_delivery_summary(delivery_.end_load());
+    emit_delivery_summary(delivery_.end_load(clock_.now()));
     playback_health_.reset();
     health_snapshot_ = {};
     timeline_classification_ = TimelineClassification::Unavailable;
@@ -566,7 +566,7 @@ void PlaybackSession::presentation_lost() {
 
 void PlaybackSession::dispose() {
     // Shutdown ends the current load without a stop; its record ends here too.
-    emit_delivery_summary(delivery_.end_load());
+    emit_delivery_summary(delivery_.end_load(clock_.now()));
     supervisor_.dispose();
 }
 

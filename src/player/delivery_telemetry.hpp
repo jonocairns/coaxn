@@ -72,17 +72,23 @@ public:
     // Movement below this is sampling noise rather than new media.
     static constexpr double kMovementEpsilonSeconds = 0.05;
     // A buffer this close to its target counts as full, so mpv may have
-    // stopped reading.
+    // stopped reading. Never more than half the target, so the one-second
+    // zap target still has a band where a silence is the source's.
     static constexpr double kAtTargetMarginSeconds = 1.0;
     static constexpr double kGapBinSeconds = 0.05;
-    static constexpr std::size_t kGapBins = 2400;  // 120s; longer gaps share the last bin
+    static constexpr std::size_t kGapBins = 2400;  // 120s
+    // Gaps past the binned range are kept exactly; there can be at most one
+    // per two minutes, and this caps even a day-long load.
+    static constexpr std::size_t kMaxLongGaps = 1024;
 
     // Starts observing a load and returns the final summary of the load it
     // replaces. Beginning the load already being observed continues it: a
     // load revived after the supervisor gave up on it is one physical load.
     std::optional<DeliveryLoadSummary> begin_load(
         core::Generation generation, core::LoadAttempt load_attempt, core::TimePoint issued_at);
-    std::optional<DeliveryLoadSummary> end_load();
+    // Ends the load as of `now`, so a silence running when it ended -- after
+    // a failure, say -- is measured to the end rather than the last sample.
+    std::optional<DeliveryLoadSummary> end_load(core::TimePoint now);
     // The current load's figures so far, without ending it.
     [[nodiscard]] std::optional<DeliveryLoadSummary> snapshot(core::TimePoint now) const;
 
@@ -110,6 +116,7 @@ private:
         std::optional<double> buffer_min_seconds{};
         std::optional<double> buffer_max_seconds{};
         std::vector<std::uint32_t> gap_bins{};
+        std::vector<double> long_gaps{};
         std::size_t gap_count = 0;
         double gap_max_seconds = 0.0;
         std::size_t throttled_gaps = 0;
