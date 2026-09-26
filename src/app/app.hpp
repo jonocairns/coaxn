@@ -217,7 +217,8 @@ private:
     // the ring in place -- worker threads are writing it -- and holding the
     // buffer keeps the per-frame copy from also being a per-frame allocation.
     std::vector<std::string> log_snapshot_;
-    // "Save log" copies on a worker so the frame loop never waits on disk.
+    // "Save log" copies on a detached worker so neither the frame loop nor
+    // shutdown ever waits on disk.
     struct LogSaveResult {
         std::optional<log::SavedLog> saved;
         std::string error;

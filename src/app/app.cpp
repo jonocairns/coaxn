@@ -2165,11 +2165,17 @@ void App::draw_diagnostics() {
     ImGui::BeginDisabled(saving);
     if (ImGui::SmallButton(saving ? "Saving..." : "Save log")) {
         try {
-            log_save_ = std::async(std::launch::async, [] {
+            // A detached thread and a promise, not std::async: that future
+            // would block App's destruction until a copy to a stalled drive
+            // gave up. Exiting simply abandons an unfinished copy.
+            auto promise = std::make_shared<std::promise<LogSaveResult>>();
+            auto future = promise->get_future();
+            std::thread([promise] {
                 LogSaveResult result;
                 result.saved = log::save_copy(result.error);
-                return result;
-            });
+                promise->set_value(std::move(result));
+            }).detach();
+            log_save_ = std::move(future);
         } catch (const std::system_error& failure) {
             // No thread to copy on; saying so beats saving on the frame loop.
             saved_log_path_.clear();

@@ -141,7 +141,9 @@ void write(Level level, std::string_view message) {
 
 std::optional<SavedLog> save_copy(std::string& error) {
     std::FILE* file = session_log();
-    if (!file || g_session_log_path.empty()) {
+    // Read once: a detached save can still be running as the process exits.
+    const std::wstring source_path = file ? g_session_log_path : std::wstring{};
+    if (!file || source_path.empty()) {
         error = "There is no session log to save";
         return std::nullopt;
     }
@@ -159,15 +161,15 @@ std::optional<SavedLog> save_copy(std::string& error) {
         return std::nullopt;
     }
 
-    const auto slash = g_session_log_path.find_last_of(L'\\');
+    const auto slash = source_path.find_last_of(L'\\');
     const std::wstring directory = path_in(
-        slash == std::wstring::npos ? std::wstring{} : g_session_log_path.substr(0, slash),
+        slash == std::wstring::npos ? std::wstring{} : source_path.substr(0, slash),
         L"logs");
     // Already existing is the normal case; a real failure surfaces below.
     CreateDirectoryW(directory.c_str(), nullptr);
 
     const HANDLE source = CreateFileW(
-        g_session_log_path.c_str(), GENERIC_READ,
+        source_path.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (source == INVALID_HANDLE_VALUE) {
