@@ -564,6 +564,10 @@ void PlaybackSession::presentation_lost() {
     supervisor_.dispatch(core::PresentationLost{generation_});
 }
 
-void PlaybackSession::dispose() { supervisor_.dispose(); }
+void PlaybackSession::dispose() {
+    // Shutdown ends the current load without a stop; its record ends here too.
+    emit_delivery_summary(delivery_.end_load());
+    supervisor_.dispose();
+}
 
 }  // namespace coax::player

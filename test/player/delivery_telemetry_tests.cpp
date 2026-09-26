@@ -84,16 +84,41 @@ TEST_CASE("chunked delivery is summarised as the silences between movements") {
     CHECK(summary->throttled_gaps == 0);
 }
 
-TEST_CASE("silences that start with the buffer at its target are counted apart") {
+TEST_CASE("silences with the buffer held at its target are counted apart") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
-    // A full 20s buffer: mpv has stopped reading, so the quiet is its own.
+    // A full 20s buffer throughout: mpv's own throttling explains the quiet.
     chunked(delivery, {5.0, 7.0}, 0.5, 19.5);
 
     const auto summary = delivery.end_load();
     REQUIRE(summary);
     CHECK_FALSE(summary->source_gaps);
     CHECK(summary->throttled_gaps == 2);
+    CHECK_FALSE(summary->silent_at_end);
+}
+
+TEST_CASE("a silence is charged to the source from when the buffer leaves its target") {
+    player::DeliveryTelemetry delivery;
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    delivery.observe(sample(0.5, 6.0, 19.6));
+    delivery.observe(sample(1.0, 6.0, 19.1));
+    // Below target from here: mpv would read anything that arrived.
+    delivery.observe(sample(1.5, 6.0, 18.6));
+    delivery.observe(sample(3.0, 6.0, 17.1));
+    delivery.observe(sample(6.5, 12.0, 19.5));
+
+    const auto summary = delivery.end_load();
+    REQUIRE(summary);
+    CHECK(summary->throttled_gaps == 0);
+    REQUIRE(summary->source_gaps);
+    CHECK(summary->source_gaps->max_seconds == Approx(5.0));
+    // The raw demuxer view still runs from the last movement.
+    constexpr core::LoadAttempt next{2};
+    delivery.begin_load(kGeneration, next, at(0.0));
+    delivery.observe(sample(0.5, 6.0, 19.6, 20.0, next));
+    delivery.observe(sample(2.0, 6.0, 17.0, 20.0, next));
+    CHECK(seconds(*delivery.input_silence(at(4.0))) == Approx(3.5));
+    CHECK(seconds(*delivery.snapshot(at(4.0))->silent_at_end) == Approx(2.0));
 }
 
 TEST_CASE("a silence still running when the load ends is reported as censored") {
@@ -145,6 +170,8 @@ TEST_CASE("a timestamp reset is counted without closing or opening a silence") {
 TEST_CASE("unreadable samples are counted rather than read as silence ending") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    // Opening samples have no cache end yet; that is normal, not missing.
+    delivery.observe(sample(0.2, std::nullopt, std::nullopt));
     delivery.observe(sample(0.5, 2.0));
     delivery.observe(sample(1.0, std::nullopt));
     delivery.observe(sample(1.5, std::nullopt));

@@ -18,8 +18,8 @@ namespace coax::player {
 //
 // Cache-end movement is what the demuxer shows, not packet arrival on the
 // wire: transport buffering, demuxing and mpv's own read throttling all shape
-// it. Silences that begin with the buffer at its target are reported apart,
-// because there mpv has stopped reading rather than the source going quiet.
+// it. While the buffer sits at its target mpv may have stopped reading, so a
+// silence is only charged to the source from the first sample below target.
 
 inline constexpr std::string_view kDeliveryTelemetrySchema = "delivery-observability-v2";
 
@@ -48,16 +48,19 @@ struct DeliveryLoadSummary {
     core::LoadAttempt load_attempt;
     core::Duration observed_for{};
     std::optional<core::Duration> load_to_first_data{};
-    // Completed silences between cache-end movements while the buffer was
-    // below its target. Percentiles come from 50ms bins; the maximum is exact.
+    // Completed silences, each measured from the later of the last cache-end
+    // movement and the first sample with the buffer below its target.
+    // Percentiles come from 50ms bins; the maximum is exact.
     std::optional<DeliveryGapStats> source_gaps{};
-    // Completed silences that began with the buffer at its target.
+    // Completed silences during which the buffer never left its target, so
+    // mpv's own read throttling can explain all of it.
     std::size_t throttled_gaps = 0;
-    // The silence still running when the report was made. A load that ends
-    // or fails while quiet leaves only this: it is at least this long, not a
-    // measured gap, and it is never folded into the percentiles above.
+    // The source silence still running when the report was made, measured the
+    // same way. A load that ends or fails while quiet leaves only this: it is
+    // at least this long, and it is never folded into the percentiles above.
     std::optional<core::Duration> silent_at_end{};
     std::size_t timestamp_resets = 0;
+    // Samples after first data with no readable cache end.
     std::size_t missing_samples = 0;
     std::optional<double> buffer_min_seconds{};
     std::optional<double> buffer_max_seconds{};
@@ -88,7 +91,8 @@ public:
     std::optional<core::Duration> observe(const DeliverySample& sample);
 
     // How long the cache end has been still, measured from its last forward
-    // movement. Absent until the load has shown any data.
+    // movement whatever the buffer level: what the demuxer has seen, not a
+    // judgement about the source. Absent until the load has shown any data.
     [[nodiscard]] std::optional<core::Duration> input_silence(core::TimePoint now) const;
 
 private:
@@ -98,7 +102,9 @@ private:
         core::TimePoint issued_at{};
         std::optional<core::TimePoint> first_data_at{};
         std::optional<core::TimePoint> last_movement_at{};
-        bool last_movement_at_target = false;
+        // When the current silence became chargeable to the source: the last
+        // movement, or the first sample after it with the buffer below target.
+        std::optional<core::TimePoint> quiet_since{};
         std::optional<core::TimePoint> last_observed_at{};
         std::optional<double> last_cache_end_seconds{};
         std::optional<double> buffer_min_seconds{};

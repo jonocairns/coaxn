@@ -67,7 +67,7 @@ std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& s
     load.last_observed_at = sample.observed_at;
 
     if (!sample.cache_end_seconds) {
-        ++load.missing_samples;
+        if (load.first_data_at) ++load.missing_samples;
         return std::nullopt;
     }
     if (sample.buffer_seconds && load.first_data_at) {
@@ -89,7 +89,7 @@ std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& s
         }
         load.first_data_at = sample.observed_at;
         load.last_movement_at = sample.observed_at;
-        load.last_movement_at_target = at_target;
+        if (!at_target) load.quiet_since = sample.observed_at;
         if (sample.buffer_seconds) {
             load.buffer_min_seconds = *sample.buffer_seconds;
             load.buffer_max_seconds = *sample.buffer_seconds;
@@ -105,12 +105,13 @@ std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& s
         ++load.timestamp_resets;
         return std::nullopt;
     }
-    if (movement <= kMovementEpsilonSeconds) return std::nullopt;
+    if (movement <= kMovementEpsilonSeconds) {
+        if (!load.quiet_since && !at_target) load.quiet_since = sample.observed_at;
+        return std::nullopt;
+    }
 
-    const double gap = seconds(sample.observed_at - *load.last_movement_at);
-    if (load.last_movement_at_target) {
-        ++load.throttled_gaps;
-    } else {
+    if (load.quiet_since) {
+        const double gap = seconds(sample.observed_at - *load.quiet_since);
         // The nudge keeps an exact multiple of the bin width, which a double
         // division can land just under, in its own bin.
         const auto bin = std::min(static_cast<std::size_t>(gap / kGapBinSeconds + 1e-9),
@@ -118,9 +119,11 @@ std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& s
         ++load.gap_bins[bin];
         ++load.gap_count;
         load.gap_max_seconds = std::max(load.gap_max_seconds, gap);
+    } else {
+        ++load.throttled_gaps;
     }
     load.last_movement_at = sample.observed_at;
-    load.last_movement_at_target = at_target;
+    load.quiet_since = at_target ? std::nullopt : std::optional{sample.observed_at};
     return std::nullopt;
 }
 
@@ -143,8 +146,8 @@ DeliveryLoadSummary DeliveryTelemetry::summarize(
         .buffer_max_seconds = load.buffer_max_seconds,
     };
     if (load.first_data_at) summary.load_to_first_data = *load.first_data_at - load.issued_at;
-    if (load.last_movement_at && reported_at >= *load.last_movement_at) {
-        summary.silent_at_end = reported_at - *load.last_movement_at;
+    if (load.quiet_since && reported_at >= *load.quiet_since) {
+        summary.silent_at_end = reported_at - *load.quiet_since;
     }
     if (load.gap_count > 0) {
         summary.source_gaps = DeliveryGapStats{

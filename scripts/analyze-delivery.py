@@ -125,7 +125,7 @@ def main(path):
     print(f"  source gap p99 per load: {describe(gap_p99)}")
     print(f"  source gap max per load: {describe(gap_max)}")
     print(f"  silence cut short at report (at least this long): {describe(censored)}")
-    print(f"  throttled gaps (buffer at target): {throttled}; timestamp resets: {resets}; "
+    print(f"  throttled gaps (buffer held at target throughout): {throttled}; timestamp resets: {resets}; "
           f"missing samples: {missing}")
     print(f"Load issue to first data, loads that got there: {describe(first_data)}")
     print(f"Loads that never showed data: {len(never)}")

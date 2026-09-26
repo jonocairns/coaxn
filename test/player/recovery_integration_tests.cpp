@@ -145,6 +145,8 @@ public:
         session_.service_turn({});
     }
 
+    void dispose() { session_.dispose(); }
+
     void failure_turn(double at, bool with_exact_failure) {
         clock_.current = core::TimePoint{core::seconds(at)};
         std::vector<player::PlayerEvent> events{
@@ -594,6 +596,18 @@ TEST_CASE("the production session reports delivery per load and silence at each 
     // is mpv declining to read, not the source.
     CHECK(summary.throttled_gaps == 1);
     CHECK_FALSE(summary.source_gaps);
+}
+
+TEST_CASE("the production session ends the delivery record on shutdown") {
+    RecoveryAppLoop app;
+    app.play();
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    app.tick(0.6, playing(0.5));
+    app.dispose();
+
+    REQUIRE(app.delivery_summaries.size() == 1);
+    CHECK(app.delivery_summaries.front().kind == player::DeliveryReportKind::Final);
+    CHECK(app.delivery_summaries.front().load_to_first_data);
 }
 
 TEST_CASE("the production session snapshots a long load") {
