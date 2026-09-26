@@ -14,4 +14,8 @@ namespace coax::win {
 // anyway, and a window preference belongs to the display it was chosen on.
 std::wstring app_data_dir();
 
+// Opens an Explorer window on the file's folder with the file selected.
+// False when Explorer could not be started.
+bool reveal_in_explorer(const std::wstring& path);
+
 }  // namespace coax::win

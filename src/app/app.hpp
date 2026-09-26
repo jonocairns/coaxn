@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -16,6 +17,7 @@
 #include "player/playback_control.hpp"
 #include "player/playback_session.hpp"
 #include "player/session_target_registry.hpp"
+#include "util/log.hpp"
 #include "win/app_window.hpp"
 #include "win/composition.hpp"
 #include "win/power_request.hpp"
@@ -215,6 +217,16 @@ private:
     // the ring in place -- worker threads are writing it -- and holding the
     // buffer keeps the per-frame copy from also being a per-frame allocation.
     std::vector<std::string> log_snapshot_;
+    // "Save log" copies on a detached worker so neither the frame loop nor
+    // shutdown ever waits on disk.
+    struct LogSaveResult {
+        std::optional<log::SavedLog> saved;
+        std::string error;
+    };
+    std::future<LogSaveResult> log_save_;
+    // The last result: the saved file to reveal, or why it failed.
+    std::wstring saved_log_path_;
+    std::string  saved_log_status_;
     // Whether mpv's swap chain is in the composition tree. Nothing else paints
     // the area behind the UI, so this decides whether the backdrop has to.
     bool        video_attached_   = false;

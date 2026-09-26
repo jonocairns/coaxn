@@ -3,8 +3,11 @@
 #include <windows.h>
 #include <shlobj.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cwchar>
+#include <iterator>
 #include <mutex>
 
 #include "util/log_ring.hpp"
@@ -25,6 +28,9 @@ std::mutex g_file_mutex;
 // Retained for the process lifetime. Windows closes it on process teardown,
 // which also removes the delete-on-close claim file after a crash.
 HANDLE g_primary_log_claim = INVALID_HANDLE_VALUE;
+
+// Whichever file session_log() settled on, so it can be copied out later.
+std::wstring g_session_log_path;
 
 std::wstring executable_directory() {
     std::wstring path(MAX_PATH, L'\0');
@@ -62,6 +68,7 @@ std::FILE* open_session_log_in(std::wstring_view directory) {
         const std::wstring primary_path = path_in(directory, L"coax.log");
         if (std::FILE* primary = _wfopen(primary_path.c_str(), L"w")) {
             g_primary_log_claim = claim;
+            g_session_log_path = primary_path;
             return primary;
         }
         CloseHandle(claim);
@@ -72,7 +79,9 @@ std::FILE* open_session_log_in(std::wstring_view directory) {
     const std::wstring collision_name =
         L"coax-" + std::to_wstring(GetCurrentProcessId()) + L".log";
     const std::wstring collision_path = path_in(directory, collision_name);
-    return _wfopen(collision_path.c_str(), L"w");
+    std::FILE* collision = _wfopen(collision_path.c_str(), L"w");
+    if (collision) g_session_log_path = collision_path;
+    return collision;
 }
 
 // A GUI-subsystem process has no console, so the session log is the only way
@@ -128,6 +137,132 @@ void write(Level level, std::string_view message) {
         // be about to die; a buffered tail is exactly what would be lost.
         std::fflush(file);
     }
+}
+
+// Removes ".partial" files left by saves the app closed on. Only ones
+// untouched for an hour, so a save still running in another instance is safe.
+static void remove_stale_partials(const std::wstring& directory) {
+    constexpr ULONGLONG kStaleAfter = 60ULL * 60ULL * 10'000'000ULL;  // 100ns units
+    FILETIME now_time{};
+    GetSystemTimeAsFileTime(&now_time);
+    const ULONGLONG now =
+        (static_cast<ULONGLONG>(now_time.dwHighDateTime) << 32) | now_time.dwLowDateTime;
+
+    WIN32_FIND_DATAW found{};
+    const HANDLE search =
+        FindFirstFileW(path_in(directory, L"coax-*.log.partial").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return;
+    do {
+        const ULONGLONG written =
+            (static_cast<ULONGLONG>(found.ftLastWriteTime.dwHighDateTime) << 32) |
+            found.ftLastWriteTime.dwLowDateTime;
+        if (now > written && now - written > kStaleAfter) {
+            DeleteFileW(path_in(directory, found.cFileName).c_str());
+        }
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+}
+
+std::optional<SavedLog> save_copy(std::string& error) {
+    std::FILE* file = session_log();
+    // Read once: a detached save can still be running as the process exits.
+    const std::wstring source_path = file ? g_session_log_path : std::wstring{};
+    if (!file || source_path.empty()) {
+        error = "There is no session log to save";
+        return std::nullopt;
+    }
+
+    // Only the flush and the length are taken under the writer's lock. The
+    // copy then reads exactly that many bytes -- ending on a whole line --
+    // without holding up every thread that logs while it runs.
+    long long length = -1;
+    {
+        std::scoped_lock lock(g_file_mutex);
+        if (std::fflush(file) == 0) length = _ftelli64(file);
+    }
+    if (length < 0) {
+        error = "Could not flush the session log";
+        return std::nullopt;
+    }
+
+    const auto slash = source_path.find_last_of(L'\\');
+    const std::wstring directory = path_in(
+        slash == std::wstring::npos ? std::wstring{} : source_path.substr(0, slash),
+        L"logs");
+    // Already existing is the normal case; a real failure surfaces below.
+    CreateDirectoryW(directory.c_str(), nullptr);
+    remove_stale_partials(directory);
+
+    const HANDLE source = CreateFileW(
+        source_path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (source == INVALID_HANDLE_VALUE) {
+        error = std::format("Could not read the session log (error {})", GetLastError());
+        return std::nullopt;
+    }
+
+    // The process id keeps two sessions saving in the same second apart; the
+    // suffix does the same for one session saving twice. The copy is written
+    // to a ".partial" file and renamed into place only once complete, so an
+    // interrupted save -- the app closing mid-copy -- never looks finished.
+    // Neither step ever overwrites an earlier save.
+    SYSTEMTIME local{};
+    GetLocalTime(&local);
+    std::wstring destination;
+    std::wstring partial;
+    HANDLE target = INVALID_HANDLE_VALUE;
+    for (int copy = 1; copy <= 9 && target == INVALID_HANDLE_VALUE; ++copy) {
+        wchar_t name[80];
+        swprintf(name, std::size(name), copy == 1 ? L"coax-%04u%02u%02u-%02u%02u%02u-%lu.log"
+                                                  : L"coax-%04u%02u%02u-%02u%02u%02u-%lu-%d.log",
+                 local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute,
+                 local.wSecond, GetCurrentProcessId(), copy);
+        destination = path_in(directory, name);
+        if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+        partial = destination + L".partial";
+        target = CreateFileW(partial.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (target == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) break;
+    }
+    if (target == INVALID_HANDLE_VALUE) {
+        error = std::format("Could not create the saved log (error {})", GetLastError());
+        CloseHandle(source);
+        return std::nullopt;
+    }
+
+    std::vector<char> buffer(1 << 20);
+    long long remaining = length;
+    bool copied = true;
+    while (remaining > 0 && copied) {
+        const DWORD want = static_cast<DWORD>(
+            std::min<long long>(remaining, static_cast<long long>(buffer.size())));
+        DWORD read = 0;
+        DWORD written = 0;
+        copied = ReadFile(source, buffer.data(), want, &read, nullptr) && read > 0 &&
+                 WriteFile(target, buffer.data(), read, &written, nullptr) && written == read;
+        remaining -= read;
+    }
+    DWORD copy_error = copied ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(source);
+    CloseHandle(target);
+    // Without MOVEFILE_REPLACE_EXISTING the rename refuses to overwrite.
+    if (copied && !MoveFileExW(partial.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        copied = false;
+        copy_error = GetLastError();
+    }
+    if (!copied) {
+        DeleteFileW(partial.c_str());
+        error = std::format("Could not save the log (error {})", copy_error);
+        return std::nullopt;
+    }
+
+    std::string display(static_cast<std::size_t>(WideCharToMultiByte(
+        CP_UTF8, 0, destination.c_str(), static_cast<int>(destination.size()),
+        nullptr, 0, nullptr, nullptr)), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, destination.c_str(), static_cast<int>(destination.size()),
+                        display.data(), static_cast<int>(display.size()), nullptr, nullptr);
+    return SavedLog{destination, std::move(display)};
 }
 
 std::vector<std::string> recent() {

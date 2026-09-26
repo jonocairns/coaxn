@@ -11,11 +11,13 @@
 #include <exception>
 #include <format>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 #include "app/theme.hpp"
 #include "app/widgets.hpp"
 #include "util/log.hpp"
+#include "win/app_paths.hpp"
 #include "win/credential_store.hpp"
 #include "win/settings_store.hpp"
 
@@ -2153,6 +2155,54 @@ void App::draw_diagnostics() {
     }
 
     ImGui::EndTable();
+
+    // A live run's evidence is otherwise lost at the next launch, which
+    // truncates coax.log. Saving copies it out without stopping playback.
+    if (log_save_.valid() &&
+        log_save_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto result = log_save_.get();
+        if (result.saved) {
+            saved_log_path_   = result.saved->path;
+            saved_log_status_ = std::format("Saved to {}", result.saved->display_path);
+            log::info("Session log saved to {}", result.saved->display_path);
+        } else {
+            saved_log_path_.clear();
+            saved_log_status_ = result.error;
+            log::warn("{}", result.error);
+        }
+    }
+    const bool saving = log_save_.valid();
+    ImGui::BeginDisabled(saving);
+    if (ImGui::SmallButton(saving ? "Saving..." : "Save log")) {
+        try {
+            // A detached thread and a promise, not std::async: that future
+            // would block App's destruction until a copy to a stalled drive
+            // gave up. Exiting simply abandons an unfinished copy.
+            auto promise = std::make_shared<std::promise<LogSaveResult>>();
+            auto future = promise->get_future();
+            std::thread([promise] {
+                LogSaveResult result;
+                result.saved = log::save_copy(result.error);
+                promise->set_value(std::move(result));
+            }).detach();
+            log_save_ = std::move(future);
+        } catch (const std::system_error& failure) {
+            // No thread to copy on; saying so beats saving on the frame loop.
+            saved_log_path_.clear();
+            saved_log_status_ = std::format("Could not start saving ({})", failure.what());
+        }
+    }
+    ImGui::EndDisabled();
+    if (!saved_log_path_.empty() && !saving) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Show in folder") && !win::reveal_in_explorer(saved_log_path_)) {
+            saved_log_status_ = "Could not open Explorer";
+        }
+    }
+    if (!saved_log_status_.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", saved_log_status_.c_str());
+    }
 
     // Full width, under both columns: log lines are long and splitting them
     // into a column would wrap every one of them.

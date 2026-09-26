@@ -1,6 +1,7 @@
 #pragma once
 
 #include <format>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -13,6 +14,19 @@ enum class Level { Debug, Info, Warn, Error };
 // reads. Messages are expected to be already free of credentials: callers
 // redact before logging rather than relying on a filter here.
 void write(Level level, std::string_view message);
+
+struct SavedLog {
+    std::wstring path;
+    // UTF-8, for showing to the viewer.
+    std::string display_path;
+};
+
+// Copies the session log so far into a new timestamped file in a "logs" folder
+// beside it. The live log is truncated when the next session starts, so this
+// is how the evidence from a run outlives it. Empty with `error` set when there
+// is no session log or the copy fails. It does file I/O: call it off the UI
+// thread. Logging continues while it runs.
+std::optional<SavedLog> save_copy(std::string& error);
 
 // Most recent messages, oldest first, as a copy taken under the ring's lock.
 // It has to be a copy: any thread may be logging while the UI thread reads
