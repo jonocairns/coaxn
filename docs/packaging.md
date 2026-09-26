@@ -53,7 +53,7 @@ already shipped.
 
 Three things follow from the prefixes, so they are worth getting right:
 `feat:` bumps the minor, `fix:` the patch, and anything else — `docs:`, `ci:`,
-`refactor:` — lands in the changelog without moving the version. A breaking
+`refactor:` — neither moves the version nor appears in the changelog. A breaking
 change, written `feat!:` or with a `BREAKING CHANGE:` footer, bumps the major.
 
 ### Where the version lives

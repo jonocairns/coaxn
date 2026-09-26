@@ -29,7 +29,7 @@ jobs:
       # Needs neither Windows nor libmpv, so it finishes long before the
       # cross-build and fails fast on anything in coax_core or
       # coax_player_core: core/, the portable half of player/, and
-      # src/util/redact.cpp. The rest of util/ is Windows-only and is reached
+      # src/util/log_ring.cpp. The rest of util/ is Windows-only and is reached
       # only by the cross-build below.
       - name: Test the portable core
         run: |
