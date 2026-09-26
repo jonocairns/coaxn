@@ -47,6 +47,9 @@ std::optional<DeliveryLoadSummary> DeliveryTelemetry::begin_load(
             load_->suspended_at.reset();
             if (load_->quiet_since) load_->quiet_since = issued_at;
             if (load_->last_movement_at) load_->last_movement_at = issued_at;
+            // Nor is it a pause in sampling.
+            if (load_->last_observed_at) load_->last_observed_at = issued_at;
+            load_->still_seen = false;
         }
         return std::nullopt;
     }
@@ -82,7 +85,11 @@ std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& s
         sample.load_attempt != load_->load_attempt) return std::nullopt;
     auto& load = *load_;
     if (load.last_observed_at && sample.observed_at < *load.last_observed_at) return std::nullopt;
+    const auto previous_observed_at = load.last_observed_at;
     load.last_observed_at = sample.observed_at;
+    const bool sampling_paused = previous_observed_at &&
+        sample.observed_at - *previous_observed_at > kSamplingPause;
+    if (sampling_paused) ++load.sampling_pauses;
 
     if (!sample.cache_end_seconds) {
         if (load.first_data_at) ++load.missing_samples;
@@ -126,12 +133,17 @@ std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& s
         return std::nullopt;
     }
     if (movement <= kMovementEpsilonSeconds) {
+        load.still_seen = true;
         if (!load.quiet_since && !at_target) load.quiet_since = sample.observed_at;
         return std::nullopt;
     }
 
-    if (load.quiet_since) {
-        const double gap = seconds(sample.observed_at - *load.quiet_since);
+    // Moving at every sample is delivery keeping up, not a silence. After a
+    // pause in sampling, the movement happened somewhere inside it, so the
+    // silence is known only up to the last sample before it.
+    if (load.still_seen && load.quiet_since) {
+        const auto ended = sampling_paused ? *previous_observed_at : sample.observed_at;
+        const double gap = seconds(ended - *load.quiet_since);
         // The nudge keeps an exact multiple of the bin width, which a double
         // division can land just under, in its own bin.
         const auto bin = static_cast<std::size_t>(gap / kGapBinSeconds + 1e-9);
@@ -143,11 +155,12 @@ std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& s
         }
         ++load.gap_count;
         load.gap_max_seconds = std::max(load.gap_max_seconds, gap);
-    } else {
+    } else if (load.still_seen) {
         ++load.throttled_gaps;
     }
     load.last_movement_at = sample.observed_at;
     load.quiet_since = at_target ? std::nullopt : std::optional{sample.observed_at};
+    load.still_seen = false;
     return std::nullopt;
 }
 
@@ -168,6 +181,7 @@ DeliveryLoadSummary DeliveryTelemetry::summarize(
         .throttled_gaps = load.throttled_gaps,
         .timestamp_resets = load.timestamp_resets,
         .missing_samples = load.missing_samples,
+        .sampling_pauses = load.sampling_pauses,
         .buffer_min_seconds = load.buffer_min_seconds,
         .buffer_max_seconds = load.buffer_max_seconds,
     };
@@ -231,6 +245,7 @@ std::string format_delivery_summary(const DeliveryLoadSummary& summary) {
         << " silent-at-end=" << millis(summary.silent_at_end)
         << " timestamp-resets=" << summary.timestamp_resets
         << " missing-samples=" << summary.missing_samples
+        << " sampling-pauses=" << summary.sampling_pauses
         << " buffer-min=" << secs(summary.buffer_min_seconds)
         << " buffer-max=" << secs(summary.buffer_max_seconds)
         << " schema=" << summary.schema_version;

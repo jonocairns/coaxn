@@ -34,6 +34,14 @@ player::DeliverySample sample(double observed, std::optional<double> cache_end,
     };
 }
 
+// The cache end held still at every half-second sample from `from` to `to`.
+void hold(player::DeliveryTelemetry& delivery, double from, double to, double cache_end,
+          double buffer = 4.0) {
+    for (double now = from; now <= to + 1e-9; now += 0.5) {
+        delivery.observe(sample(now, cache_end, buffer));
+    }
+}
+
 // Chunks arrive at the given times, each moving the cache end by six seconds,
 // with the cache end held still at every half-second sample in between.
 void chunked(player::DeliveryTelemetry& delivery, std::initializer_list<double> gaps,
@@ -104,7 +112,7 @@ TEST_CASE("a silence is charged to the source from when the buffer leaves its ta
     delivery.observe(sample(1.0, 6.0, 19.1));
     // Below target from here: mpv would read anything that arrived.
     delivery.observe(sample(1.5, 6.0, 18.6));
-    delivery.observe(sample(3.0, 6.0, 17.1));
+    hold(delivery, 2.0, 6.0, 6.0, 17.0);
     delivery.observe(sample(6.5, 12.0, 19.5));
 
     const auto summary = delivery.end_load(at(0.0));
@@ -136,6 +144,51 @@ TEST_CASE("a silence still running when the load ends is reported as censored") 
     CHECK(summary->source_gaps->max_seconds == Approx(5.0));
 }
 
+TEST_CASE("a cache end moving at every sample is delivery, not a silence") {
+    for (const double buffer : {4.0, 19.8}) {
+        player::DeliveryTelemetry delivery;
+        delivery.begin_load(kGeneration, kAttempt, at(0.0));
+        // A continuous stream: the cache end advances between every sample.
+        for (double now = 0.5; now <= 60.0; now += 0.5) {
+            delivery.observe(sample(now, now, buffer));
+        }
+
+        const auto summary = delivery.end_load(at(60.0));
+        REQUIRE(summary);
+        CHECK_FALSE(summary->source_gaps);
+        CHECK(summary->throttled_gaps == 0);
+    }
+}
+
+TEST_CASE("a pause in sampling is not charged to the source") {
+    player::DeliveryTelemetry delivery;
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    // Continuous delivery, then 8s with no samples -- a window drag holding the
+    // loop -- while mpv went on reading.
+    for (double now = 0.5; now <= 10.0; now += 0.5) delivery.observe(sample(now, now));
+    for (double now = 18.0; now <= 20.0; now += 0.5) delivery.observe(sample(now, now));
+    auto summary = delivery.end_load(at(20.0));
+    REQUIRE(summary);
+    CHECK_FALSE(summary->source_gaps);
+    CHECK(summary->sampling_pauses == 1);
+
+    // A silence that ends inside a pause is known only to the sample before it.
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    delivery.observe(sample(0.5, 6.0));
+    hold(delivery, 1.0, 5.0, 6.0);
+    delivery.observe(sample(13.0, 12.0));
+    // One the cache end stayed still across is still the source's in full.
+    hold(delivery, 13.5, 14.0, 12.0);
+    delivery.observe(sample(22.0, 12.0));
+    delivery.observe(sample(22.5, 18.0));
+    summary = delivery.end_load(at(23.0));
+    REQUIRE(summary->source_gaps);
+    CHECK(summary->source_gaps->count == 2);
+    CHECK(summary->source_gaps->p50_seconds == Approx(4.5).margin(kBin));
+    CHECK(summary->source_gaps->max_seconds == Approx(9.5));
+    CHECK(summary->sampling_pauses == 2);
+}
+
 TEST_CASE("input silence runs from the last movement and is absent before any data") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
@@ -155,8 +208,10 @@ TEST_CASE("a timestamp reset is counted without closing or opening a silence") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
     delivery.observe(sample(0.5, 90.0));
+    hold(delivery, 1.0, 2.5, 90.0);
     delivery.observe(sample(3.0, 2.0));
     CHECK(seconds(*delivery.input_silence(at(3.0))) == Approx(2.5));
+    hold(delivery, 3.5, 4.5, 2.0);
     delivery.observe(sample(5.0, 8.0));
 
     const auto summary = delivery.end_load(at(0.0));
@@ -199,6 +254,7 @@ TEST_CASE("gaps beyond the binned range keep an exact maximum") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
     delivery.observe(sample(0.5, 1.0));
+    hold(delivery, 1.0, 200.0, 1.0);
     delivery.observe(sample(200.5, 7.0));
 
     const auto summary = delivery.end_load(at(0.0));
@@ -214,6 +270,7 @@ TEST_CASE("percentiles among gaps past the binned range stay exact") {
     double cache_end = 1.0;
     delivery.observe(sample(now, cache_end));
     for (const double gap : {130.0, 140.0, 150.0, 160.0, 500.0}) {
+        hold(delivery, now + 0.5, now + gap - 0.5, cache_end);
         now += gap;
         cache_end += 6.0;
         delivery.observe(sample(now, cache_end));
@@ -259,7 +316,7 @@ TEST_CASE("reviving a suspended load resumes it without spanning the gap") {
     delivery.suspend(at(15.0));
 
     CHECK_FALSE(delivery.begin_load(kGeneration, kAttempt, at(100.0)));
-    delivery.observe(sample(101.0, 12.0));
+    hold(delivery, 101.0, 102.5, 12.0);
     delivery.observe(sample(103.0, 18.0));
 
     const auto summary = delivery.end_load(at(104.0));
@@ -325,6 +382,7 @@ TEST_CASE("a snapshot reports the load so far without ending it") {
     CHECK(seconds(*snapshot->silent_at_end) == Approx(2.5));
 
     // The load carries on and its final summary includes later gaps.
+    hold(delivery, 6.0, 10.0, 12.0);
     delivery.observe(sample(10.5, 18.0));
     const auto summary = delivery.end_load(at(0.0));
     REQUIRE(summary);
@@ -335,16 +393,18 @@ TEST_CASE("beginning the same load again continues its record") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
     delivery.observe(sample(1.0, 2.0));
+    hold(delivery, 1.5, 3.0, 2.0);
 
     // A late revival restarts supervision for the same physical load.
-    CHECK_FALSE(delivery.begin_load(kGeneration, kAttempt, at(40.0)));
-    delivery.observe(sample(45.0, 8.0));
+    CHECK_FALSE(delivery.begin_load(kGeneration, kAttempt, at(3.0)));
+    hold(delivery, 3.5, 4.5, 2.0);
+    delivery.observe(sample(5.0, 8.0));
 
     const auto replaced = delivery.begin_load(kGeneration, core::LoadAttempt{2}, at(50.0));
     REQUIRE(replaced);
     CHECK(replaced->load_attempt == kAttempt);
     CHECK(seconds(*replaced->load_to_first_data) == Approx(1.0));
-    CHECK(replaced->source_gaps->max_seconds == Approx(44.0));
+    CHECK(replaced->source_gaps->max_seconds == Approx(4.0));
 
     // A load with no readable sample says nothing about delivery.
     CHECK_FALSE(delivery.end_load(at(0.0)));
@@ -355,6 +415,7 @@ TEST_CASE("the report line carries every decision field") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));
     delivery.observe(sample(3.0, 6.0));
+    hold(delivery, 3.5, 7.5, 6.0);
     delivery.observe(sample(8.0, 12.0));
 
     const auto line = player::format_delivery_summary(*delivery.end_load(at(0.0)));
@@ -362,7 +423,8 @@ TEST_CASE("the report line carries every decision field") {
     CHECK(line.find(" load-to-first-data=3000ms") != std::string::npos);
     CHECK(line.find(" source-gaps=1 gap-p50=5.00s") != std::string::npos);
     CHECK(line.find(" gap-max=5.00s throttled-gaps=0 silent-at-end=0ms") != std::string::npos);
-    CHECK(line.find(" timestamp-resets=0 missing-samples=0") != std::string::npos);
+    CHECK(line.find(" timestamp-resets=0 missing-samples=0 sampling-pauses=0") !=
+          std::string::npos);
     CHECK(line.find(" buffer-min=4.00s buffer-max=4.00s") != std::string::npos);
     CHECK(line.find(" schema=delivery-observability-v2") != std::string::npos);
 

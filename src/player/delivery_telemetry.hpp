@@ -49,11 +49,13 @@ struct DeliveryLoadSummary {
     core::Duration observed_for{};
     std::optional<core::Duration> load_to_first_data{};
     // Completed silences, each measured from the later of the last cache-end
-    // movement and the first sample with the buffer below its target.
-    // Percentiles come from 50ms bins; the maximum is exact.
+    // movement and the first sample with the buffer below its target. Only an
+    // interval in which some sample saw the cache end still is a silence; a
+    // cache end moving at every sample is continuous delivery. Percentiles come
+    // from 50ms bins; the maximum is exact.
     std::optional<DeliveryGapStats> source_gaps{};
-    // Completed silences during which the buffer never left its target, so
-    // mpv's own read throttling can explain all of it.
+    // Completed silences, as above, during which the buffer never left its
+    // target, so mpv's own read throttling can explain all of it.
     std::size_t throttled_gaps = 0;
     // The source silence still running when the report was made, measured the
     // same way. A load that ends or fails while quiet leaves only this: it is
@@ -62,6 +64,9 @@ struct DeliveryLoadSummary {
     std::size_t timestamp_resets = 0;
     // Samples after first data with no readable cache end.
     std::size_t missing_samples = 0;
+    // Times sampling itself stopped for longer than kSamplingPause. A silence
+    // that ended during one is recorded only up to the sample before it.
+    std::size_t sampling_pauses = 0;
     std::optional<double> buffer_min_seconds{};
     std::optional<double> buffer_max_seconds{};
     std::string_view schema_version = kDeliveryTelemetrySchema;
@@ -80,6 +85,11 @@ public:
     // Gaps past the binned range are kept exactly; there can be at most one
     // per two minutes, and this caps even a day-long load.
     static constexpr std::size_t kMaxLongGaps = 1024;
+    // Samples come every 500ms. A longer interval means the thread taking them
+    // was held -- a window drag or resize runs a modal loop that starves it --
+    // while mpv went on reading, so when the cache end moved inside it is
+    // unknown.
+    static constexpr core::Duration kSamplingPause = core::seconds(2.0);
 
     // Starts observing a load and returns the final summary of the load it
     // replaces. Beginning the load already being observed continues it: a
@@ -118,6 +128,8 @@ private:
         std::optional<core::TimePoint> quiet_since{};
         std::optional<core::TimePoint> last_observed_at{};
         std::optional<core::TimePoint> suspended_at{};
+        // Some sample since the last movement saw the cache end still.
+        bool still_seen = false;
         // Time spent suspended before a revival; not observation time.
         core::Duration unwatched{};
         std::optional<double> last_cache_end_seconds{};
@@ -130,6 +142,7 @@ private:
         std::size_t throttled_gaps = 0;
         std::size_t timestamp_resets = 0;
         std::size_t missing_samples = 0;
+        std::size_t sampling_pauses = 0;
     };
 
     [[nodiscard]] static DeliveryLoadSummary summarize(

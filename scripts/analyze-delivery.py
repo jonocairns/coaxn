@@ -117,6 +117,7 @@ def main(path):
     throttled = sum(int(r.get("throttled-gaps", 0)) for r in records)
     resets = sum(int(r.get("timestamp-resets", 0)) for r in records)
     missing = sum(int(r.get("missing-samples", 0)) for r in records)
+    pauses = sum(int(r.get("sampling-pauses", 0)) for r in records)
     landings = [v for v in landings if v is not None]
 
     print(f"Loads with delivery records: {len(records)} "
@@ -126,7 +127,7 @@ def main(path):
     print(f"  source gap max per load: {describe(gap_max)}")
     print(f"  silence cut short at report (at least this long): {describe(censored)}")
     print(f"  throttled gaps (buffer held at target throughout): {throttled}; timestamp resets: {resets}; "
-          f"missing samples: {missing}")
+          f"missing samples: {missing}; sampling pauses: {pauses}")
     print(f"Load issue to first data, loads that got there: {describe(first_data)}")
     print(f"Loads that never showed data: {len(never)}")
 
