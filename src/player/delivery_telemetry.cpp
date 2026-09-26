@@ -37,6 +37,13 @@ double percentile(const std::vector<std::uint32_t>& bins,
 std::optional<DeliveryLoadSummary> DeliveryTelemetry::begin_load(
     core::Generation generation, core::LoadAttempt load_attempt, core::TimePoint issued_at) {
     if (load_ && load_->generation == generation && load_->load_attempt == load_attempt) {
+        // A revival: the same physical load, watched again from here. The
+        // unwatched interval says nothing about the source, so the running
+        // silence restarts rather than spanning it.
+        if (load_->suspended_at) {
+            load_->suspended_at.reset();
+            if (load_->quiet_since) load_->quiet_since = issued_at;
+        }
         return std::nullopt;
     }
     auto previous = end_load(issued_at);
@@ -51,13 +58,19 @@ std::optional<DeliveryLoadSummary> DeliveryTelemetry::end_load(core::TimePoint n
     load_.reset();
     // A load that never produced a sample says nothing about delivery.
     if (!load.last_observed_at) return std::nullopt;
-    return summarize(load, DeliveryReportKind::Final, std::max(now, *load.last_observed_at));
+    const auto until = load.suspended_at ? *load.suspended_at : now;
+    return summarize(load, DeliveryReportKind::Final, std::max(until, *load.last_observed_at));
+}
+
+void DeliveryTelemetry::suspend(core::TimePoint now) {
+    if (load_ && !load_->suspended_at) load_->suspended_at = now;
 }
 
 std::optional<DeliveryLoadSummary> DeliveryTelemetry::snapshot(core::TimePoint now) const {
     if (!load_ || !load_->last_observed_at) return std::nullopt;
+    const auto until = load_->suspended_at ? *load_->suspended_at : now;
     return summarize(*load_, DeliveryReportKind::Snapshot,
-                     std::max(now, *load_->last_observed_at));
+                     std::max(until, *load_->last_observed_at));
 }
 
 std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& sample) {

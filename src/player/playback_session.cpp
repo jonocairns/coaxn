@@ -541,6 +541,7 @@ void PlaybackSession::on_supervisor_state_changed(const core::SupervisorState& s
         previous != core::SupervisorStateName::Failed) {
         // Supervision stops here, so this is the failed load's last word
         // unless it is revived -- which continues the same delivery record.
+        delivery_.suspend(clock_.now());
         emit_delivery_summary(delivery_.snapshot(clock_.now()));
     }
     if (previous == core::SupervisorStateName::Failed &&

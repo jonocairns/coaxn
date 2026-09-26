@@ -238,6 +238,38 @@ TEST_CASE("a final report measures a running silence to when the load ended") {
     CHECK(seconds(summary->observed_for) == Approx(20.0));
 }
 
+TEST_CASE("a suspended load stops measuring silence where observation stopped") {
+    player::DeliveryTelemetry delivery;
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    chunked(delivery, {5.0});
+    delivery.suspend(at(15.0));
+
+    // Left failed for minutes, then stopped: only the watched 9.5s counts.
+    CHECK(seconds(*delivery.snapshot(at(200.0))->silent_at_end) == Approx(9.5));
+    const auto summary = delivery.end_load(at(300.0));
+    REQUIRE(summary->silent_at_end);
+    CHECK(seconds(*summary->silent_at_end) == Approx(9.5));
+    CHECK(seconds(summary->observed_for) == Approx(15.0));
+}
+
+TEST_CASE("reviving a suspended load resumes it without spanning the gap") {
+    player::DeliveryTelemetry delivery;
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    chunked(delivery, {5.0});
+    delivery.suspend(at(15.0));
+
+    CHECK_FALSE(delivery.begin_load(kGeneration, kAttempt, at(100.0)));
+    delivery.observe(sample(101.0, 12.0));
+    delivery.observe(sample(103.0, 18.0));
+
+    const auto summary = delivery.end_load(at(104.0));
+    REQUIRE(summary->source_gaps);
+    // 5s before the failure, then 3s from the revival -- not 97.5s across it.
+    CHECK(summary->source_gaps->count == 2);
+    CHECK(summary->source_gaps->max_seconds == Approx(5.0));
+    CHECK(seconds(*summary->silent_at_end) == Approx(1.0));
+}
+
 TEST_CASE("the at-target band scales down for the one-second zap target") {
     player::DeliveryTelemetry delivery;
     delivery.begin_load(kGeneration, kAttempt, at(0.0));

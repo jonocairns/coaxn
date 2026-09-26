@@ -86,9 +86,13 @@ public:
     // load revived after the supervisor gave up on it is one physical load.
     std::optional<DeliveryLoadSummary> begin_load(
         core::Generation generation, core::LoadAttempt load_attempt, core::TimePoint issued_at);
-    // Ends the load as of `now`, so a silence running when it ended -- after
-    // a failure, say -- is measured to the end rather than the last sample.
+    // Ends the load as of `now`, or as of when observation stopped if it was
+    // suspended: a silence is measured to the end of what was watched.
     std::optional<DeliveryLoadSummary> end_load(core::TimePoint now);
+    // Supervision has stopped watching this load (the supervisor gave up on
+    // it). Reports stop measuring here instead of charging the unobserved
+    // interval to the source. Beginning the same load again resumes it.
+    void suspend(core::TimePoint now);
     // The current load's figures so far, without ending it.
     [[nodiscard]] std::optional<DeliveryLoadSummary> snapshot(core::TimePoint now) const;
 
@@ -112,6 +116,7 @@ private:
         // movement, or the first sample after it with the buffer below target.
         std::optional<core::TimePoint> quiet_since{};
         std::optional<core::TimePoint> last_observed_at{};
+        std::optional<core::TimePoint> suspended_at{};
         std::optional<double> last_cache_end_seconds{};
         std::optional<double> buffer_min_seconds{};
         std::optional<double> buffer_max_seconds{};
