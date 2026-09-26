@@ -19,6 +19,7 @@ using Catch::Approx;
 // defaults with ExoPlayer's speed range restored; the shipped range is unity.
 
 TEST_CASE("the shipped speed range never leaves unity") {
+    STATIC_REQUIRE_FALSE(player::kLiveSyncControlsSpeed);
     player::LiveSync sync;
     CHECK_FALSE(sync.update(100.0, 0.0));
     CHECK_FALSE(sync.update(0.0, 1.0));

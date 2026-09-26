@@ -40,6 +40,11 @@ struct LiveSyncConfig {
 // ExoPlayer: DEFAULT_FALLBACK_MIN/MAX_PLAYBACK_SPEED.
 inline constexpr LiveSyncConfig kExoPlayerSpeedRange{.min_speed = 0.97, .max_speed = 1.03};
 
+// Whether the shipped configuration can move playback speed at all. With the
+// range held at unity the target offset is still tracked but steers nothing.
+inline constexpr bool kLiveSyncControlsSpeed =
+    LiveSyncConfig{}.min_speed != LiveSyncConfig{}.max_speed;
+
 // Keeps playback near a target distance behind the live edge by nudging the
 // playback speed, rather than by seeking -- a raw TS live stream cannot seek,
 // so speed is the only control surface available.

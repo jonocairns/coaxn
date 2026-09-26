@@ -243,7 +243,11 @@ App::App()
                }
            },
            .on_rebuffer = [](int count, double target) {
-               log::info("Rebuffer #{}; live target now {:.1f}s", count, target);
+               if constexpr (player::kLiveSyncControlsSpeed) {
+                   log::info("Rebuffer #{}; live target now {:.1f}s", count, target);
+               } else {
+                   log::info("Rebuffer #{}; live target {:.1f}s (inactive)", count, target);
+               }
            },
            .on_unity_speed = [](double speed) {
                log::warn("Live-sync telemetry invalid; holding playback at {:.2f}x", speed);
@@ -2133,13 +2137,19 @@ void App::draw_diagnostics() {
     field("Policy", supervisor_stats.policy_version);
 
     theme::separator_label("LIVE SYNC");
-    field("Target offset", std::format("{:.1f}s", d.live_target_seconds));
+    if constexpr (player::kLiveSyncControlsSpeed) {
+        field("Target offset", std::format("{:.1f}s", d.live_target_seconds));
+    } else {
+        field("Target offset", std::format("{:.1f}s (inactive)", d.live_target_seconds), true);
+    }
     field("Playback speed", std::format("{:.3f}x", d.playback_speed));
     field("Rebuffers this channel", std::format("{}", d.rebuffer_count));
     {
         theme::ScopedStyle style;
         style.color(ImGuiCol_Text, theme::kTextDim);
-        ImGui::TextUnformatted("Offset is estimated from buffer depth (no manifest)");
+        ImGui::TextUnformatted(player::kLiveSyncControlsSpeed
+            ? "Offset is estimated from buffer depth (no manifest)"
+            : "Speed is held at 1.0x; the target offset steers nothing");
     }
 
     ImGui::EndTable();
