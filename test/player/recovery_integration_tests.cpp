@@ -188,6 +188,7 @@ public:
     std::vector<std::exception_ptr> recovery_exceptions;
     std::vector<double> speed_writes;
     int health_observations = 0;
+    std::vector<player::DeliveryLoadSummary> delivery_summaries;
     int live_sync_writes = 0;
 
 private:
@@ -239,6 +240,9 @@ private:
         };
         callbacks.on_recovery_edge = [this](const player::RecoveryEdgeReport& report) {
             edge_reports.push_back(report);
+        };
+        callbacks.on_delivery_summary = [this](const player::DeliveryLoadSummary& summary) {
+            delivery_summaries.push_back(summary);
         };
         return callbacks;
     }
@@ -563,6 +567,29 @@ TEST_CASE("the production session holds unity through a stall and controls immed
     app.tick(6.5, correction);
     REQUIRE(app.speed_writes.size() == 2);
     CHECK(app.speed_writes.back() == 0.97);
+}
+
+TEST_CASE("the production session reports delivery per load and silence at each sample") {
+    RecoveryAppLoop app;
+    app.play();
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    app.tick(0.6, playing(0.5));
+    REQUIRE(app.health_reports.back().load_to_first_data);
+
+    auto held = playing(1.0);
+    held.cache_end_seconds = 4.5;
+    app.tick(1.6, held);
+    app.tick(2.6, held);
+    REQUIRE(app.health_reports.back().input_silence);
+    CHECK(std::chrono::duration<double>(*app.health_reports.back().input_silence).count() ==
+          Catch::Approx(2.0));
+    app.tick(3.1, playing(3.0));
+
+    REQUIRE(app.stop());
+    REQUIRE(app.delivery_summaries.size() == 1);
+    CHECK(app.delivery_summaries.front().load_attempt == core::LoadAttempt{1});
+    REQUIRE(app.delivery_summaries.front().arrival_gaps);
+    CHECK(app.delivery_summaries.front().arrival_gaps->max_seconds == Catch::Approx(2.5));
 }
 
 TEST_CASE("confirmed cache-relative timeline regression reopens through the supervisor") {

@@ -84,6 +84,7 @@ bool PlaybackSession::stop(core::Generation generation) {
          supervisor_.current().generation == generation)) return false;
 
     supervisor_.dispatch(core::PlaybackStopped{generation});
+    emit_delivery_summary(delivery_.end_load());
     playback_health_.reset();
     health_snapshot_ = {};
     timeline_classification_ = TimelineClassification::Unavailable;
@@ -221,8 +222,13 @@ void PlaybackSession::observe_recovery_edge(
     }
 }
 
+void PlaybackSession::emit_delivery_summary(std::optional<DeliveryLoadSummary> summary) {
+    if (summary && callbacks_.on_delivery_summary) callbacks_.on_delivery_summary(*summary);
+}
+
 void PlaybackSession::restart_health_supervision(core::LoadAttempt load_attempt) {
     const auto now = clock_.now();
+    emit_delivery_summary(delivery_.begin_load(generation_, load_attempt, now));
     const auto target = core::buffer_phase_targets(core::BufferPhase::Zap);
     playback_health_ = core::initial_playback_health(
         generation_, load_attempt, core::BufferPhase::Zap, now, target.cache_seconds);
@@ -382,6 +388,13 @@ void PlaybackSession::sample_health() {
     }
     playback_health_ = fold.state;
     health_snapshot_ = fold.state.snapshot;
+    const auto load_to_first_data = delivery_.observe({
+        .generation = observation.generation,
+        .load_attempt = observation.load_attempt,
+        .observed_at = now,
+        .cache_end_seconds = observation.cache_end_seconds,
+        .buffer_seconds = observation.buffer_seconds,
+    });
     if (callbacks_.set_health_discontinuities) {
         callbacks_.set_health_discontinuities(fold.state.discontinuities);
     }
@@ -472,6 +485,8 @@ void PlaybackSession::sample_health() {
             .unattributed_engine_messages_since_sample = unattributed_delta,
             .engine_warning = current_diagnostics.last_engine_message,
             .timeline_recovery = timeline_recovery_step,
+            .load_to_first_data = load_to_first_data,
+            .input_silence = delivery_.input_silence(now),
         });
     }
 }

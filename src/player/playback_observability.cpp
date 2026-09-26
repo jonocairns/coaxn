@@ -307,6 +307,7 @@ std::string format_recovery_telemetry(
         << " cache-paused=" << (evidence.cache_paused ? "yes" : "no")
         << " playback-move=" << movement(evidence.playback_movement_seconds)
         << " cache-end-move=" << movement(evidence.cache_end_movement_seconds)
+        << " input-silence=" << duration(evidence.input_silence)
         << " warning-severity=" << warning_severity
         << " warning-component=" << warning_component
         << " warning-category=" << warning_category;

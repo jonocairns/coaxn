@@ -9,6 +9,7 @@
 
 #include "core/playback_health.hpp"
 #include "core/supervisor_host.hpp"
+#include "player/delivery_telemetry.hpp"
 #include "player/live_sync.hpp"
 #include "player/live_sync_turn.hpp"
 #include "player/load_diagnostics.hpp"
@@ -37,6 +38,9 @@ struct HealthSampleReport {
     std::uint64_t unattributed_engine_messages_since_sample = 0;
     std::optional<SanitizedEngineWarning> engine_warning;
     TimelineRecoveryStep timeline_recovery;
+    // Set on the one sample that first shows data for the load.
+    std::optional<core::Duration> load_to_first_data;
+    std::optional<core::Duration> input_silence;
 };
 
 // The concrete player remains outside the portable coordinator. These callbacks
@@ -67,6 +71,7 @@ struct PlaybackSessionCallbacks {
     std::function<void(const core::SupervisorTransition&)> on_transition;
     std::function<void(const HealthSampleReport&)> on_health_sample;
     std::function<void(const RecoveryEdgeReport&)> on_recovery_edge;
+    std::function<void(const DeliveryLoadSummary&)> on_delivery_summary;
     std::function<void(int, double)> on_rebuffer;
     std::function<void(double)> on_unity_speed;
 };
@@ -109,8 +114,12 @@ public:
     [[nodiscard]] double live_target_seconds() const {
         return live_sync_.target_offset_seconds();
     }
+    [[nodiscard]] std::optional<core::Duration> input_silence() const {
+        return delivery_.input_silence(clock_.now());
+    }
 
 private:
+    void emit_delivery_summary(std::optional<DeliveryLoadSummary> summary);
     struct PendingStreamEnd {
         core::Generation generation;
         core::LoadAttempt load_attempt;
@@ -162,6 +171,7 @@ private:
         TimelineRecoveryCapability::Disabled;
     std::optional<core::TimePoint> last_rebuffer_at_;
     RecoveryEdgeObserver recovery_edge_;
+    DeliveryTelemetry delivery_;
 
     LiveSync live_sync_;
     LiveSyncTurn live_sync_turn_;
