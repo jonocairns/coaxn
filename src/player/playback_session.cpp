@@ -36,7 +36,8 @@ const Diagnostics& PlaybackSession::diagnostics() const {
 
 PlaybackSession::PlaybackSession(const core::SupervisorClock& clock,
                                  PlaybackSessionCallbacks callbacks,
-                                 core::RecoveryPolicy policy)
+                                 core::RecoveryPolicy policy,
+                                 LiveSyncConfig live_sync)
     : clock_(clock), callbacks_(std::move(callbacks)),
       supervisor_(clock_, {
           .on_effect = [this](const core::SupervisorEffect& effect) {
@@ -48,7 +49,8 @@ PlaybackSession::PlaybackSession(const core::SupervisorClock& clock,
           .on_transition = [this](const core::SupervisorTransition& transition) {
               if (callbacks_.on_transition) callbacks_.on_transition(transition);
           },
-      }, policy) {}
+      }, policy),
+      live_sync_(live_sync) {}
 
 core::Generation PlaybackSession::begin_channel() {
     reset_live_state();

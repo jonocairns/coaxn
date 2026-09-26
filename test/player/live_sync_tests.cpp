@@ -16,10 +16,20 @@ using namespace coax;
 using Catch::Approx;
 
 // The control law. Constants come from LiveSyncConfig's ExoPlayer-derived
-// defaults, so the numbers below are the shipped policy rather than a fixture.
+// defaults with ExoPlayer's speed range restored; the shipped range is unity.
+
+TEST_CASE("the shipped speed range never leaves unity") {
+    STATIC_REQUIRE_FALSE(player::kLiveSyncControlsSpeed);
+    player::LiveSync sync;
+    CHECK_FALSE(sync.update(100.0, 0.0));
+    CHECK_FALSE(sync.update(0.0, 1.0));
+    sync.notify_rebuffer();
+    CHECK_FALSE(sync.update(0.0, 1.1));
+    CHECK(sync.speed() == Approx(1.0));
+}
 
 TEST_CASE("the first update controls immediately and later ones are rate limited") {
-    player::LiveSync sync;
+    player::LiveSync sync{player::kExoPlayerSpeedRange};
 
     // 0.5s above the 4s target asks for 1.05, which the range caps at 1.03.
     CHECK(sync.update(4.5, 100.0) == Approx(1.03));
@@ -33,15 +43,15 @@ TEST_CASE("the first update controls immediately and later ones are rate limited
 }
 
 TEST_CASE("speed is clamped to the configured range at both ends") {
-    player::LiveSync fast;
+    player::LiveSync fast{player::kExoPlayerSpeedRange};
     CHECK(fast.update(100.0, 0.0) == Approx(1.03));
 
-    player::LiveSync slow;
+    player::LiveSync slow{player::kExoPlayerSpeedRange};
     CHECK(slow.update(0.0, 0.0) == Approx(0.97));
 }
 
 TEST_CASE("the deadband holds unity within 20ms of the target") {
-    player::LiveSync sync;
+    player::LiveSync sync{player::kExoPlayerSpeedRange};
 
     // 10ms of error is noise, so the controller does not chase it.
     CHECK_FALSE(sync.update(4.010, 0.0));
@@ -55,7 +65,7 @@ TEST_CASE("the deadband holds unity within 20ms of the target") {
 }
 
 TEST_CASE("a rebuffer concedes 500ms and recomputes without waiting out the interval") {
-    player::LiveSync sync;
+    player::LiveSync sync{player::kExoPlayerSpeedRange};
     CHECK_FALSE(sync.update(4.0, 0.0));
     CHECK(sync.target_offset_seconds() == Approx(4.0));
 
@@ -68,13 +78,13 @@ TEST_CASE("a rebuffer concedes 500ms and recomputes without waiting out the inte
 }
 
 TEST_CASE("the target is bounded however many rebuffers arrive") {
-    player::LiveSync sync;
+    player::LiveSync sync{player::kExoPlayerSpeedRange};
     for (int i = 0; i < 200; ++i) sync.notify_rebuffer();
     CHECK(sync.target_offset_seconds() == Approx(30.0));
 }
 
 TEST_CASE("reset returns the target, the speed and the rate limiter to their initial state") {
-    player::LiveSync sync;
+    player::LiveSync sync{player::kExoPlayerSpeedRange};
     CHECK(sync.update(10.0, 0.0) == Approx(1.03));
     sync.notify_rebuffer();
     sync.notify_rebuffer();
@@ -90,7 +100,7 @@ TEST_CASE("reset returns the target, the speed and the rate limiter to their ini
 }
 
 TEST_CASE("holding unity takes an installed correction off exactly once") {
-    player::LiveSync sync;
+    player::LiveSync sync{player::kExoPlayerSpeedRange};
     CHECK(sync.update(0.0, 0.0) == Approx(0.97));
 
     CHECK(sync.hold_unity_speed() == Approx(1.0));
@@ -102,7 +112,7 @@ TEST_CASE("holding unity takes an installed correction off exactly once") {
 }
 
 TEST_CASE("a correction is reissued after a hold, not suppressed as unchanged") {
-    player::LiveSync sync;
+    player::LiveSync sync{player::kExoPlayerSpeedRange};
     CHECK(sync.update(0.0, 0.0) == Approx(0.97));
     CHECK(sync.hold_unity_speed() == Approx(1.0));
 
@@ -318,7 +328,7 @@ std::optional<double> tick(player::LiveSyncGate& gate, player::LiveSync& sync,
 
 TEST_CASE("a channel change costs no latency before playback is established") {
     player::LiveSyncGate gate;
-    player::LiveSync     sync;
+    player::LiveSync     sync{player::kExoPlayerSpeedRange};
 
     // Zap: mpv pauses to fill, publishes no buffered duration yet, and the
     // supervisor has confirmed nothing. Previously this conceded 500ms per
@@ -332,7 +342,7 @@ TEST_CASE("a channel change costs no latency before playback is established") {
 
 TEST_CASE("losing buffered duration holds unity instead of installing the minimum speed") {
     player::LiveSyncGate gate;
-    player::LiveSync     sync;
+    player::LiveSync     sync{player::kExoPlayerSpeedRange};
 
     // Settled a little under target, so a real correction is running.
     REQUIRE(tick(gate, sync, playing(3.8), 0.0) == Approx(0.98));
@@ -356,7 +366,7 @@ TEST_CASE("losing buffered duration holds unity instead of installing the minimu
 
 TEST_CASE("paused-for-cache takes off a slow correction once and recomputes on exit") {
     player::LiveSyncGate gate;
-    player::LiveSync     sync;
+    player::LiveSync     sync{player::kExoPlayerSpeedRange};
 
     REQUIRE(tick(gate, sync, playing(0.0), 0.0) == Approx(0.97));
 
@@ -383,7 +393,7 @@ TEST_CASE("paused-for-cache takes off a slow correction once and recomputes on e
 
 TEST_CASE("core-idle takes off a fast correction once and recomputes on exit") {
     player::LiveSyncGate gate;
-    player::LiveSync     sync;
+    player::LiveSync     sync{player::kExoPlayerSpeedRange};
 
     REQUIRE(tick(gate, sync, playing(5.0), 0.0) == Approx(1.03));
 
@@ -402,7 +412,7 @@ TEST_CASE("core-idle takes off a fast correction once and recomputes on exit") {
 TEST_CASE("opening and recovery fills hold unity without learning latency") {
     SECTION("opening fill") {
         player::LiveSyncGate gate;
-        player::LiveSync     sync;
+        player::LiveSync     sync{player::kExoPlayerSpeedRange};
 
         const auto opening_fill = gate.observe(buffering(false));
         CHECK(opening_fill.hold_unity_speed);
@@ -414,7 +424,7 @@ TEST_CASE("opening and recovery fills hold unity without learning latency") {
 
     SECTION("recovery reopen fill") {
         player::LiveSyncGate gate;
-        player::LiveSync     sync;
+        player::LiveSync     sync{player::kExoPlayerSpeedRange};
 
         REQUIRE(tick(gate, sync, playing(3.0), 0.0) == Approx(0.97));
         REQUIRE(tick(gate, sync, buffering(true), 0.1) == Approx(1.0));
@@ -525,7 +535,7 @@ void open_channel(player::LiveSyncTurn& turn, player::LiveSync& sync, double sta
 
 TEST_CASE("a channel start holds its opening target through first frame and fill") {
     player::LiveSyncTurn turn;
-    player::LiveSync     sync;
+    player::LiveSync     sync{player::kExoPlayerSpeedRange};
     turn.begin_load();
 
     open_channel(turn, sync, 0.0);
@@ -542,7 +552,7 @@ TEST_CASE("a channel start holds its opening target through first frame and fill
 
 TEST_CASE("a stall after the supervisor confirms steady still concedes latency") {
     player::LiveSyncTurn turn;
-    player::LiveSync     sync;
+    player::LiveSync     sync{player::kExoPlayerSpeedRange};
     turn.begin_load();
     open_channel(turn, sync, 0.0);
 
@@ -557,7 +567,7 @@ TEST_CASE("a stall after the supervisor confirms steady still concedes latency")
 
 TEST_CASE("a recovery reopen charges nothing for its own opening sequence") {
     player::LiveSyncTurn turn;
-    player::LiveSync     sync;
+    player::LiveSync     sync{player::kExoPlayerSpeedRange};
     turn.begin_load();
     open_channel(turn, sync, 0.0);
     turn.note_playback_established();
@@ -587,7 +597,7 @@ TEST_CASE("a recovery reopen charges nothing for its own opening sequence") {
 
 TEST_CASE("a first frame belonging to a superseded load is not this load's") {
     player::LiveSyncTurn turn;
-    player::LiveSync     sync;
+    player::LiveSync     sync{player::kExoPlayerSpeedRange};
     turn.begin_load();
 
     // A late frame from the load the user replaced. It says nothing about
@@ -623,7 +633,7 @@ public:
 struct AppLoop {
     FrameClock                clock;
     player::LiveSyncTurn      turn;
-    player::LiveSync          sync;
+    player::LiveSync          sync{player::kExoPlayerSpeedRange};
     core::PlaybackSupervisor  supervisor;
     core::Generation          generation{1};
     std::optional<bool>       last_cache_state_dispatched;
