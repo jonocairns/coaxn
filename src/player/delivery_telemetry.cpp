@@ -41,8 +41,12 @@ std::optional<DeliveryLoadSummary> DeliveryTelemetry::begin_load(
         // unwatched interval says nothing about the source, so the running
         // silence restarts rather than spanning it.
         if (load_->suspended_at) {
+            if (issued_at > *load_->suspended_at) {
+                load_->unwatched += issued_at - *load_->suspended_at;
+            }
             load_->suspended_at.reset();
             if (load_->quiet_since) load_->quiet_since = issued_at;
+            if (load_->last_movement_at) load_->last_movement_at = issued_at;
         }
         return std::nullopt;
     }
@@ -148,8 +152,10 @@ std::optional<core::Duration> DeliveryTelemetry::observe(const DeliverySample& s
 }
 
 std::optional<core::Duration> DeliveryTelemetry::input_silence(core::TimePoint now) const {
-    if (!load_ || !load_->last_movement_at || now < *load_->last_movement_at) return std::nullopt;
-    return now - *load_->last_movement_at;
+    if (!load_ || !load_->last_movement_at) return std::nullopt;
+    const auto until = load_->suspended_at ? std::min(now, *load_->suspended_at) : now;
+    if (until < *load_->last_movement_at) return std::nullopt;
+    return until - *load_->last_movement_at;
 }
 
 DeliveryLoadSummary DeliveryTelemetry::summarize(
@@ -158,7 +164,7 @@ DeliveryLoadSummary DeliveryTelemetry::summarize(
         .kind = kind,
         .generation = load.generation,
         .load_attempt = load.load_attempt,
-        .observed_for = reported_at - load.issued_at,
+        .observed_for = reported_at - load.issued_at - load.unwatched,
         .throttled_gaps = load.throttled_gaps,
         .timestamp_resets = load.timestamp_resets,
         .missing_samples = load.missing_samples,

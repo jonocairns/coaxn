@@ -268,6 +268,19 @@ TEST_CASE("reviving a suspended load resumes it without spanning the gap") {
     CHECK(summary->source_gaps->count == 2);
     CHECK(summary->source_gaps->max_seconds == Approx(5.0));
     CHECK(seconds(*summary->silent_at_end) == Approx(1.0));
+    // 15s watched before the failure plus 4s after the revival.
+    CHECK(seconds(summary->observed_for) == Approx(19.0));
+}
+
+TEST_CASE("input silence is frozen while suspended and restarts on revival") {
+    player::DeliveryTelemetry delivery;
+    delivery.begin_load(kGeneration, kAttempt, at(0.0));
+    chunked(delivery, {5.0});
+    delivery.suspend(at(15.0));
+    CHECK(seconds(*delivery.input_silence(at(90.0))) == Approx(9.5));
+
+    delivery.begin_load(kGeneration, kAttempt, at(100.0));
+    CHECK(seconds(*delivery.input_silence(at(102.0))) == Approx(2.0));
 }
 
 TEST_CASE("the at-target band scales down for the one-second zap target") {

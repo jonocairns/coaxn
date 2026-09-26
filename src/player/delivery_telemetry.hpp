@@ -103,6 +103,7 @@ public:
     // How long the cache end has been still, measured from its last forward
     // movement whatever the buffer level: what the demuxer has seen, not a
     // judgement about the source. Absent until the load has shown any data.
+    // Frozen while suspended; a revival restarts it.
     [[nodiscard]] std::optional<core::Duration> input_silence(core::TimePoint now) const;
 
 private:
@@ -117,6 +118,8 @@ private:
         std::optional<core::TimePoint> quiet_since{};
         std::optional<core::TimePoint> last_observed_at{};
         std::optional<core::TimePoint> suspended_at{};
+        // Time spent suspended before a revival; not observation time.
+        core::Duration unwatched{};
         std::optional<double> last_cache_end_seconds{};
         std::optional<double> buffer_min_seconds{};
         std::optional<double> buffer_max_seconds{};
