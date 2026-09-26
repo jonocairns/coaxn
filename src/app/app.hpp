@@ -10,7 +10,6 @@
 #include <vector>
 
 #include "app/update_check.hpp"
-#include "util/log.hpp"
 #include "core/channel_index.hpp"
 #include "core/presentation.hpp"
 #include "core/settings.hpp"
@@ -18,6 +17,7 @@
 #include "player/playback_control.hpp"
 #include "player/playback_session.hpp"
 #include "player/session_target_registry.hpp"
+#include "util/log.hpp"
 #include "win/app_window.hpp"
 #include "win/composition.hpp"
 #include "win/power_request.hpp"

@@ -11,6 +11,7 @@
 #include <exception>
 #include <format>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 #include "app/theme.hpp"
@@ -2163,11 +2164,17 @@ void App::draw_diagnostics() {
     const bool saving = log_save_.valid();
     ImGui::BeginDisabled(saving);
     if (ImGui::SmallButton(saving ? "Saving..." : "Save log")) {
-        log_save_ = std::async(std::launch::async, [] {
-            LogSaveResult result;
-            result.saved = log::save_copy(result.error);
-            return result;
-        });
+        try {
+            log_save_ = std::async(std::launch::async, [] {
+                LogSaveResult result;
+                result.saved = log::save_copy(result.error);
+                return result;
+            });
+        } catch (const std::system_error& failure) {
+            // No thread to copy on; saying so beats saving on the frame loop.
+            saved_log_path_.clear();
+            saved_log_status_ = std::format("Could not start saving ({})", failure.what());
+        }
     }
     ImGui::EndDisabled();
     if (!saved_log_path_.empty() && !saving) {
