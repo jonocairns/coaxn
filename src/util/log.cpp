@@ -178,11 +178,14 @@ std::optional<SavedLog> save_copy(std::string& error) {
     }
 
     // The process id keeps two sessions saving in the same second apart; the
-    // suffix does the same for one session saving twice. CREATE_NEW never
-    // overwrites an earlier save.
+    // suffix does the same for one session saving twice. The copy is written
+    // to a ".partial" file and renamed into place only once complete, so an
+    // interrupted save -- the app closing mid-copy -- never looks finished.
+    // Neither step ever overwrites an earlier save.
     SYSTEMTIME local{};
     GetLocalTime(&local);
     std::wstring destination;
+    std::wstring partial;
     HANDLE target = INVALID_HANDLE_VALUE;
     for (int copy = 1; copy <= 9 && target == INVALID_HANDLE_VALUE; ++copy) {
         wchar_t name[80];
@@ -191,7 +194,9 @@ std::optional<SavedLog> save_copy(std::string& error) {
                  local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute,
                  local.wSecond, GetCurrentProcessId(), copy);
         destination = path_in(directory, name);
-        target = CreateFileW(destination.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+        if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+        partial = destination + L".partial";
+        target = CreateFileW(partial.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                              FILE_ATTRIBUTE_NORMAL, nullptr);
         if (target == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) break;
     }
@@ -213,11 +218,16 @@ std::optional<SavedLog> save_copy(std::string& error) {
                  WriteFile(target, buffer.data(), read, &written, nullptr) && written == read;
         remaining -= read;
     }
-    const DWORD copy_error = copied ? ERROR_SUCCESS : GetLastError();
+    DWORD copy_error = copied ? ERROR_SUCCESS : GetLastError();
     CloseHandle(source);
     CloseHandle(target);
+    // Without MOVEFILE_REPLACE_EXISTING the rename refuses to overwrite.
+    if (copied && !MoveFileExW(partial.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        copied = false;
+        copy_error = GetLastError();
+    }
     if (!copied) {
-        DeleteFileW(destination.c_str());
+        DeleteFileW(partial.c_str());
         error = std::format("Could not save the log (error {})", copy_error);
         return std::nullopt;
     }
