@@ -78,7 +78,8 @@ class PlaybackSession {
 public:
     PlaybackSession(const core::SupervisorClock& clock,
                     PlaybackSessionCallbacks callbacks,
-                    core::RecoveryPolicy policy = core::kDefaultRecoveryPolicy);
+                    core::RecoveryPolicy policy = core::kDefaultRecoveryPolicy,
+                    LiveSyncConfig live_sync = {});
 
     [[nodiscard]] core::Generation begin_channel();
     void load_started(core::LoadAttempt load_attempt, core::LoadIntent intent,

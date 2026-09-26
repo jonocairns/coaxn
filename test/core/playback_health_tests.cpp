@@ -104,7 +104,7 @@ void append(std::vector<PlaybackHealthObservation>& to,
 TEST_CASE("two phase buffer and health policy constants are pinned") {
     CHECK(buffer_phase_targets(BufferPhase::Zap).cache_seconds == 1.0);
     CHECK(buffer_phase_targets(BufferPhase::Zap).readahead_seconds == 1.0);
-    CHECK(buffer_phase_targets(BufferPhase::Steady).cache_seconds == 10.0);
+    CHECK(buffer_phase_targets(BufferPhase::Steady).cache_seconds == 20.0);
     CHECK(kDemuxerMaxBytes == 64U * 1024U * 1024U);
     CHECK(kDefaultHealthPolicy.cache_pause_grace == seconds(10.0));
     CHECK(kDefaultHealthPolicy.stall_confirmation + 2 * kInterval < seconds(3.0));

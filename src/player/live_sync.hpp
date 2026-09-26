@@ -4,13 +4,17 @@
 
 namespace coax::player {
 
-// Tuning for the live-offset controller. Defaults mirror ExoPlayer's
-// DefaultLivePlaybackSpeedControl so behaviour is comparable to a known-good
-// implementation rather than invented.
+// Tuning for the live-offset controller. Apart from the speed range, defaults
+// mirror ExoPlayer's DefaultLivePlaybackSpeedControl so behaviour is
+// comparable to a known-good implementation rather than invented.
 struct LiveSyncConfig {
-    // ExoPlayer: DEFAULT_FALLBACK_MIN/MAX_PLAYBACK_SPEED.
-    double min_speed = 0.97;
-    double max_speed = 1.03;
+    // Held at unity. The provider delivers in ~6s chunks, so buffered duration
+    // is a sawtooth rather than a latency, and ExoPlayer's 0.97-1.03 fallback
+    // range swung between its rails ~19 times a minute for no net change over
+    // an hour, with mpv's time-stretcher making every swing audible.
+    // kExoPlayerSpeedRange restores the controller for tests.
+    double min_speed = 1.0;
+    double max_speed = 1.0;
 
     // ExoPlayer: DEFAULT_PROPORTIONAL_CONTROL_FACTOR.
     double proportional_control_factor = 0.1;
@@ -32,6 +36,9 @@ struct LiveSyncConfig {
     double min_target_offset_seconds     = 1.0;
     double max_target_offset_seconds     = 30.0;
 };
+
+// ExoPlayer: DEFAULT_FALLBACK_MIN/MAX_PLAYBACK_SPEED.
+inline constexpr LiveSyncConfig kExoPlayerSpeedRange{.min_speed = 0.97, .max_speed = 1.03};
 
 // Keeps playback near a target distance behind the live edge by nudging the
 // playback speed, rather than by seeking -- a raw TS live stream cannot seek,

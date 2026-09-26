@@ -61,8 +61,9 @@ public:
 
     explicit RecoveryAppLoop(
         ExecutionMode mode = ExecutionMode::Success,
-        core::RecoveryPolicy policy = core::kDefaultRecoveryPolicy)
-        : execution_mode_(mode), session_(clock_, make_callbacks(), policy) {}
+        core::RecoveryPolicy policy = core::kDefaultRecoveryPolicy,
+        player::LiveSyncConfig live_sync = {})
+        : execution_mode_(mode), session_(clock_, make_callbacks(), policy, live_sync) {}
 
     LoadHandle play(
         bool publish_start_file = true,
@@ -537,8 +538,25 @@ TEST_CASE("the production session coalesces generic and exact stream failures") 
     CHECK(app.effects.front().load_attempt == core::LoadAttempt{2});
 }
 
-TEST_CASE("the production session holds unity through a stall and controls immediately on exit") {
+TEST_CASE("the production session never writes a non-unity speed by default") {
     RecoveryAppLoop app;
+    app.play();
+    app.tick(0.1, playing(0.0), /*frame_started=*/true);
+    app.tick(5.1, playing(5.0));
+    REQUIRE(app.state().name == core::SupervisorStateName::Steady);
+
+    auto shallow = playing(6.1);
+    shallow.buffer_seconds = 0.5;
+    app.tick(6.2, shallow);
+    auto deep = playing(7.2);
+    deep.buffer_seconds = 20.0;
+    app.tick(7.3, deep);
+    for (const double speed : app.speed_writes) CHECK(speed == 1.0);
+}
+
+TEST_CASE("the production session holds unity through a stall and controls immediately on exit") {
+    RecoveryAppLoop app(RecoveryAppLoop::ExecutionMode::Success, core::kDefaultRecoveryPolicy,
+                        player::kExoPlayerSpeedRange);
     app.play();
     app.tick(0.1, playing(0.0), /*frame_started=*/true);
     app.tick(5.1, playing(5.0));
