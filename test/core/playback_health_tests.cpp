@@ -19,7 +19,8 @@ PlaybackHealthObservation healthy() {
             .av_sync_seconds = 0.0,
             .buffer_seconds = 8.0, .cache_end_seconds = 8.0,
             .cache_paused = false, .input_rate_bytes_per_second = 240'000.0,
-            .ipc_round_trip_ms = 1.2, .playback_time_seconds = 0.0,
+            .ipc_round_trip_ms = 1.2, .media_start_seconds = 0.0,
+            .playback_time_seconds = 0.0,
             .video_fps_estimate = kContainerFps};
 }
 

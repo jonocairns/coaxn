@@ -23,12 +23,14 @@ enum class RecoveryEdgeDataStatus {
 
 // Raw MPEG-TS exposes no authoritative provider live edge. This basis records
 // the proxy used by the telemetry without claiming that the provider's media
-// clock necessarily advanced with wall time.
+// clock necessarily advanced with wall time. The engine restarts its playback
+// and cache clocks near zero on every load, so each side is projected into
+// source coordinates by adding back its own media start before comparison.
 enum class RecoveryEdgeProjectionBasis { AnchorPlusWallClock };
 
 inline constexpr core::Duration kRecoveryEdgeCaptureWindow = core::seconds(30.0);
 inline constexpr std::string_view kRecoveryEdgeTelemetrySchema =
-    "recovery-edge-observability-v1";
+    "recovery-edge-observability-v2";
 
 struct RecoveryEdgeAnchor {
     core::Generation generation;
@@ -37,6 +39,7 @@ struct RecoveryEdgeAnchor {
     core::TimePoint observed_at{};
     std::optional<double> playback_time_seconds;
     std::optional<double> cache_end_seconds;
+    std::optional<double> media_start_seconds;
     bool cache_paused = false;
     std::optional<core::DetectionReason> recovery_reason;
 };
@@ -47,6 +50,7 @@ struct RecoveryEdgeObservation {
     core::TimePoint observed_at{};
     std::optional<double> playback_time_seconds;
     std::optional<double> cache_end_seconds;
+    std::optional<double> media_start_seconds;
     bool cache_paused = false;
     RecoveryEdgeObservationPoint point = RecoveryEdgeObservationPoint::HealthSample;
     RecoveryEdgePhase phase = RecoveryEdgePhase::Opening;

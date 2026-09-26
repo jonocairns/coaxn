@@ -19,6 +19,7 @@ player::RecoveryEdgeAnchor anchor() {
         .observed_at = core::TimePoint{core::seconds(10.0)},
         .playback_time_seconds = 100.0,
         .cache_end_seconds = 104.0,
+        .media_start_seconds = 1000.0,
         .cache_paused = false,
         .recovery_reason = core::DetectionReason::CacheStall,
     };
@@ -26,13 +27,15 @@ player::RecoveryEdgeAnchor anchor() {
 
 player::RecoveryEdgeObservation observation(
     double at, double playback, double cache_end,
-    core::LoadAttempt attempt = core::LoadAttempt{2}) {
+    core::LoadAttempt attempt = core::LoadAttempt{2},
+    double media_start = 1000.0) {
     return {
         .generation = core::Generation{4},
         .load_attempt = attempt,
         .observed_at = core::TimePoint{core::seconds(at)},
         .playback_time_seconds = playback,
         .cache_end_seconds = cache_end,
+        .media_start_seconds = media_start,
         .cache_paused = false,
         .point = player::RecoveryEdgeObservationPoint::HealthSample,
         .phase = player::RecoveryEdgePhase::Probation,
@@ -63,6 +66,26 @@ TEST_CASE("recovery edge telemetry records neutral wall projection residuals") {
     REQUIRE(second);
     CHECK_FALSE(second->first_readable);
     CHECK(second->readable_sample_index == 2);
+}
+
+TEST_CASE("recovery edge telemetry compares loads in source coordinates") {
+    // The engine rebases every load to start near zero. A recovered load that
+    // joins the source exactly on the wall projection reports a small local
+    // time and a later media start; comparing local times alone would report
+    // the outgoing load's entire lifetime as a residual.
+    player::RecoveryEdgeObserver edge;
+    edge.begin_recovery(anchor());
+
+    const auto report = edge.observe(
+        observation(13.0, 0.5, 4.5, core::LoadAttempt{2}, 1102.5));
+    REQUIRE(report);
+    CHECK(report->data_status == player::RecoveryEdgeDataStatus::Complete);
+    REQUIRE(report->playback_wall_residual_seconds);
+    REQUIRE(report->cache_end_wall_residual_seconds);
+    CHECK(*report->playback_wall_residual_seconds == Approx(0.0));
+    CHECK(*report->cache_end_wall_residual_seconds == Approx(0.0));
+    REQUIRE(report->local_live_gap_change_seconds);
+    CHECK(*report->local_live_gap_change_seconds == Approx(0.0));
 }
 
 TEST_CASE("recovery edge telemetry retains measurements without freshness labels") {
@@ -147,6 +170,18 @@ TEST_CASE("recovery edge telemetry reports only factual data-quality failures") 
     CHECK_FALSE(missing_report->cache_end_wall_residual_seconds);
     CHECK(missing_report->readable_sample_index == 0);
 
+    auto unrebased = observation(13.0, 103.0, 107.0);
+    unrebased.media_start_seconds.reset();
+    const auto unrebased_report = edge.observe(unrebased);
+    REQUIRE(unrebased_report);
+    CHECK(unrebased_report->data_status ==
+          player::RecoveryEdgeDataStatus::MissingTelemetry);
+    CHECK_FALSE(unrebased_report->playback_wall_residual_seconds);
+    CHECK_FALSE(unrebased_report->cache_end_wall_residual_seconds);
+    REQUIRE(unrebased_report->local_live_gap_change_seconds);
+    CHECK(*unrebased_report->local_live_gap_change_seconds == Approx(0.0));
+    CHECK(unrebased_report->readable_sample_index == 0);
+
     const auto stale = edge.observe(
         observation(13.0, 103.0, 107.0, core::LoadAttempt{1}));
     REQUIRE(stale);
@@ -204,11 +239,26 @@ TEST_CASE("recovery edge telemetry retains only identity flags and numeric delta
     CHECK(retained.find("projection-basis=anchor-plus-wall-clock") !=
           std::string::npos);
     CHECK(retained.find("cache-end-wall-residual=+0.000s") != std::string::npos);
-    CHECK(retained.find("schema=recovery-edge-observability-v1") !=
+    CHECK(retained.find("schema=recovery-edge-observability-v2") !=
           std::string::npos);
     for (const std::string_view forbidden : {
              "provider.invalid", "alice", "password", "token", "secret",
              "https://", "100.000", "104.000", "classification="}) {
         CHECK(retained.find(forbidden) == std::string::npos);
     }
+}
+
+TEST_CASE("an anchor without a media start still reports the local gap change") {
+    player::RecoveryEdgeObserver edge;
+    auto unrebased_anchor = anchor();
+    unrebased_anchor.media_start_seconds.reset();
+    edge.begin_recovery(unrebased_anchor);
+
+    const auto report = edge.observe(observation(13.0, 0.5, 6.5));
+    REQUIRE(report);
+    CHECK(report->data_status == player::RecoveryEdgeDataStatus::MissingTelemetry);
+    CHECK_FALSE(report->playback_wall_residual_seconds);
+    CHECK_FALSE(report->cache_end_wall_residual_seconds);
+    REQUIRE(report->local_live_gap_change_seconds);
+    CHECK(*report->local_live_gap_change_seconds == Approx(2.0));
 }

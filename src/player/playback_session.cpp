@@ -184,6 +184,7 @@ void PlaybackSession::begin_recovery_edge_observation(
             observation.load_attempt != active->load_attempt) {
             observation.playback_time_seconds.reset();
             observation.cache_end_seconds.reset();
+            observation.media_start_seconds.reset();
         }
     }
 
@@ -194,6 +195,7 @@ void PlaybackSession::begin_recovery_edge_observation(
         .observed_at = clock_.now(),
         .playback_time_seconds = observation.playback_time_seconds,
         .cache_end_seconds = observation.cache_end_seconds,
+        .media_start_seconds = observation.media_start_seconds,
         .cache_paused = observation.cache_paused,
         .recovery_reason = state.detection,
     });
@@ -209,6 +211,7 @@ void PlaybackSession::observe_recovery_edge(
         .observed_at = clock_.now(),
         .playback_time_seconds = observation.playback_time_seconds,
         .cache_end_seconds = observation.cache_end_seconds,
+        .media_start_seconds = observation.media_start_seconds,
         .cache_paused = observation.cache_paused,
         .point = point,
         .phase = phase,

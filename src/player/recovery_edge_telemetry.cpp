@@ -61,16 +61,30 @@ std::optional<RecoveryEdgeReport> RecoveryEdgeObserver::observe(
         return report;
     }
 
-    const double elapsed = report.elapsed_since_anchor->count();
-    report.playback_wall_residual_seconds =
-        *observation.playback_time_seconds - *anchor_->playback_time_seconds - elapsed;
-    report.cache_end_wall_residual_seconds =
-        *observation.cache_end_seconds - *anchor_->cache_end_seconds - elapsed;
+    // Each gap is measured within one load, so the media starts cancel and
+    // the change stays readable even when an offset is missing.
     const double anchor_gap =
         *anchor_->cache_end_seconds - *anchor_->playback_time_seconds;
     const double observed_gap =
         *observation.cache_end_seconds - *observation.playback_time_seconds;
     report.local_live_gap_change_seconds = observed_gap - anchor_gap;
+
+    if (!anchor_->media_start_seconds || !observation.media_start_seconds) {
+        report.data_status = RecoveryEdgeDataStatus::MissingTelemetry;
+        return report;
+    }
+
+    // Each load's times are relative to its own media start, so the two
+    // starts differ by however far the source advanced between the loads.
+    const double elapsed = report.elapsed_since_anchor->count();
+    const double rebase =
+        *observation.media_start_seconds - *anchor_->media_start_seconds;
+    report.playback_wall_residual_seconds =
+        *observation.playback_time_seconds + rebase -
+        *anchor_->playback_time_seconds - elapsed;
+    report.cache_end_wall_residual_seconds =
+        *observation.cache_end_seconds + rebase -
+        *anchor_->cache_end_seconds - elapsed;
 
     report.first_readable = readable_samples_ == 0;
     report.readable_sample_index = ++readable_samples_;
