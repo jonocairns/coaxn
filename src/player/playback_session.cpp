@@ -86,6 +86,7 @@ bool PlaybackSession::stop(core::Generation generation) {
          supervisor_.current().generation == generation)) return false;
 
     supervisor_.dispatch(core::PlaybackStopped{generation});
+    emit_delivery_summary(delivery_.end_load(clock_.now()));
     playback_health_.reset();
     health_snapshot_ = {};
     timeline_classification_ = TimelineClassification::Unavailable;
@@ -223,8 +224,14 @@ void PlaybackSession::observe_recovery_edge(
     }
 }
 
+void PlaybackSession::emit_delivery_summary(std::optional<DeliveryLoadSummary> summary) {
+    if (summary && callbacks_.on_delivery_summary) callbacks_.on_delivery_summary(*summary);
+}
+
 void PlaybackSession::restart_health_supervision(core::LoadAttempt load_attempt) {
     const auto now = clock_.now();
+    emit_delivery_summary(delivery_.begin_load(generation_, load_attempt, now));
+    next_delivery_snapshot_ = now + kDeliverySnapshotInterval;
     const auto target = core::buffer_phase_targets(core::BufferPhase::Zap);
     playback_health_ = core::initial_playback_health(
         generation_, load_attempt, core::BufferPhase::Zap, now, target.cache_seconds);
@@ -384,6 +391,20 @@ void PlaybackSession::sample_health() {
     }
     playback_health_ = fold.state;
     health_snapshot_ = fold.state.snapshot;
+    const auto load_to_first_data = delivery_.observe({
+        .generation = observation.generation,
+        .load_attempt = observation.load_attempt,
+        .observed_at = now,
+        .cache_end_seconds = observation.cache_end_seconds,
+        .buffer_seconds = observation.buffer_seconds,
+        .buffer_target_seconds = target.cache_seconds,
+    });
+    // A load can play for hours without ending, and a saved log is only as
+    // useful as the last delivery line in it.
+    if (now >= next_delivery_snapshot_) {
+        next_delivery_snapshot_ = now + kDeliverySnapshotInterval;
+        emit_delivery_summary(delivery_.snapshot(now));
+    }
     if (callbacks_.set_health_discontinuities) {
         callbacks_.set_health_discontinuities(fold.state.discontinuities);
     }
@@ -474,6 +495,8 @@ void PlaybackSession::sample_health() {
             .unattributed_engine_messages_since_sample = unattributed_delta,
             .engine_warning = current_diagnostics.last_engine_message,
             .timeline_recovery = timeline_recovery_step,
+            .load_to_first_data = load_to_first_data,
+            .input_silence = delivery_.input_silence(now),
         });
     }
 }
@@ -516,6 +539,13 @@ void PlaybackSession::on_supervisor_state_changed(const core::SupervisorState& s
         timeline_recovery_pending_ = false;
     }
 
+    if (state.name == core::SupervisorStateName::Failed &&
+        previous != core::SupervisorStateName::Failed) {
+        // Supervision stops here, so this is the failed load's last word
+        // unless it is revived -- which continues the same delivery record.
+        delivery_.suspend(clock_.now());
+        emit_delivery_summary(delivery_.snapshot(clock_.now()));
+    }
     if (previous == core::SupervisorStateName::Failed &&
         state.name == core::SupervisorStateName::Zap &&
         state.generation == generation_) {
@@ -537,6 +567,10 @@ void PlaybackSession::presentation_lost() {
     supervisor_.dispatch(core::PresentationLost{generation_});
 }
 
-void PlaybackSession::dispose() { supervisor_.dispose(); }
+void PlaybackSession::dispose() {
+    // Shutdown ends the current load without a stop; its record ends here too.
+    emit_delivery_summary(delivery_.end_load(clock_.now()));
+    supervisor_.dispose();
+}
 
 }  // namespace coax::player

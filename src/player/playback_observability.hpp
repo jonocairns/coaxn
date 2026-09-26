@@ -142,6 +142,9 @@ struct RecoveryDecisionEvidence {
     bool cache_paused = false;
     std::optional<double> playback_movement_seconds;
     std::optional<double> cache_end_movement_seconds;
+    // How long input had been silent when the decision was made. Separates a
+    // source that went quiet from one that failed loudly with data flowing.
+    std::optional<core::Duration> input_silence{};
     std::optional<SanitizedEngineWarning> engine_warning;
 };
 

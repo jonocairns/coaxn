@@ -137,6 +137,10 @@ std::string signed_seconds(std::optional<double> value) {
     return value ? std::format("{:+.3f}s", *value) : "unavailable";
 }
 
+std::string unsigned_seconds(std::optional<double> value) {
+    return value ? std::format("{:.3f}s", *value) : "unavailable";
+}
+
 const char* optional_pause(std::optional<bool> value) {
     return !value ? "unavailable" : (*value ? "yes" : "no");
 }
@@ -226,6 +230,7 @@ App::App()
                        playback_session_.health_snapshot().timeline.playback_movement_seconds;
                    evidence.cache_end_movement_seconds =
                        playback_session_.health_snapshot().timeline.cache_end_movement_seconds;
+                   evidence.input_silence = playback_session_.input_silence();
                    evidence.engine_warning = diagnostics.last_engine_message;
                    log::info("{}", player::format_recovery_telemetry(
                        transition, diagnostics.request_shape, evidence));
@@ -243,6 +248,9 @@ App::App()
                } else {
                    log::debug("{}", line);
                }
+           },
+           .on_delivery_summary = [](const player::DeliveryLoadSummary& summary) {
+               log::info("{}", player::format_delivery_summary(summary));
            },
            .on_rebuffer = [](int count, double target) {
                if constexpr (player::kLiveSyncControlsSpeed) {
@@ -766,7 +774,7 @@ void App::log_health_sample(const player::HealthSampleReport& report) {
         "warning-component={} warning-category={} timeline-recovery={} "
         "baseline-live-gap={} current-live-gap={} cache-relative-loss={} "
         "live-gap-increase={} rebuffer-age={} cache-resume-related={} "
-        "supervisor-accepted={}",
+        "supervisor-accepted={} buffer={} input-silence={}",
         evidence_generation.value(), health_snapshot.timeline.load_attempt.value(),
         player::to_string(report.classification),
         signed_seconds(health_snapshot.timeline.elapsed_seconds),
@@ -789,7 +797,16 @@ void App::log_health_sample(const player::HealthSampleReport& report) {
         signed_seconds(report.timeline_recovery.live_gap_increase_seconds),
         signed_seconds(report.timeline_recovery.rebuffer_age_seconds),
         report.timeline_recovery.cache_resume_related ? "yes" : "no",
-        optional_pause(report.timeline_recovery.supervisor_accepted));
+        optional_pause(report.timeline_recovery.supervisor_accepted),
+        unsigned_seconds(health_snapshot.buffer_seconds),
+        unsigned_seconds(report.input_silence
+            ? std::optional<double>{std::chrono::duration<double>(*report.input_silence).count()}
+            : std::nullopt));
+    if (report.load_to_first_data) {
+        log::info("First data generation {} load-attempt={} after {:.0f}ms",
+                  evidence_generation.value(), health_snapshot.timeline.load_attempt.value(),
+                  std::chrono::duration<double, std::milli>(*report.load_to_first_data).count());
+    }
     if (fold.discontinuity) {
         log::warn(
             "Timeline discontinuity #{} generation {} load-attempt={} kind={} playback-move={} "
