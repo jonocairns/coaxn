@@ -24,7 +24,8 @@ struct SavedLog {
 // Copies the session log so far into a new timestamped file in a "logs" folder
 // beside it. The live log is truncated when the next session starts, so this
 // is how the evidence from a run outlives it. Empty with `error` set when there
-// is no session log or the copy fails.
+// is no session log or the copy fails. It does file I/O: call it off the UI
+// thread. Logging continues while it runs.
 std::optional<SavedLog> save_copy(std::string& error);
 
 // Most recent messages, oldest first, as a copy taken under the ring's lock.

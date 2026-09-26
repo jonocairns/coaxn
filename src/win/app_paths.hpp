@@ -15,6 +15,7 @@ namespace coax::win {
 std::wstring app_data_dir();
 
 // Opens an Explorer window on the file's folder with the file selected.
-void reveal_in_explorer(const std::wstring& path);
+// False when Explorer could not be started.
+bool reveal_in_explorer(const std::wstring& path);
 
 }  // namespace coax::win

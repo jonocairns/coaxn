@@ -23,9 +23,12 @@ std::wstring app_data_dir() {
     return directory;
 }
 
-void reveal_in_explorer(const std::wstring& path) {
+bool reveal_in_explorer(const std::wstring& path) {
     const std::wstring arguments = L"/select,\"" + path + L"\"";
-    ShellExecuteW(nullptr, L"open", L"explorer.exe", arguments.c_str(), nullptr, SW_SHOWNORMAL);
+    // ShellExecuteW reports success as any value above 32.
+    const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(
+        nullptr, L"open", L"explorer.exe", arguments.c_str(), nullptr, SW_SHOWNORMAL));
+    return result > 32;
 }
 
 }  // namespace coax::win

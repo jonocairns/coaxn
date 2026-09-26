@@ -2147,22 +2147,33 @@ void App::draw_diagnostics() {
 
     // A live run's evidence is otherwise lost at the next launch, which
     // truncates coax.log. Saving copies it out without stopping playback.
-    if (ImGui::SmallButton("Save log")) {
-        std::string error;
-        if (const auto saved = log::save_copy(error)) {
-            saved_log_path_   = saved->path;
-            saved_log_status_ = std::format("Saved to {}", saved->display_path);
-            log::info("Session log saved to {}", saved->display_path);
+    if (log_save_.valid() &&
+        log_save_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto result = log_save_.get();
+        if (result.saved) {
+            saved_log_path_   = result.saved->path;
+            saved_log_status_ = std::format("Saved to {}", result.saved->display_path);
+            log::info("Session log saved to {}", result.saved->display_path);
         } else {
             saved_log_path_.clear();
-            saved_log_status_ = error;
-            log::warn("{}", error);
+            saved_log_status_ = result.error;
+            log::warn("{}", result.error);
         }
     }
-    if (!saved_log_path_.empty()) {
+    const bool saving = log_save_.valid();
+    ImGui::BeginDisabled(saving);
+    if (ImGui::SmallButton(saving ? "Saving..." : "Save log")) {
+        log_save_ = std::async(std::launch::async, [] {
+            LogSaveResult result;
+            result.saved = log::save_copy(result.error);
+            return result;
+        });
+    }
+    ImGui::EndDisabled();
+    if (!saved_log_path_.empty() && !saving) {
         ImGui::SameLine();
-        if (ImGui::SmallButton("Show in folder")) {
-            win::reveal_in_explorer(saved_log_path_);
+        if (ImGui::SmallButton("Show in folder") && !win::reveal_in_explorer(saved_log_path_)) {
+            saved_log_status_ = "Could not open Explorer";
         }
     }
     if (!saved_log_status_.empty()) {

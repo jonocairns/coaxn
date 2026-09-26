@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shlobj.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cwchar>
@@ -145,29 +146,78 @@ std::optional<SavedLog> save_copy(std::string& error) {
         return std::nullopt;
     }
 
+    // Only the flush and the length are taken under the writer's lock. The
+    // copy then reads exactly that many bytes -- ending on a whole line --
+    // without holding up every thread that logs while it runs.
+    long long length = -1;
+    {
+        std::scoped_lock lock(g_file_mutex);
+        if (std::fflush(file) == 0) length = _ftelli64(file);
+    }
+    if (length < 0) {
+        error = "Could not flush the session log";
+        return std::nullopt;
+    }
+
     const auto slash = g_session_log_path.find_last_of(L'\\');
     const std::wstring directory = path_in(
         slash == std::wstring::npos ? std::wstring{} : g_session_log_path.substr(0, slash),
         L"logs");
-    // Already existing is the normal case; a real failure surfaces at the copy.
+    // Already existing is the normal case; a real failure surfaces below.
     CreateDirectoryW(directory.c_str(), nullptr);
 
+    const HANDLE source = CreateFileW(
+        g_session_log_path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (source == INVALID_HANDLE_VALUE) {
+        error = std::format("Could not read the session log (error {})", GetLastError());
+        return std::nullopt;
+    }
+
+    // The process id keeps two sessions saving in the same second apart; the
+    // suffix does the same for one session saving twice. CREATE_NEW never
+    // overwrites an earlier save.
     SYSTEMTIME local{};
     GetLocalTime(&local);
-    wchar_t name[64];
-    swprintf(name, std::size(name), L"coax-%04u%02u%02u-%02u%02u%02u.log",
-             local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond);
-    const std::wstring destination = path_in(directory, name);
+    std::wstring destination;
+    HANDLE target = INVALID_HANDLE_VALUE;
+    for (int copy = 1; copy <= 9 && target == INVALID_HANDLE_VALUE; ++copy) {
+        wchar_t name[80];
+        swprintf(name, std::size(name), copy == 1 ? L"coax-%04u%02u%02u-%02u%02u%02u-%lu.log"
+                                                  : L"coax-%04u%02u%02u-%02u%02u%02u-%lu-%d.log",
+                 local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute,
+                 local.wSecond, GetCurrentProcessId(), copy);
+        destination = path_in(directory, name);
+        target = CreateFileW(destination.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (target == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) break;
+    }
+    if (target == INVALID_HANDLE_VALUE) {
+        error = std::format("Could not create the saved log (error {})", GetLastError());
+        CloseHandle(source);
+        return std::nullopt;
+    }
 
-    {
-        // Held across the copy so it ends on a whole line rather than halfway
-        // through one another thread is writing.
-        std::scoped_lock lock(g_file_mutex);
-        std::fflush(file);
-        if (!CopyFileW(g_session_log_path.c_str(), destination.c_str(), TRUE)) {
-            error = std::format("Could not save the log (error {})", GetLastError());
-            return std::nullopt;
-        }
+    std::vector<char> buffer(1 << 20);
+    long long remaining = length;
+    bool copied = true;
+    while (remaining > 0 && copied) {
+        const DWORD want = static_cast<DWORD>(
+            std::min<long long>(remaining, static_cast<long long>(buffer.size())));
+        DWORD read = 0;
+        DWORD written = 0;
+        copied = ReadFile(source, buffer.data(), want, &read, nullptr) && read > 0 &&
+                 WriteFile(target, buffer.data(), read, &written, nullptr) && written == read;
+        remaining -= read;
+    }
+    const DWORD copy_error = copied ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(source);
+    CloseHandle(target);
+    if (!copied) {
+        DeleteFileW(destination.c_str());
+        error = std::format("Could not save the log (error {})", copy_error);
+        return std::nullopt;
     }
 
     std::string display(static_cast<std::size_t>(WideCharToMultiByte(
