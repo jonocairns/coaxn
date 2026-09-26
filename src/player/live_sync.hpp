@@ -8,10 +8,10 @@ namespace coax::player {
 // mirror ExoPlayer's DefaultLivePlaybackSpeedControl so behaviour is
 // comparable to a known-good implementation rather than invented.
 struct LiveSyncConfig {
-    // Held at unity. The provider delivers in ~6s chunks, so buffered duration
-    // is a sawtooth rather than a latency, and ExoPlayer's 0.97-1.03 fallback
-    // range swung between its rails ~19 times a minute for no net change over
-    // an hour, with mpv's time-stretcher making every swing audible.
+    // Held at unity. On the observed provider the cache end advances in ~6s
+    // batches, so buffered duration is a sawtooth rather than a latency, and
+    // ExoPlayer's 0.97-1.03 fallback range switched between its rails ~19
+    // times a minute, with mpv's time-stretcher making every switch audible.
     // kExoPlayerSpeedRange restores the controller for tests.
     double min_speed = 1.0;
     double max_speed = 1.0;

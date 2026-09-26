@@ -31,9 +31,10 @@ inline constexpr RecoveryPolicy kDefaultRecoveryPolicy{};
 
 inline constexpr BufferPhaseTargets buffer_phase_targets(BufferPhase phase) {
     // A low opening target trims the initial read burst. Once five healthy
-    // seconds establish the load, twenty seconds absorbs provider jitter: the
-    // provider delivers ~6s chunks with gaps of up to 11s between them, which
-    // a ten-second cache could not cover.
+    // seconds establish the load, twenty seconds absorbs provider jitter. On
+    // the observed provider the cache end advanced in ~6s batches with quiet
+    // runs of up to ~11s, which a ten-second cache could not ride out. A cap
+    // permits readahead; it does not bound the distance behind live.
     return phase == BufferPhase::Zap ? BufferPhaseTargets{1.0, 1.0}
                                      : BufferPhaseTargets{20.0, 20.0};
 }

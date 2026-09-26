@@ -26,7 +26,8 @@ rectangle where the picture should be.
   when the source is genuinely smaller than the viewport
 - **Bounded recovery.** A generation-scoped supervisor wraps the libmpv owner:
   five attempts inside one 30-second episode, with buffer targets growing from
-  1 second while tuning to 10 seconds once playback has been healthy for five
+  1 second while tuning to 20 seconds once playback has been healthy for five
+  seconds, and playback speed held at 1.0x on live streams
 - **Credentials encrypted at rest** with DPAPI
 - **A quiet update check** against GitHub releases at startup, silent on every
   uninteresting answer — someone trying to watch television does not need to
