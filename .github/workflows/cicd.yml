@@ -15,7 +15,8 @@ concurrency:
   # third push discard a queued release merge -- and nothing else would ever
   # release it, because each run only acts on its own SHA. Main runs overlapping
   # is safe: release-context.sh only lets the current head refresh the release
-  # PR, and release-artifact queues per tag.
+  # PR, wait-for-release-tag.sh holds that refresh until an earlier release
+  # merge is tagged, and release-artifact queues per tag.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   # Stop wasting runner time on superseded revisions of the same pull request.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -152,6 +153,12 @@ jobs:
           EXPECTED_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
         run: scripts/ci/release-context.sh
+      - name: Wait for an earlier release merge to be tagged
+        if: steps.context.outputs.update-pr == 'true' && steps.context.outputs.release-context != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/wait-for-release-tag.sh
       # Author the release PR as the release bot rather than github-actions[bot].
       # PRs opened with the default GITHUB_TOKEN are held in `action_required`
       # and their checks never start without a manual approval.

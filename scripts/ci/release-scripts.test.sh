@@ -9,6 +9,7 @@ context_script="$repo_root/scripts/ci/release-context.sh"
 verify_script="$repo_root/scripts/ci/verify-release-artifact.sh"
 upload_script="$repo_root/scripts/ci/upload-release-asset.sh"
 check_script="$repo_root/scripts/ci/check-release-artifacts.sh"
+wait_script="$repo_root/scripts/ci/wait-for-release-tag.sh"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -21,22 +22,29 @@ assert_line() {
     grep -Fqx "$expected" "$output_file" || fail "missing output: $expected"
 }
 
+# Apply the calling script's own --jq filter to a representative response, so
+# the predicates that decide what the release pipeline does are what gets
+# tested.
+filter_response() {
+    local response=$1 filter='' previous='' argument
+    shift
+    for argument in "$@"; do
+        [[ "$previous" == --jq ]] && filter=$argument
+        previous=$argument
+    done
+    [[ -n "$filter" ]] || fail "gh api call omitted --jq: $*"
+    jq -r "$filter" <<<"$response"
+}
+
 gh() {
     case "$1 ${2:-}" in
         "api "*)
             if [[ "$*" == *'/git/ref/heads/main'* ]]; then
                 printf '%s\n' "$MOCK_MAIN_SHA"
             elif [[ "$*" == *'/commits/'*'/pulls'* ]]; then
-                # Apply the script's own --jq filter to a representative
-                # response, so the merge-SHA, base and label predicates that
-                # decide whether a release happens are what gets tested.
-                local filter='' previous='' argument
-                for argument in "$@"; do
-                    [[ "$previous" == --jq ]] && filter=$argument
-                    previous=$argument
-                done
-                [[ -n "$filter" ]] || fail "gh api call omitted --jq: $*"
-                jq -r "$filter" <<<"${MOCK_PULLS:-[]}"
+                filter_response "${MOCK_PULLS:-[]}" "$@"
+            elif [[ "$*" == *'/pulls?state=closed'* ]]; then
+                filter_response "$(cat "$MOCK_CLOSED_PULLS_FILE")" "$@"
             else
                 fail "unexpected gh api call: $*"
             fi
@@ -52,7 +60,13 @@ gh() {
             ;;
     esac
 }
-export -f gh fail
+export -f gh fail filter_response
+
+# Stands in for the release merge's run tagging its PR while the head run waits.
+sleep() {
+    [[ -z "${MOCK_TAGGED_PULLS:-}" ]] || printf '%s' "$MOCK_TAGGED_PULLS" >"$MOCK_CLOSED_PULLS_FILE"
+}
+export -f sleep
 
 sha=1111111111111111111111111111111111111111
 other_sha=2222222222222222222222222222222222222222
@@ -92,16 +106,19 @@ assert_line 'create-release=false' "$context_output"
 assert_line 'release-context=true' "$context_output"
 
 # A commit on main can belong to other PRs too; only the one it merged counts.
-MOCK_PULLS="[$(pull 41 main "$sha"),$(pull 42 main "$sha" 'autorelease: pending')]" run_context
-assert_line 'create-release=true' "$context_output"
-
-MOCK_PULLS="[$(pull 42 main "$other_sha" 'autorelease: pending')]" run_context
+MOCK_PULLS="[$(pull 41 main "$other_sha" 'autorelease: pending'),$(pull 42 main "$sha")]" run_context
 assert_line 'create-release=false' "$context_output"
 assert_line 'release-context=false' "$context_output"
 
-MOCK_PULLS="[$(pull 42 develop "$sha" 'autorelease: pending')]" run_context
-assert_line 'create-release=false' "$context_output"
-assert_line 'release-context=false' "$context_output"
+for label in 'autorelease: pending' 'autorelease: tagged'; do
+    MOCK_PULLS="[$(pull 42 main "$other_sha" "$label")]" run_context
+    assert_line 'create-release=false' "$context_output"
+    assert_line 'release-context=false' "$context_output"
+
+    MOCK_PULLS="[$(pull 42 develop "$sha" "$label")]" run_context
+    assert_line 'create-release=false' "$context_output"
+    assert_line 'release-context=false' "$context_output"
+done
 
 MOCK_PULLS="[$(pull 42 main "$sha")]" run_context
 assert_line 'create-release=false' "$context_output"
@@ -113,6 +130,35 @@ assert_line 'update-pr=false' "$context_output"
 if EXPECTED_SHA=invalid GITHUB_REPOSITORY=owner/repo GITHUB_OUTPUT="$context_output" \
     "$context_script" >/dev/null 2>&1; then
     fail 'release context accepted an invalid commit SHA'
+fi
+
+# One pull request as GET /repos/{owner}/{repo}/pulls?state=closed returns it,
+# trimmed to the fields the filter reads.
+closed_pull() {
+    local number=$1 merged_at=$2 label=$3
+    printf '{"number":%s,"merged_at":%s,"labels":[{"name":"%s"}]}' "$number" "$merged_at" "$label"
+}
+
+closed_pulls_file="$test_root/closed-pulls"
+run_wait() {
+    printf '%s' "$1" >"$closed_pulls_file"
+    GITHUB_REPOSITORY=owner/repo \
+        MOCK_CLOSED_PULLS_FILE=$closed_pulls_file \
+        MOCK_TAGGED_PULLS=${MOCK_TAGGED_PULLS:-} \
+        WAIT_ATTEMPTS=3 \
+        "$wait_script" >/dev/null 2>&1
+}
+
+merged='"2026-09-27T00:00:00Z"'
+run_wait "[$(closed_pull 42 "$merged" 'autorelease: tagged')]" \
+    || fail 'release tag wait blocked on a tagged release PR'
+run_wait "[$(closed_pull 42 null 'autorelease: pending')]" \
+    || fail 'release tag wait blocked on an unmerged release PR'
+MOCK_TAGGED_PULLS="[$(closed_pull 42 "$merged" 'autorelease: tagged')]" \
+    run_wait "[$(closed_pull 42 "$merged" 'autorelease: pending')]" \
+    || fail 'release tag wait did not see the release PR get tagged'
+if run_wait "[$(closed_pull 42 "$merged" 'autorelease: pending')]"; then
+    fail 'release tag wait gave up on an untagged release PR without failing'
 fi
 
 verify_repo="$test_root/verify"
