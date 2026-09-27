@@ -24,8 +24,8 @@
             # section of the README.
             nsis
             # Not a build dependency. Releases are pull requests now, so
-            # opening one and inspecting the draft the release job stages are
-            # both routine, and neither should need a browser.
+            # opening one and inspecting the release it publishes are both
+            # routine, and neither should need a browser.
             gh
           ];
 
@@ -48,6 +48,10 @@
             # Same reason as the cross shell above. This is the shell .envrc
             # loads, so it is the one that needs it to hand day to day.
             gh
+            # The lint job checks scripts/ with shellcheck, and the release
+            # script tests filter their mocked GitHub responses with jq.
+            shellcheck
+            jq
           ];
         };
       };

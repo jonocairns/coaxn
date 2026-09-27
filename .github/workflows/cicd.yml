@@ -1,0 +1,235 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One group per commit on main, not one for the branch. A group holds a single
+  # pending run and a newly queued one cancels it, so a shared group would let a
+  # third push discard a queued release merge -- and nothing else would ever
+  # release it, because each run only acts on its own SHA. Main runs overlapping
+  # is safe: release-context.sh only lets the current head refresh the release
+  # PR, wait-for-release-tag.sh holds that refresh until an earlier release
+  # merge is tagged, and release-artifact queues per tag.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  # Stop wasting runner time on superseded revisions of the same pull request.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: nix develop --command bash -e {0}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: nix develop .#core --command bash -e {0}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6 # v1.0.0
+        with:
+          installer-version: 2.35.1
+          extra-conf: experimental-features = nix-command flakes
+      - run: nix flake check --no-update-lock-file
+      - name: Check shell scripts
+        run: shellcheck -x scripts/fetch-libmpv.sh scripts/ci/*.sh
+      - name: Test release scripts
+        run: scripts/ci/release-scripts.test.sh
+
+  # Needs neither Windows nor libmpv, so it finishes long before the cross-build
+  # and fails fast on anything in coax_core or coax_player_core: core/, the
+  # portable half of player/, and src/util/log_ring.cpp. The rest of util/ is
+  # Windows-only and is reached only by the cross-build below.
+  core:
+    name: portable core tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: nix develop .#core --command bash -e {0}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6 # v1.0.0
+        with:
+          installer-version: 2.35.1
+          extra-conf: experimental-features = nix-command flakes
+      - run: cmake -S . -B build-core -G Ninja -DCOAX_BUILD_APP=OFF -DBUILD_TESTING=ON
+      - run: cmake --build build-core
+      - run: ctest --test-dir build-core --output-on-failure
+
+  # The app and mpv adapter are where most of the remaining code lives and none
+  # of it is reachable from the native tests, so without this a green PR could
+  # still fail to produce a coax.exe. The test binaries are built here too and
+  # not run -- they are Windows executables and this runner is Linux -- but the
+  # same cases already ran natively in the job above. Packaging runs on every
+  # change too: a release is public the moment it is created, so the installer
+  # step failing for the first time there would leave it with nothing to
+  # download.
+  windows:
+    name: windows cross-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6 # v1.0.0
+        with:
+          installer-version: 2.35.1
+          extra-conf: experimental-features = nix-command flakes
+      # The release PR bumps the manifest and CMakeLists.txt together, so a
+      # disagreement here means the x-release-please-version marker has stopped
+      # matching. Caught now, it fails the release PR; caught by
+      # verify-release-artifact.sh, the release would already be public.
+      - name: Check CMakeLists.txt matches the release manifest
+        shell: bash
+        run: |
+          cmake_version=$(scripts/ci/project-version.sh)
+          manifest_version=$(jq -r '.["."]' .release-please-manifest.json)
+          if [[ "$cmake_version" != "$manifest_version" ]]; then
+            echo "::error::CMakeLists.txt says $cmake_version but .release-please-manifest.json says $manifest_version."
+            echo "::error::Check the x-release-please-version marker trails the project() line."
+            exit 1
+          fi
+      - uses: ./.github/actions/libmpv-cache
+      - run: >-
+          cmake -B build -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw.cmake
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - run: cmake --build build --target package
+      - name: Check every artifact was packaged
+        run: scripts/ci/check-release-artifacts.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-package
+          path: |
+            build/coax-*-win64-setup.exe
+            build/coax-*-win64.zip
+            build/coax-*-win64-debug.zip
+          if-no-files-found: error
+
+  # Branch protection should require this one stable context rather than a
+  # brittle list of job names.
+  ci-required:
+    if: always()
+    needs: [lint, core, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm every required check passed
+        shell: bash
+        run: |
+          test "${{ needs.lint.result }}" = success
+          test "${{ needs.core.result }}" = success
+          test "${{ needs.windows.result }}" = success
+
+  release-please:
+    # PR maintenance may use the current main head only after that head's run
+    # has passed every gate. Release creation is stricter: it runs only when
+    # this exact successful SHA merged the pending Release Please PR.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: ci-required
+    runs-on: ubuntu-latest
+    # Holds the release bot credentials. Its deployment branch policy allows
+    # main only, so the secrets stay unreachable even if the job-level `if:`
+    # above is ever weakened.
+    environment: release
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_context: ${{ steps.context.outputs.release-context }}
+      release_created: ${{ steps.github-release.outputs.release_created }}
+      release_sha: ${{ steps.github-release.outputs.sha }}
+      tag_name: ${{ steps.github-release.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - id: context
+        name: Check release context
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/release-context.sh
+      - name: Wait for an earlier release merge to be tagged
+        if: steps.context.outputs.update-pr == 'true' && steps.context.outputs.release-context != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/wait-for-release-tag.sh
+      # Author the release PR as the release bot rather than github-actions[bot].
+      # PRs opened with the default GITHUB_TOKEN are held in `action_required`
+      # and their checks never start without a manual approval.
+      - id: app-token
+        name: Mint release bot token
+        if: steps.context.outputs.update-pr == 'true' && steps.context.outputs.release-context != 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # Without these the token inherits whatever the installation happens
+          # to hold. Naming them keeps this token bounded if the App is ever
+          # granted more. `issues` is not optional: Release Please maintains
+          # its autorelease:* labels through the issues API.
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+      - name: Create or update release PR
+        if: steps.context.outputs.update-pr == 'true' && steps.context.outputs.release-context != 'true'
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          skip-github-release: true
+      - id: github-release
+        name: Create tag and GitHub Release
+        if: steps.context.outputs.create-release == 'true'
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          skip-github-pull-request: true
+
+  release-artifact:
+    if: >-
+      always() &&
+      needs.ci-required.result == 'success' &&
+      needs.release-please.outputs.release_context == 'true'
+    needs: [ci-required, release-please]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-asset-${{ needs.release-please.outputs.tag_name || github.sha }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      # Nothing here talks to git over the network after the fetch -- the upload
+      # authenticates through GH_TOKEN -- so the checkout credentials would only
+      # sit in .git/config for the build and packaging steps to trip over.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6 # v1.0.0
+        with:
+          installer-version: 2.35.1
+          extra-conf: experimental-features = nix-command flakes
+      - id: release
+        name: Verify tag and GitHub Release
+        env:
+          EXPECTED_RELEASE_SHA: ${{ needs.release-please.outputs.release_sha }}
+          EXPECTED_RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/verify-release-artifact.sh
+      - uses: ./.github/actions/libmpv-cache
+      - run: >-
+          cmake -B build -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw.cmake
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - run: cmake --build build --target package
+      - name: Upload artifacts to existing GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: scripts/ci/upload-release-asset.sh "$RELEASE_TAG"

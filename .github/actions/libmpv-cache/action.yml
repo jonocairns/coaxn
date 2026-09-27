@@ -1,0 +1,20 @@
+name: libmpv cache
+description: >-
+  Restore the pinned libmpv tree into third_party/mpv, fetching and verifying it
+  only on a cache miss. The pinned runtime is a 29 MiB archive that only moves
+  when the fetch script does, and the script exits early when the tree is
+  already unpacked -- so the pin itself is the cache key. A cached tree
+  therefore skips the digest check; the key covers the digest, so changing the
+  pin forces a fetch that verifies it. Requires Nix, so use it after
+  nix-installer-action.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: third_party/mpv
+        key: libmpv-${{ hashFiles('scripts/fetch-libmpv.sh') }}
+    - name: Fetch pinned libmpv
+      shell: nix develop --command bash -e {0}
+      run: ./scripts/fetch-libmpv.sh

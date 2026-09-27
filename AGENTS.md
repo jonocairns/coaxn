@@ -7,8 +7,9 @@ rather than stylistic. Reasoning lives in [README.md](README.md),
 
 ## Tools live in nix, not on PATH
 
-- `cmake`, `ninja`, `nsis` and `gh` do not exist outside the nix shells. A bare
-  `cmake` is "command not found" — prefix the command, do not install anything.
+- `cmake`, `ninja`, `nsis`, `gh`, `shellcheck` and `jq` do not exist outside
+  the nix shells (`shellcheck` and `jq` are in `.#core` only). A bare `cmake`
+  is "command not found" — prefix the command, do not install anything.
 - Two shells, two build directories:
   - `nix develop --command …` — mingw cross-build to Windows, builds into `build/`.
   - `nix develop .#core --command …` — native compiler for the portable core, builds into `build-core/`.
@@ -42,13 +43,13 @@ can appear to prove something it did not.
 
 - Conventional Commits are wired to the release machinery. release-please reads
   them to compute every version. The prefix is not a label.
-- `fix:` → patch. `feat:` → minor. `feat!:`, `fix!:` or a `BREAKING CHANGE:`
-  footer → major.
-- `docs:`, `ci:`, `chore:`, `refactor:`, `build:`, `test:` → no version change
-  **and no changelog entry**. release-please marks those sections hidden by
-  default and `release-please-config.json` sets no `changelog-types` override,
-  so they are dropped silently. Any other prefix is treated the same way. If a
-  change should be visible to users, it has to be `feat:` or `fix:`.
+- `fix:` and `perf:` → patch. `feat:` → minor. `feat!:`, `fix!:` or a
+  `BREAKING CHANGE:` footer → major.
+- `docs:`, `ci:`, `chore:`, `refactor:`, `build:`, `test:`, `style:`,
+  `revert:`, `deps:` → no version change **and no changelog entry**.
+  `changelog-sections` in `release-please-config.json` marks them hidden, so
+  they are dropped silently. Any other prefix is treated the same way. If a
+  change should be visible to users, it has to be `feat:`, `fix:` or `perf:`.
 - Choose the prefix for the effect on users, not the size of the diff. A
   one-line behaviour change is `fix:`; a thousand-line rename is `refactor:`.
 
@@ -68,7 +69,7 @@ can appear to prove something it did not.
   build/CMakeFiles/coax.dir/coax.rc.res` before rebuilding or the executable
   keeps the old icon and the build still looks green.
 - Never create a tag or a GitHub release by hand. Releasing is merging the
-  release PR, then publishing the draft it stages.
+  release PR; `cicd.yml` publishes the release once CI passes on that merge.
 
 ## Keep the portable core portable
 
