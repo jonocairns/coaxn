@@ -75,11 +75,14 @@ updater works line by line and rewrites only the version it finds on the
 annotated line, so a marker sitting on its own line above `project()` matches
 nothing and silently updates nothing.
 
-Get that wrong and releases are tagged ahead of the build they contain, which
-is why `scripts/ci/verify-release-artifact.sh` re-reads `CMakeLists.txt` and
-fails if it disagrees with the version just released. Note the one case that check cannot see: while the
-file and the release happen to hold the same version, they agree whether or not
-the annotation works. It is the second release that breaks.
+Get that wrong and releases are tagged ahead of the build they contain. The
+`windows` job compares `CMakeLists.txt` with `.release-please-manifest.json` on
+every change, and the release PR bumps both, so a broken marker fails the
+release PR before anything is published. Note the one case that check cannot
+see: while nothing is being released the two agree whether or not the
+annotation works, so it is the next release PR that goes red.
+`scripts/ci/verify-release-artifact.sh` re-reads `CMakeLists.txt` against the
+created release as a last check, but by then the release is already public.
 
 `version.txt` and `.release-please-manifest.json` are release-please's own
 bookkeeping. Nothing in the build reads either one; leave both to the bot.

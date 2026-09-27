@@ -79,6 +79,20 @@ jobs:
         with:
           installer-version: 2.35.1
           extra-conf: experimental-features = nix-command flakes
+      # The release PR bumps the manifest and CMakeLists.txt together, so a
+      # disagreement here means the x-release-please-version marker has stopped
+      # matching. Caught now, it fails the release PR; caught by
+      # verify-release-artifact.sh, the release would already be public.
+      - name: Check CMakeLists.txt matches the release manifest
+        shell: bash
+        run: |
+          cmake_version=$(scripts/ci/project-version.sh)
+          manifest_version=$(jq -r '.["."]' .release-please-manifest.json)
+          if [[ "$cmake_version" != "$manifest_version" ]]; then
+            echo "::error::CMakeLists.txt says $cmake_version but .release-please-manifest.json says $manifest_version."
+            echo "::error::Check the x-release-please-version marker trails the project() line."
+            exit 1
+          fi
       - uses: ./.github/actions/libmpv-cache
       - run: >-
           cmake -B build -G Ninja
