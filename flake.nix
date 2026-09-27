@@ -48,8 +48,10 @@
             # Same reason as the cross shell above. This is the shell .envrc
             # loads, so it is the one that needs it to hand day to day.
             gh
-            # The lint job checks scripts/ with it.
+            # The lint job checks scripts/ with shellcheck, and the release
+            # script tests filter their mocked GitHub responses with jq.
             shellcheck
+            jq
           ];
         };
       };

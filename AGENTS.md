@@ -7,9 +7,9 @@ rather than stylistic. Reasoning lives in [README.md](README.md),
 
 ## Tools live in nix, not on PATH
 
-- `cmake`, `ninja`, `nsis`, `gh` and `shellcheck` do not exist outside the nix
-  shells (`shellcheck` is in `.#core` only). A bare `cmake` is "command not
-  found" — prefix the command, do not install anything.
+- `cmake`, `ninja`, `nsis`, `gh`, `shellcheck` and `jq` do not exist outside
+  the nix shells (`shellcheck` and `jq` are in `.#core` only). A bare `cmake`
+  is "command not found" — prefix the command, do not install anything.
 - Two shells, two build directories:
   - `nix develop --command …` — mingw cross-build to Windows, builds into `build/`.
   - `nix develop .#core --command …` — native compiler for the portable core, builds into `build-core/`.

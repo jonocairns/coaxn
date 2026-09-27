@@ -9,25 +9,8 @@ if ! gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null; then
     exit 1
 fi
 
-version=${release_tag#v}
-artifacts=(
-    "build/coax-${version}-win64-setup.exe"
-    "build/coax-${version}-win64.zip"
-    "build/coax-${version}-win64-debug.zip"
-)
-
-# A release holding two of the three artifacts is worse than one holding none,
-# because it looks complete. Checked together, before any upload.
-missing=0
-for artifact in "${artifacts[@]}"; do
-    if [[ ! -f "$artifact" ]]; then
-        echo "ERROR: packaging did not produce $artifact" >&2
-        missing=1
-    fi
-done
-if (( missing )); then
-    exit 1
-fi
+artifact_list=$("$(dirname "${BASH_SOURCE[0]}")/check-release-artifacts.sh" "${release_tag#v}")
+mapfile -t artifacts <<<"$artifact_list"
 
 # --clobber so a re-run after a failed upload replaces what it left behind
 # rather than erroring on the half that already arrived.

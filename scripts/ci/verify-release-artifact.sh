@@ -4,13 +4,8 @@ set -euo pipefail
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT must be set}"
 
-# CPack names the artifacts from this line and the update check compiles it into
-# the binary, so the tag is derived from it rather than taken on trust.
-version=$(sed -n 's/^project(coax_native VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
-if [[ -z "$version" ]]; then
-    echo "ERROR: no project(coax_native VERSION ...) line in CMakeLists.txt" >&2
-    exit 1
-fi
+# The tag is derived from CMakeLists.txt rather than taken on trust.
+version=$("$(dirname "${BASH_SOURCE[0]}")/project-version.sh")
 release_tag="v${version}"
 
 # Set only when this run created the release. A mismatch means release-please
