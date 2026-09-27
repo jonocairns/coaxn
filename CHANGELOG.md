@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.0](https://github.com/jonocairns/coaxn/compare/v1.3.0...v1.4.0) (2026-09-26)
+
+
+### Features
+
+* capture delivery telemetry for sizing a lag behind live ([#39](https://github.com/jonocairns/coaxn/issues/39)) ([d8dea34](https://github.com/jonocairns/coaxn/commit/d8dea34cc9f6d2f38308d58ce5a15c20422b652f))
+* save the session log from the diagnostics panel ([#40](https://github.com/jonocairns/coaxn/issues/40)) ([0ee4cd5](https://github.com/jonocairns/coaxn/commit/0ee4cd5d9b2a1720e9c7d7a88104e5bcd02732e8))
+
+
+### Bug Fixes
+
+* measure recovery edge telemetry in source coordinates ([#36](https://github.com/jonocairns/coaxn/issues/36)) ([a849815](https://github.com/jonocairns/coaxn/commit/a8498150a32390816ebf230248e8aa27936a0273))
+* stop warbling live audio and rebuffering on chunked providers ([#38](https://github.com/jonocairns/coaxn/issues/38)) ([8ae265a](https://github.com/jonocairns/coaxn/commit/8ae265a0efbf35fe4c729156594b1d58f8681a35))
+
 ## [1.3.0](https://github.com/jonocairns/coaxn/compare/v1.2.1...v1.3.0) (2026-08-25)
 
 
