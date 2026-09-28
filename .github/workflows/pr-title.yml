@@ -17,9 +17,9 @@ jobs:
         run: |
           node <<'NODE'
           const title = process.env.PR_TITLE ?? "";
-          const valid = /^(?:feat|fix|perf|docs|test|ci|build|style|refactor|revert|deps|chore)(?:\([a-z0-9][a-z0-9-]*\))?!?: \S(?:.*\S)?$/.test(title);
+          const valid = /^(?:(?:feat|fix)(?:\([a-z0-9][a-z0-9-]*\))?!?|(?:perf|docs|test|ci|build|style|refactor|revert|deps|chore)(?:\([a-z0-9][a-z0-9-]*\))?): \S(?:.*\S)?$/.test(title);
           if (!valid) {
-            console.error("::error::Use a Conventional Commit title with a nonempty summary. Allowed types: feat, fix, perf, docs, test, ci, build, style, refactor, revert, deps, chore.");
+            console.error("::error::Use a Conventional Commit title with a nonempty summary. Only feat and fix may use !. Allowed types: feat, fix, perf, docs, test, ci, build, style, refactor, revert, deps, chore.");
             process.exitCode = 1;
           }
           NODE
