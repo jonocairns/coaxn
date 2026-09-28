@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/jonocairns/coaxn/compare/v1.4.0...v1.4.1) (2026-09-28)
+
+
+### Miscellaneous Chores
+
+* force a 1.4.1 release through the new pipeline ([439ab32](https://github.com/jonocairns/coaxn/commit/439ab32bd361cb55b7b5fb0aa6c27b84dbe2ce81))
+
 ## [1.4.0](https://github.com/jonocairns/coaxn/compare/v1.3.0...v1.4.0) (2026-09-26)
 
 
